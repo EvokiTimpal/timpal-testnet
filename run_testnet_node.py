@@ -18,9 +18,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent / "app"))
 
-# Force testnet config to use actual validator key on every startup
-import config_testnet
-sys.modules['config'] = config_testnet
+# Load testnet config BEFORE importing Node
+import app.config_testnet as config_testnet
+sys.modules["config"] = config_testnet
+config = config_testnet
 
 from node import Node
 from wallet import Wallet
@@ -36,51 +37,44 @@ class TestnetNode:
         
         os.makedirs(self.data_dir, exist_ok=True)
         
-        wallet_path = os.path.join(self.data_dir, "validator_wallet.json")
-        self.wallet = Wallet(wallet_path)
+        # -----------------------------------------------
+        # TESTNET: Load wallet.json and set genesis validator
+        # -----------------------------------------------
+        wallet_path = "wallet.json"
+        if not os.path.exists(wallet_path):
+            raise ValueError("wallet.json not found — cannot start testnet node")
+        
+        temp_wallet = Wallet(wallet_path)
         
         wallet_pin = os.environ.get("TIMPAL_WALLET_PIN")
         if not wallet_pin:
-            print(f"\n⚠️  ERROR: TIMPAL_WALLET_PIN environment variable not set!")
-            print(f"   Set it with: export TIMPAL_WALLET_PIN='your_secure_pin'")
-            print(f"   Minimum 6 characters required for security")
-            raise ValueError("TIMPAL_WALLET_PIN environment variable required")
+            raise ValueError("TIMPAL_WALLET_PIN environment variable not set — cannot load wallet.json")
         
-        if len(wallet_pin) < 6:
-            raise ValueError("TIMPAL_WALLET_PIN must be at least 6 characters")
+        if not temp_wallet.load_wallet(wallet_pin):
+            raise ValueError("Failed to decrypt wallet.json — wrong PIN or corrupted file")
         
-        # Check if this should be the genesis validator (using specific seed phrase)
-        genesis_seed = os.environ.get("GENESIS_SEED_CORRECT")
+        private_key = temp_wallet.private_key
+        public_key = temp_wallet.public_key
+        reward_address = temp_wallet.address
         
-        if not os.path.exists(wallet_path):
-            if genesis_seed:
-                print(f"\n🔑 Restoring GENESIS validator wallet from seed phrase...")
-                self.wallet.restore_wallet(genesis_seed, wallet_pin)
-                self.wallet.save_wallet(wallet_pin)
-                print(f"   Address: {self.wallet.address}")
-                print(f"   Wallet saved to: {wallet_path}")
-                print(f"   ✅ Genesis validator restored")
-            else:
-                print(f"\n🔑 Creating new validator wallet...")
-                self.wallet.create_new_wallet(wallet_pin)
-                print(f"   Address: {self.wallet.address}")
-                print(f"   Wallet saved to: {wallet_path}")
-                print(f"   ⚠️  BACKUP YOUR WALLET FILE: {wallet_path}")
-        else:
-            print(f"\n🔑 Loading existing validator wallet...")
-            if not self.wallet.load_wallet(wallet_pin):
-                raise ValueError("Failed to load wallet - wrong PIN or corrupted file")
-            print(f"   Address: {self.wallet.address}")
+        # Set genesis validator to match actual wallet
+        config.GENESIS_VALIDATORS = {
+            reward_address: public_key
+        }
+        
+        print(f"[TESTNET] Loaded validator key from wallet.json")
+        print(f"[TESTNET] Address: {reward_address}")
+        print(f"[TESTNET] Genesis validator set to: {reward_address}")
         
         ledger_data_dir = os.path.join(self.data_dir, "ledger")
         
+        # Create node with loaded validator keys
         self.node = Node(
-            device_id=self.wallet.address,
-            reward_address=self.wallet.address,
-            p2p_port=port,
-            private_key=self.wallet.private_key,
-            public_key=self.wallet.public_key,
             skip_device_check=True,
+            reward_address=reward_address,
+            private_key=private_key,
+            public_key=public_key,
+            p2p_port=port,
             data_dir=ledger_data_dir,
             use_production_storage=True,
             testnet_mode=True
@@ -201,7 +195,7 @@ class TestnetNode:
                     }, status=400)
                 
                 # Load wallet for this sender
-                wallet_path = os.path.join(self.data_dir, "validator_wallet.json")
+                wallet_path = "wallet.json"
                 
                 # Check if wallet exists
                 if not os.path.exists(wallet_path):
@@ -442,7 +436,7 @@ class TestnetNode:
         print(f"   Symbol: {config_testnet.SYMBOL}")
         print(f"   Port: {self.port}")
         print(f"   Data directory: {self.data_dir}")
-        print(f"   Validator address: {self.wallet.address}")
+        print(f"   Validator address: {self.node.reward_address}")
         print(f"   Seed nodes: {len(self.seed_nodes)}")
         
         if self.seed_nodes:
