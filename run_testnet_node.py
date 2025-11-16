@@ -18,6 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent / "app"))
 
+# Force testnet config to use actual validator key on every startup
 import config_testnet
 sys.modules['config'] = config_testnet
 

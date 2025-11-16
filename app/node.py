@@ -30,6 +30,14 @@ class Node:
         self.data_dir = data_dir
         self.use_production_storage = use_production_storage
         
+        # AUTO-ALIGN VALIDATOR WITH GENESIS CONFIG (TESTNET ONLY)
+        if config.CHAIN_ID == "timpal-testnet" and self.public_key and self.reward_address:
+            import config_testnet
+            config_testnet.GENESIS_VALIDATORS = {
+                self.reward_address: self.public_key
+            }
+            print(f"[TESTNET] Genesis validator set to: {self.reward_address}")
+        
         self.ledger = Ledger(data_dir=data_dir, use_production_storage=use_production_storage)
         self.mempool = Mempool()
         
