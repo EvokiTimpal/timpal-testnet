@@ -1,0 +1,70 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+
+# Virtual Environment
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Blockchain Data
+blockchain_data*/
+test_blockchain_data*/
+testnet_data*/
+testnet_data_node_*/
+
+# Wallet Files (CRITICAL: Never commit private keys!)
+*.json
+!pyproject.json
+!config.json
+
+# Logs
+*.log
+
+# Development environment files (exclude from repository)
+.replit
+replit.nix
+.config/
+.cache/
+.upm/
+attached_assets/
+test_temp/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Testing and simulation data
+test_ledger_data/
+test_ledger_prod_data/
+stress_results/
+sim_data/
+sim_data_json/
+sim_data_prod/
