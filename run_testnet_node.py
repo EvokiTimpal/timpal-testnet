@@ -41,7 +41,7 @@ from wallet import Wallet
 class TestnetNode:
     """TIMPAL Testnet Validator Node"""
     
-    def __init__(self, port: int = 8765, data_dir: str = None, seed_nodes: list = None):
+    def __init__(self, port: int = 8765, data_dir: str = None, seed_nodes: list = None, wallet_path: str = None):
         self.port = port
         self.data_dir = data_dir or f"testnet_data_node_{port}"
         self.seed_nodes = seed_nodes or []
@@ -49,11 +49,20 @@ class TestnetNode:
         os.makedirs(self.data_dir, exist_ok=True)
         
         # -----------------------------------------------
-        # TESTNET: Load wallet.json and set genesis validator
+        # TESTNET: Load wallet and set genesis validator
+        # Genesis node (port 9000) uses wallet.json
+        # Other validators use wallet_validator{port}.json (e.g., wallet_validator3000.json)
         # -----------------------------------------------
-        wallet_path = "wallet.json"
+        if wallet_path is None:
+            if port == 9000:
+                wallet_path = "wallet.json"
+            else:
+                wallet_path = f"wallet_validator{port}.json"
+        
         if not os.path.exists(wallet_path):
-            raise ValueError("wallet.json not found — cannot start testnet node")
+            raise ValueError(f"{wallet_path} not found — cannot start testnet node\n"
+                           f"💡 Create a wallet for this validator using: python3 wallet_cli.py\n"
+                           f"   Then rename wallet.json to {wallet_path}")
         
         temp_wallet = Wallet(wallet_path)
         
@@ -73,35 +82,42 @@ class TestnetNode:
             reward_address: public_key
         }
         
-        print(f"[TESTNET] Loaded validator key from wallet.json")
+        print(f"[TESTNET] Loaded validator key from {wallet_path}")
         print(f"[TESTNET] Address: {reward_address}")
-        print(f"[TESTNET] Genesis validator set to: {reward_address}")
+        if port == 9000:
+            print(f"[TESTNET] Genesis validator: {reward_address}")
+        else:
+            print(f"[TESTNET] Validator address: {reward_address}")
         
         ledger_data_dir = os.path.join(self.data_dir, "ledger")
         
         # -----------------------------------------------
-        # CRITICAL FIX: Write genesis validator to ledger BEFORE consensus starts
-        # This ensures the validator exists at height 0 so consensus sees 1 active validator
+        # GENESIS VALIDATOR ONLY: Pre-register the bootstrap node (port 9000)
+        # All other validators must self-register via validator_registration transaction
         # -----------------------------------------------
-        from ledger import Ledger
-        
-        print(f"🔧 Pre-initializing ledger with genesis validator...")
-        temp_ledger = Ledger(data_dir=ledger_data_dir, use_production_storage=True)
-        
-        # Add genesis validator to registry
-        temp_ledger.validator_registry[reward_address] = {
-            "public_key": public_key,
-            "stake": 0,
-            "device_id": "genesis",
-            "registered_at": 0
-        }
-        
-        # Save ledger state to disk
-        temp_ledger.save_state()
-        print(f"✅ Genesis validator written to ledger at {ledger_data_dir}")
-        
-        # Clean up temp ledger reference
-        del temp_ledger
+        if port == 9000:
+            from ledger import Ledger
+            
+            print(f"🔧 Pre-initializing ledger with genesis validator (bootstrap node only)...")
+            temp_ledger = Ledger(data_dir=ledger_data_dir, use_production_storage=True)
+            
+            # Add genesis validator to registry
+            temp_ledger.validator_registry[reward_address] = {
+                "public_key": public_key,
+                "stake": 0,
+                "device_id": "genesis",
+                "registered_at": 0,
+                "status": "genesis"
+            }
+            
+            # Save ledger state to disk
+            temp_ledger.save_state()
+            print(f"✅ Genesis validator written to ledger at {ledger_data_dir}")
+            
+            # Clean up temp ledger reference
+            del temp_ledger
+        else:
+            print(f"ℹ️  Validator node (port {port}) will self-register via transaction")
         
         # Create node with loaded validator keys
         self.node = Node(

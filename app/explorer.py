@@ -23,6 +23,7 @@ from explorer_assets import (
 import config
 import time
 import json
+import requests
 
 limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="TIMPAL Block Explorer", version="1.0.0")
@@ -1448,6 +1449,34 @@ async def get_stats(request: Request):
     }
 
 
+def fetch_validators_from_bootstrap():
+    """Safely fetch list of validators from the bootstrap node peers.
+       No writes, no state changes. Only reads."""
+    try:
+        # Bootstrap node always runs on localhost:9001 (HTTP API port)
+        resp = requests.get("http://localhost:9001/api/peers", timeout=2)
+        peer_list = resp.json()
+
+        validators = []
+        for peer in peer_list:
+            validators.append({
+                "address": peer.get("validator_address", "unknown"),
+                "public_key": "N/A",
+                "balance": 0,
+                "balance_tmpl": "0.00000000 TMPL",
+                "blocks_proposed": 0,
+                "status": "online",   # We only show connectivity, no logic changes
+                "registered_at": 0,
+                "device_id_preview": peer.get("device_id", "unknown")[:32] + '...' if peer.get("device_id") and len(peer.get("device_id", "")) > 32 else peer.get("device_id", "unknown"),
+                "source": "peer"  # Mark as discovered from peers
+            })
+
+        return validators
+
+    except Exception:
+        return []
+
+
 @app.get("/validators")
 @limiter.limit("30/minute")
 async def get_validators(request: Request):
@@ -1472,20 +1501,27 @@ async def get_validators(request: Request):
                 "blocks_proposed": block_count,
                 "status": info.get('status', 'unknown'),
                 "registered_at": info.get('registered_at', 0),
-                "device_id_preview": info.get('device_id', 'N/A')[:32] + '...' if info.get('device_id') and len(info.get('device_id', '')) > 32 else info.get('device_id', 'N/A')
+                "device_id_preview": info.get('device_id', 'N/A')[:32] + '...' if info.get('device_id') and len(info.get('device_id', '')) > 32 else info.get('device_id', 'N/A'),
+                "source": "local"  # Mark as local registry
             })
     
+    # Discover connected validators safely from bootstrap node peers
+    peer_validators = fetch_validators_from_bootstrap()
+    
+    # Combine local validators + peer validators
+    all_validators = validators + peer_validators
+    
     # Sort by registration time (oldest first)
-    validators.sort(key=lambda v: v.get('registered_at', 0))
+    all_validators.sort(key=lambda v: v.get('registered_at', 0))
     
     # Count active validators
-    active_count = sum(1 for v in validators if v['status'] == 'active')
+    active_count = sum(1 for v in all_validators if v['status'] == 'active' or v['status'] == 'online')
     
     return {
-        "validators": validators,
-        "total_count": len(validators),
+        "validators": all_validators,
+        "total_count": len(all_validators),
         "active_count": active_count,
-        "inactive_count": len(validators) - active_count
+        "inactive_count": len(all_validators) - active_count
     }
 
 

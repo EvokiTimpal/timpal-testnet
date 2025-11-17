@@ -56,7 +56,7 @@ The wallet will be saved to `wallet.json` (encrypted with your PIN).
 
 ---
 
-## Step 4: Official Bootstrap Node Information
+## Official Bootstrap Node Information
 
 The TIMPAL testnet uses a dedicated VPS bootstrap node:
 - **Bootstrap IP address:** `143.110.129.211`
@@ -65,12 +65,23 @@ The TIMPAL testnet uses a dedicated VPS bootstrap node:
 
 ---
 
+## Step 4: Set Your Wallet PIN
+
+Before starting your node, set your wallet PIN as an environment variable:
+
+```bash
+export TIMPAL_WALLET_PIN="your_secure_pin"
+```
+
+**Note:** Use `set TIMPAL_WALLET_PIN=your_secure_pin` instead of `export` on Windows.
+
+---
+
 ## Step 5: Start Your Validator Node
 
 **Every validator must connect to the official bootstrap node:**
 
 ```bash
-cd ..  # Go back to project root
 python3 run_testnet_node.py --port YOUR_PORT --seed ws://143.110.129.211:9000
 ```
 

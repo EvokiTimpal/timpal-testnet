@@ -7,6 +7,7 @@ Interactive command-line interface for creating and managing TIMPAL wallets
 import os
 import sys
 from app.wallet import Wallet
+from app.ledger import Ledger
 
 
 def print_banner():
@@ -143,6 +144,35 @@ def view_wallet_info():
         print(f"\n❌ Error loading wallet: {e}")
 
 
+def view_balance():
+    """Load existing wallet and display balance"""
+    if not os.path.exists("wallet.json"):
+        print("\n❌ No wallet found. Create or restore a wallet first.\n")
+        return
+
+    pin = input("\nEnter your wallet PIN: ").strip()
+
+    wallet = Wallet()
+    try:
+        wallet.load_wallet(pin)
+        address = wallet.get_address()
+        
+        # Load ledger to query balance
+        ledger = Ledger()
+        balance = ledger.get_balance(address)
+        balance_tmpl = balance / 100_000_000  # Convert from base units to TMPL
+
+        print("\n" + "="*60)
+        print("💰 WALLET BALANCE")
+        print("="*60)
+        print(f"\n📍 Address: {address}")
+        print(f"💵 Balance: {balance_tmpl:.8f} TMPL")
+        print("\n" + "="*60 + "\n")
+
+    except Exception as e:
+        print(f"\n❌ Error loading wallet: {e}")
+
+
 def main():
     """Main CLI interface"""
     print_banner()
@@ -173,30 +203,33 @@ def main():
         print("⚠️  A wallet already exists in this directory.")
         print("\nWhat would you like to do?")
         print("  [1] View wallet info")
-        print("  [2] Create new wallet (overwrites existing)")
-        print("  [3] Restore wallet from recovery phrase (overwrites existing)")
-        print("  [4] Exit")
-        choice = input("\nEnter your choice (1-4): ").strip()
+        print("  [2] View balance")
+        print("  [3] Create new wallet (overwrites existing)")
+        print("  [4] Restore wallet from recovery phrase (overwrites existing)")
+        print("  [5] Exit")
+        choice = input("\nEnter your choice (1-5): ").strip()
         
         if choice == "1":
             view_wallet_info()
         elif choice == "2":
+            view_balance()
+        elif choice == "3":
             confirm = input("\n⚠️  This will overwrite your existing wallet. Continue? (yes/no): ").strip().lower()
             if confirm == "yes":
                 create_new_wallet()
             else:
                 print("\n✅ Cancelled. Your existing wallet is safe.")
-        elif choice == "3":
+        elif choice == "4":
             confirm = input("\n⚠️  This will overwrite your existing wallet. Continue? (yes/no): ").strip().lower()
             if confirm == "yes":
                 restore_wallet()
             else:
                 print("\n✅ Cancelled. Your existing wallet is safe.")
-        elif choice == "4":
+        elif choice == "5":
             print("\n👋 Goodbye!")
             sys.exit(0)
         else:
-            print("\n❌ Invalid choice. Please enter a number between 1 and 4.")
+            print("\n❌ Invalid choice. Please enter a number between 1 and 5.")
             sys.exit(1)
 
 
