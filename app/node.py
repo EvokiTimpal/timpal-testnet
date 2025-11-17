@@ -48,7 +48,10 @@ class Node:
         
         # STAGE 3: Sync gating - prevent proposing until fully synced
         self.synced = False
-        self.MIN_PEERS = 1  # Minimum peers required before proposing (testnet mode)
+        
+        # BOOTSTRAP MODE DETECTION: Check dynamically during runtime
+        # This will be checked in mine_blocks() using actual p2p.seed_nodes
+        # (allows run_testnet_node.py to override seed_nodes after Node creation)
         self.SYNC_LAG_THRESHOLD = 5  # Blocks behind peers before re-entering sync mode
         
         # Block gossip: Track recently seen blocks to prevent infinite loops
@@ -492,10 +495,20 @@ class Node:
             # STAGE 3: Health checks before proposing
             peer_count = self.p2p.get_peer_count()
             
-            # Check if we have enough peers
-            if peer_count < self.MIN_PEERS:
+            # DYNAMIC BOOTSTRAP DETECTION: Check if seed_nodes are configured
+            # Bootstrap nodes (no seeds) can produce blocks with 0 peers
+            is_bootstrap = (len(self.p2p.seed_nodes) == 0)
+            min_peers_required = 0 if is_bootstrap else 1
+            
+            # Check if we have enough peers (bootstrap nodes skip this check)
+            if peer_count < min_peers_required:
                 if next_height % 30 == 0:  # Log every 30 blocks to avoid spam
-                    print(f"⚠️  HEALTH CHECK: Only {peer_count} peer(s) connected, waiting for {self.MIN_PEERS}+")
+                    mode = "BOOTSTRAP" if is_bootstrap else "NETWORK"
+                    print(f"⚠️  HEALTH CHECK ({mode}): {peer_count} peer(s) connected, MIN_PEERS = {min_peers_required}")
+                    if not is_bootstrap:
+                        print(f"   Waiting for {min_peers_required}+ peer(s) before producing blocks")
+                    else:
+                        print(f"   Bootstrap mode: producing blocks without peer requirements")
                 await asyncio.sleep(1.0)
                 continue
             
