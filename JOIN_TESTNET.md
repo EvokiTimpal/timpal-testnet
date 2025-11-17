@@ -47,8 +47,7 @@ pip3 install -r requirements.txt
 ## Step 3: Create Your Wallet
 
 ```bash
-cd app
-python wallet_cli.py
+python3 wallet_cli.py
 ```
 
 **CRITICAL: Save your recovery phrase!** This is the ONLY way to recover your wallet.
@@ -143,8 +142,7 @@ Your validator will automatically:
 Check your balance:
 
 ```bash
-cd app
-python wallet_cli.py
+python3 wallet_cli.py
 # Select "View Balance"
 ```
 

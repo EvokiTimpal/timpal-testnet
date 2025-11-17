@@ -17,8 +17,7 @@ No installation needed! The wallet is included with the TIMPAL node.
 ### Option 1: Using the Interactive CLI (Recommended)
 
 ```bash
-cd app
-python wallet_cli.py
+python3 wallet_cli.py
 ```
 
 This launches an interactive menu where you can:
@@ -36,8 +35,7 @@ The wallet CLI will guide you through the process with a simple menu.
 
 1. **Run the wallet CLI:**
    ```bash
-   cd app
-   python wallet_cli.py
+   python3 wallet_cli.py
    ```
 
 2. **Choose option 1** (Create new wallet)
@@ -67,8 +65,7 @@ If you already have a recovery phrase:
 
 1. **Run the wallet CLI:**
    ```bash
-   cd app
-   python wallet_cli.py
+   python3 wallet_cli.py
    ```
 
 2. **Choose option 2** (Restore wallet)
@@ -89,8 +86,7 @@ If you already have a wallet:
 
 1. **Run the wallet CLI:**
    ```bash
-   cd app
-   python wallet_cli.py
+   python3 wallet_cli.py
    ```
 
 2. **Choose option 1** (View wallet info)
@@ -141,7 +137,7 @@ You'll see:
 
 ### "No wallet found"
 - You need to create a wallet first
-- Run `python wallet_cli.py` and choose option 1
+- Run `python3 wallet_cli.py` and choose option 1
 
 ### "Invalid PIN"
 - Your PIN is incorrect
@@ -185,8 +181,7 @@ You'll see:
 ## 📊 Example Session
 
 ```
-$ cd app
-$ python wallet_cli.py
+$ python3 wallet_cli.py
 
 ============================================================
           TIMPAL WALLET GENERATOR

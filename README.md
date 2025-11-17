@@ -46,8 +46,7 @@ cd timpal-testnet
 pip install -r requirements.txt
 
 # 3. Create wallet (SAVE YOUR RECOVERY PHRASE!)
-cd app
-python wallet_cli.py
+python3 wallet_cli.py
 
 # 4. Start your node
 python node.py
@@ -85,11 +84,9 @@ cd timpal-testnet
 pip install -r requirements.txt
 
 # 2. Create wallet
-cd app
-python wallet_cli.py
+python3 wallet_cli.py
 
 # 3. Join testnet (connect to official bootstrap node)
-cd ..
 python3 run_testnet_node.py --port 8001 --seed ws://143.110.129.211:9000
 ```
 
