@@ -40,6 +40,8 @@ ALLOWED_ORIGINS = [
     "http://localhost:5000",
     "http://127.0.0.1:5000",
     "http://0.0.0.0:5000",
+    "http://143.110.129.211:6000",
+    "http://143.110.129.211",
 ]
 
 app.add_middleware(
