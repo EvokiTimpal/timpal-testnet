@@ -24,8 +24,8 @@ This guide walks you through joining the TIMPAL testnet as a validator.
 ## Step 1: Clone the Repository
 
 ```bash
-git clone https://github.com/[username]/timpal-blockchain.git
-cd timpal-blockchain
+git clone https://github.com/EvokiTimpal/timpal-testnet
+cd timpal-testnet
 ```
 
 ---

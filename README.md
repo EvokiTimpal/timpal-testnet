@@ -39,8 +39,8 @@ TIMPAL is a decentralized blockchain with equal rewards for all participants. Li
 
 ```bash
 # 1. Clone repository
-git clone https://github.com/[username]/timpal-blockchain.git
-cd timpal-blockchain
+git clone https://github.com/EvokiTimpal/timpal-testnet
+cd timpal-testnet
 
 # 2. Install dependencies
 pip install -r requirements.txt
@@ -80,8 +80,8 @@ Before the mainnet launches, you can join the TIMPAL testnet to:
 
 ```bash
 # 1. Clone and install (same as mainnet)
-git clone https://github.com/[username]/timpal-blockchain.git
-cd timpal-blockchain
+git clone https://github.com/EvokiTimpal/timpal-testnet
+cd timpal-testnet
 pip install -r requirements.txt
 
 # 2. Create wallet
