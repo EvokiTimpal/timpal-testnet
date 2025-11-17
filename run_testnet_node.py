@@ -5,9 +5,20 @@ TIMPAL TESTNET NODE LAUNCHER
 Simple script to run a TIMPAL testnet validator node.
 This connects to the testnet (separate from mainnet).
 
-Usage:
-    python run_testnet_node.py --port 8765
-    python run_testnet_node.py --port 8766 --seed ws://seed1.timpal.net:8765
+⚠️  IMPORTANT: Port 9000 is reserved for the bootstrap node only!
+    All other validators MUST use a different port + --seed flag.
+
+USAGE EXAMPLES:
+
+    # Bootstrap node (only the genesis operator runs this)
+    python3 run_testnet_node.py --port 9000
+
+    # Normal validator (everyone else - REQUIRED --seed flag)
+    python3 run_testnet_node.py --port 8001 --seed ws://143.110.129.211:9000
+    python3 run_testnet_node.py --port 8002 --seed ws://143.110.129.211:9000
+    python3 run_testnet_node.py --port 9005 --seed ws://143.110.129.211:9000
+
+⚠️  If you forget --seed, you will create a private chain instead of joining the testnet!
 """
 
 import sys
@@ -500,15 +511,17 @@ def main():
         description="Run a TIMPAL testnet validator node",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+⚠️  CRITICAL: Port 9000 is reserved for the bootstrap node only!
+
 Examples:
-  Start first node (bootstrap):
+  Bootstrap node (genesis operator only):
     python run_testnet_node.py --port 9000
   
-  Start second node (connect to first):
-    python run_testnet_node.py --port 3000 --seed ws://localhost:9000
+  Normal validator (all other participants):
+    python run_testnet_node.py --port 8001 --seed ws://143.110.129.211:9000
+    python run_testnet_node.py --port 8002 --seed ws://143.110.129.211:9000
   
-  Start third node (connect to first):
-    python run_testnet_node.py --port 3001 --seed ws://localhost:9000
+⚠️  All validators MUST include --seed or they will create a private chain!
 """
     )
     
@@ -535,6 +548,28 @@ Examples:
     )
     
     args = parser.parse_args()
+    
+    # VALIDATION: Prevent validators from using port 9000
+    if args.port == 9000 and args.seeds:
+        print("\n❌ ERROR: Port 9000 is reserved for the bootstrap node only.")
+        print("   Bootstrap nodes do NOT use the --seed flag.")
+        print("\n   If you are a validator joining the testnet:")
+        print("   Use a different port (8001, 8002, 8010, etc.) with --seed flag")
+        print("\n   Example:")
+        print("   python3 run_testnet_node.py --port 8001 --seed ws://143.110.129.211:9000")
+        sys.exit(1)
+    
+    # WARNING: If no seeds provided, user might be creating a private chain accidentally
+    if not args.seeds and args.port != 9000:
+        print("\n⚠️  WARNING: No --seed flag detected!")
+        print("   You are starting a standalone node that will create a new chain.")
+        print("   If you meant to join the existing testnet, add:")
+        print("   --seed ws://143.110.129.211:9000")
+        print("\n   Continue anyway? (y/N): ", end="")
+        response = input().strip().lower()
+        if response != 'y':
+            print("   Aborted. Restart with --seed flag to join the testnet.")
+            sys.exit(0)
     
     seed_nodes = args.seeds or []
     

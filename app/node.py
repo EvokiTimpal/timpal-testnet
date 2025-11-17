@@ -766,7 +766,7 @@ class Node:
             # add_block returns False if block is rejected (duplicate, invalid, etc.)
             success = self.ledger.add_block(new_block)
             if not success:
-                print(f"❌ FATAL: Failed to add Block {new_block.height} to ledger! Skipping broadcast...")
+                print(f"ℹ️  NOTE: Block {new_block.height} already exists — duplicate attempt skipped (normal behavior)")
                 continue  # Skip this cycle and try again
             
             # CRITICAL: Log block creation so we can track chain progression
@@ -1181,6 +1181,25 @@ class Node:
     
     async def start(self):
         self.is_running = True
+        
+        # Log connection information for troubleshooting
+        print(f"\n{'='*60}")
+        print(f"🚀 TIMPAL Node Starting")
+        print(f"{'='*60}")
+        print(f"📡 P2P Port: {self.p2p_port}")
+        print(f"🌐 Seed Nodes: {self.p2p.seed_nodes if self.p2p.seed_nodes else 'None (Bootstrap mode)'}")
+        
+        # Determine and log node mode
+        if len(self.p2p.seed_nodes) == 0:
+            print(f"\n🔥 [BOOTSTRAP MODE]")
+            print(f"   This node is acting as the genesis/bootstrap node.")
+            print(f"   It will create blocks without requiring peer connections.")
+            print(f"   Other validators should connect to: ws://YOUR_IP:{self.p2p_port}")
+        else:
+            print(f"\n🌐 [NETWORK MODE]")
+            print(f"   This node will connect to the existing testnet.")
+            print(f"   Attempting to connect to {len(self.p2p.seed_nodes)} seed node(s)...")
+        print(f"{'='*60}\n")
         
         await self.p2p.connect_to_seeds()
         

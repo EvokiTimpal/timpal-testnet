@@ -66,6 +66,80 @@ Check **GitHub Discussions** to:
 
 After 10+ nodes are connected, the network becomes self-sustaining!
 
+### 🧪 Testnet: Join Before Mainnet Launch
+
+Before the mainnet launches, you can join the TIMPAL testnet to:
+- Test your validator setup
+- Practice wallet management
+- Verify your node runs correctly on your hardware
+- Earn testnet TMPL (no real value, testing only)
+
+**⚠️ CRITICAL: Port 9000 is reserved for the bootstrap node only!**
+
+**How to Join:**
+
+```bash
+# 1. Clone and install (same as mainnet)
+git clone https://github.com/[username]/timpal-blockchain.git
+cd timpal-blockchain
+pip install -r requirements.txt
+
+# 2. Create wallet
+cd app
+python wallet_cli.py
+
+# 3. Join testnet (connect to official bootstrap node)
+cd ..
+python3 run_testnet_node.py --port 8001 --seed ws://143.110.129.211:9000
+```
+
+**Port Selection:**
+- Port `9000` = Bootstrap node only (testnet operator)
+- Ports `8001`, `8002`, `8010`, `9005`, etc. = All validators (you!)
+
+**📖 Full Instructions:** See **[Join_Testnet.md](Join_Testnet.md)** for complete step-by-step guide.
+
+**⚠️ Important:** Always include `--seed ws://143.110.129.211:9000` or you will accidentally create a private chain!
+
+### 🧭 Running the TIMPAL Block Explorer
+
+The TIMPAL Block Explorer provides a web interface to view blockchain data, transactions, validators, and network statistics.
+
+**Default Port (5000):**
+```bash
+python3 app/explorer.py
+```
+
+**Custom Port:**
+```bash
+# Use any available port
+python3 app/explorer.py --port 8080
+python3 app/explorer.py --port 6000
+python3 app/explorer.py --port 3000
+```
+
+**The explorer will start and show:**
+```
+Starting TIMPAL Block Explorer on port <port>...
+Explorer URL: http://0.0.0.0:<port>
+```
+
+**Access in your browser:**
+- `http://localhost:<port>`
+- `http://0.0.0.0:<port>`
+- `http://YOUR_MACHINE_IP:<port>`
+
+**Security Note:**
+- CORS settings currently allow API requests only from `http://localhost:5000`
+- This does NOT prevent you from viewing the explorer UI on any port
+- The web interface works on all ports; only API cross-origin requests are restricted
+
+**Troubleshooting:**
+- If port 5000 is busy (macOS ControlCenter uses it), simply start the explorer on a different port:
+  ```bash
+  python3 app/explorer.py --port 6000
+  ```
+
 ### Documentation
 
 - **[WHITEPAPER.md](WHITEPAPER.md)** - 📄 Technical whitepaper (READ THIS FIRST)

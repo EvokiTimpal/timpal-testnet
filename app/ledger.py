@@ -158,6 +158,7 @@ class Ledger:
         # CRITICAL SECURITY #1: Prevent duplicate blocks at same height
         if block.height < len(self.blocks):
             print(f"REJECT: Block at height {block.height} already exists (chain has {len(self.blocks)} blocks)")
+            print(f"ℹ️  Duplicate proposer window detected — block already accepted (normal behavior)")
             return False
         
         # CRITICAL SECURITY #2: Enforce sequential heights (no gaps)

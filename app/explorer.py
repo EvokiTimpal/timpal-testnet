@@ -3,6 +3,7 @@ import os
 import uvicorn
 import asyncio
 import aiohttp
+import argparse
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request, Form
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
@@ -2486,6 +2487,10 @@ app.router.lifespan_context = lifespan
 
 
 if __name__ == "__main__":
-    print("Starting TIMPAL Block Explorer on port 5000...")
-    print("Explorer URL: http://0.0.0.0:5000")
-    uvicorn.run(app, host="0.0.0.0", port=5000, log_level="info")
+    parser = argparse.ArgumentParser(description="TIMPAL Block Explorer")
+    parser.add_argument("--port", type=int, default=5000, help="Port to run the explorer on (default: 5000)")
+    args = parser.parse_args()
+    
+    print(f"Starting TIMPAL Block Explorer on port {args.port}...")
+    print(f"Explorer URL: http://0.0.0.0:{args.port}")
+    uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="info")
