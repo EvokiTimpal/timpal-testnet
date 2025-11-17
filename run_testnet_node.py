@@ -68,6 +68,30 @@ class TestnetNode:
         
         ledger_data_dir = os.path.join(self.data_dir, "ledger")
         
+        # -----------------------------------------------
+        # CRITICAL FIX: Write genesis validator to ledger BEFORE consensus starts
+        # This ensures the validator exists at height 0 so consensus sees 1 active validator
+        # -----------------------------------------------
+        from ledger import Ledger
+        
+        print(f"🔧 Pre-initializing ledger with genesis validator...")
+        temp_ledger = Ledger(data_dir=ledger_data_dir, use_production_storage=True)
+        
+        # Add genesis validator to registry
+        temp_ledger.validator_registry[reward_address] = {
+            "public_key": public_key,
+            "stake": 0,
+            "device_id": "genesis",
+            "registered_at": 0
+        }
+        
+        # Save ledger state to disk
+        temp_ledger.save_state()
+        print(f"✅ Genesis validator written to ledger at {ledger_data_dir}")
+        
+        # Clean up temp ledger reference
+        del temp_ledger
+        
         # Create node with loaded validator keys
         self.node = Node(
             skip_device_check=True,
@@ -455,6 +479,9 @@ class TestnetNode:
         
         # Start HTTP API server
         asyncio.create_task(self.run_http_api())
+        
+        # Start block production loop (TESTNET ONLY)
+        asyncio.create_task(self.node.mine_blocks())
         
         print(f"✅ Node is running!")
         print(f"\n💡 Other nodes can connect to: ws://YOUR_IP:{self.port}")
