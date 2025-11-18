@@ -41,7 +41,7 @@ from wallet import Wallet
 class TestnetNode:
     """TIMPAL Testnet Validator Node"""
     
-    def __init__(self, port: int = 8765, data_dir: str = None, seed_nodes: list = None, wallet_path: str = None):
+    def __init__(self, port: int = 8765, data_dir: str = None, seed_nodes: list = None):
         self.port = port
         self.data_dir = data_dir or f"testnet_data_node_{port}"
         self.seed_nodes = seed_nodes or []
@@ -49,20 +49,13 @@ class TestnetNode:
         os.makedirs(self.data_dir, exist_ok=True)
         
         # -----------------------------------------------
-        # TESTNET: Load wallet and set genesis validator
-        # Genesis node (port 9000) uses wallet.json
-        # Other validators use wallet_validator{port}.json (e.g., wallet_validator3000.json)
+        # TESTNET: Load wallet.json (one wallet per device)
         # -----------------------------------------------
-        if wallet_path is None:
-            if port == 9000:
-                wallet_path = "wallet.json"
-            else:
-                wallet_path = f"wallet_validator{port}.json"
+        wallet_path = "wallet.json"
         
         if not os.path.exists(wallet_path):
-            raise ValueError(f"{wallet_path} not found — cannot start testnet node\n"
-                           f"💡 Create a wallet for this validator using: python3 wallet_cli.py\n"
-                           f"   Then rename wallet.json to {wallet_path}")
+            raise ValueError(f"wallet.json not found — cannot start testnet node\n"
+                           f"💡 Create a wallet first: python3 wallet_cli.py")
         
         temp_wallet = Wallet(wallet_path)
         
@@ -82,12 +75,9 @@ class TestnetNode:
             reward_address: public_key
         }
         
-        print(f"[TESTNET] Loaded validator key from {wallet_path}")
+        print(f"[TESTNET] Loaded validator key from wallet.json")
         print(f"[TESTNET] Address: {reward_address}")
-        if port == 9000:
-            print(f"[TESTNET] Genesis validator: {reward_address}")
-        else:
-            print(f"[TESTNET] Validator address: {reward_address}")
+        print(f"[TESTNET] Genesis validator: {reward_address}")
         
         ledger_data_dir = os.path.join(self.data_dir, "ledger")
         
@@ -120,8 +110,9 @@ class TestnetNode:
             print(f"ℹ️  Validator node (port {port}) will self-register via transaction")
         
         # Create node with loaded validator keys
+        # ENFORCES: One device = One validator (same as mainnet)
         self.node = Node(
-            skip_device_check=True,
+            skip_device_check=False,  # Enable device fingerprint enforcement
             reward_address=reward_address,
             private_key=private_key,
             public_key=public_key,

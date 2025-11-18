@@ -77,40 +77,18 @@ export TIMPAL_WALLET_PIN="your_secure_pin"
 
 ---
 
-## Step 5: Rename Your Wallet for Your Validator Port
+## Step 5: Start Your Validator Node
 
-The node launcher now requires a unique wallet file per validator:
+### ⚠️ Important: One Device = One Validator
 
-- **Bootstrap node (port 9000):** uses `wallet.json`
-- **Validator nodes (any other port):** must use `wallet_validator<PORT>.json`
+TIMPAL enforces a **one device, one validator** rule (same as mainnet):
+- Each device can run only **ONE validator node**
+- If you try to start a second node on the same device, it will refuse to start
+- This prevents validator centralization and ensures fair distribution
 
-After creating your wallet, rename it according to your chosen port:
-
-```bash
-# If your validator uses port 8001:
-mv wallet.json wallet_validator8001.json
-
-# If your validator uses port 8012:
-mv wallet.json wallet_validator8012.json
-
-# If your validator uses port 9005:
-mv wallet.json wallet_validator9005.json
-```
-
-**You must do this BEFORE starting the node or it will fail registration.**
-
-### ⚠️ WARNING
-
-If you skip the wallet rename step, the node will:
-- ❌ Fail validator registration
-- ❌ Never appear on the explorer
-- ❌ Never receive block rewards
-- ❌ Never produce blocks
-- ❌ Possibly fork a private chain
+**Your wallet.json file identifies your validator - keep it safe!**
 
 ---
-
-## Step 6: Start Your Validator Node
 
 **Every validator must connect to the official bootstrap node:**
 
@@ -124,23 +102,18 @@ python3 run_testnet_node.py --port YOUR_PORT --seed ws://143.110.129.211:9000
 ### Examples
 
 ```bash
-# Validator on port 8001
-export TIMPAL_WALLET_PIN="123456"
+# Set your wallet PIN
+export TIMPAL_WALLET_PIN="your_secure_pin"
+
+# Start validator (choose any available port except 9000)
 python3 run_testnet_node.py --port 8001 --seed ws://143.110.129.211:9000
-# Uses wallet_validator8001.json
-
-# Validator on port 8012
-export TIMPAL_WALLET_PIN="123456"
+# OR
 python3 run_testnet_node.py --port 8012 --seed ws://143.110.129.211:9000
-# Uses wallet_validator8012.json
-
-# Validator on port 9005
-export TIMPAL_WALLET_PIN="123456"
+# OR
 python3 run_testnet_node.py --port 9005 --seed ws://143.110.129.211:9000
-# Uses wallet_validator9005.json
 ```
 
-**Note:** After syncing, the node will automatically submit a validator registration transaction. If the seed node is busy, registration will retry every 5 seconds until successful.
+**Note:** After syncing, the node will automatically submit a validator registration transaction. Registration will retry every 5 seconds until successful.
 
 ### ⚠️ Common Mistakes to Avoid
 
@@ -163,7 +136,7 @@ python3 run_testnet_node.py --port 8001 --seed ws://143.110.129.211:9000
 
 ---
 
-## Step 7: Verify Your Node is Running
+## Step 6: Verify Your Node is Running
 
 You should see log messages like:
 
@@ -184,7 +157,7 @@ You should see log messages like:
 
 ---
 
-## Step 8: Monitor Your Rewards
+## Step 7: Monitor Your Rewards
 
 Your validator will automatically:
 - Sync with the existing blockchain
@@ -268,22 +241,11 @@ python3 app/explorer.py --port 6000
    python3 run_testnet_node.py --port 8001 --seed ws://143.110.129.211:9000
    ```
 
-### "wallet_validator<PORT>.json not found"
+### "Only one validator per device is allowed"
 
-**Cause:** You didn't rename your wallet file after creating it.
+**Cause:** You tried to start a second validator node on the same device.
 
-**Fix:**
-1. If `wallet.json` exists, rename it:
-   ```bash
-   # For port 8001:
-   mv wallet.json wallet_validator8001.json
-   ```
-2. If `wallet.json` doesn't exist, create a new wallet:
-   ```bash
-   python3 wallet_cli.py
-   # Then rename it for your port
-   mv wallet.json wallet_validator8001.json
-   ```
+**Fix:** TIMPAL enforces one validator per device (same as mainnet). This is intentional and prevents validator centralization. If you need to run multiple validators, use separate physical devices or VPS instances.
 
 ### "ERROR: Port 9000 is reserved for the bootstrap node only"
 
