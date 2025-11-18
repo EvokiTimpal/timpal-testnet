@@ -3,12 +3,12 @@ import os
 import tempfile
 import time
 from typing import Dict, List, Optional, Union, Tuple, Set
-from block import Block
-from transaction import Transaction
-from fork_choice import ForkChoice
-from validator_economics import ValidatorEconomics
-from attestation import AttestationManager
-from vrf import VRFManager
+from app.block import Block
+from app.transaction import Transaction
+from app.fork_choice import ForkChoice
+from app.validator_economics import ValidatorEconomics
+from app.attestation import AttestationManager
+from app.vrf import VRFManager
 import config
 
 

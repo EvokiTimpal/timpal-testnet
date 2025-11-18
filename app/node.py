@@ -4,14 +4,14 @@ import uuid
 import hashlib
 import aiohttp
 from typing import Optional, Dict, Any
-from block import Block
-from transaction import Transaction
-from ledger import Ledger
-from mempool import Mempool
-from consensus import Consensus
-from rewards import RewardCalculator
-from p2p import P2PNetwork
-from device_fingerprint import enforce_single_node
+from app.block import Block
+from app.transaction import Transaction
+from app.ledger import Ledger
+from app.mempool import Mempool
+from app.consensus import Consensus
+from app.rewards import RewardCalculator
+from app.p2p import P2PNetwork
+from app.device_fingerprint import enforce_single_node
 import config
 
 
@@ -75,44 +75,9 @@ class Node:
             self.consensus.set_validator_set(on_chain_validators)
         
         # AUTO-REGISTER AS VALIDATOR (On-Chain Decentralization!)
-        # Create and broadcast validator registration transaction to ALL nodes
+        # CRITICAL FIX: Registration check moved to start() AFTER sync
+        # This ensures we check against synced ledger state, not empty initial state
         self.pending_validator_registration = None
-        
-        if self.public_key and self.reward_address and self.private_key:
-            # Generate device hash for Sybil resistance
-            device_hash = hashlib.sha256(self.device_id.encode()).hexdigest()
-            
-            # Check if already registered
-            if not self.ledger.is_validator_registered(self.reward_address):
-                # Create validator registration transaction
-                # This will be broadcast to ALL nodes and included in the next block
-                nonce = self.ledger.get_nonce(self.reward_address)
-                
-                reg_tx = Transaction.create_validator_registration(
-                    sender=self.reward_address,
-                    public_key=self.public_key,
-                    device_id=device_hash,
-                    timestamp=time.time(),
-                    nonce=nonce
-                )
-                
-                # Sign the transaction
-                reg_tx.sign(self.private_key)
-                
-                # Store for broadcasting after node starts
-                self.pending_validator_registration = reg_tx
-                
-                print(f"🎉 Validator registration transaction created!")
-                print(f"   Address: {self.reward_address}")
-                print(f"   Device: {device_hash[:32]}...")
-                print(f"   📡 Will broadcast to network when node starts")
-                print(f"   ⛓️ Registration will be on-chain after next block")
-            else:
-                print(f"✅ Already registered as validator: {self.reward_address}")
-                print(f"   Total validators: {self.ledger.get_validator_count()}")
-        else:
-            print(f"⚠️ Cannot register as validator: Missing wallet credentials")
-            print(f"   Create a wallet first: python app/wallet.py")
         
         # CRITICAL FIX: Set callback for online validator detection
         # This allows Ledger to check which validators are actually connected via P2P
@@ -144,7 +109,7 @@ class Node:
         Returns:
             set: Addresses of validators with active P2P connections
         """
-        from crypto_utils import derive_address
+        from app.crypto_utils import derive_address
         
         connected_validators = set()
         
@@ -1248,6 +1213,39 @@ class Node:
         checkpoint_validators = self.ledger.get_validator_set_at_checkpoint(current_height)
         if checkpoint_validators:
             self.consensus.set_validator_set(checkpoint_validators)
+        
+        # CRITICAL FIX: Check validator registration AFTER sync completes
+        # This ensures we check against synced ledger state, not empty initial state
+        if self.public_key and self.reward_address and self.private_key:
+            # Generate device hash for Sybil resistance
+            device_hash = hashlib.sha256(self.device_id.encode()).hexdigest()
+            
+            # Check if already registered (against synced ledger)
+            if not self.ledger.is_validator_registered(self.reward_address):
+                # Create validator registration transaction
+                nonce = self.ledger.get_nonce(self.reward_address)
+                
+                reg_tx = Transaction.create_validator_registration(
+                    sender=self.reward_address,
+                    public_key=self.public_key,
+                    device_id=device_hash,
+                    timestamp=time.time(),
+                    nonce=nonce
+                )
+                
+                # Sign the transaction
+                reg_tx.sign(self.private_key)
+                
+                # Store for broadcasting
+                self.pending_validator_registration = reg_tx
+                
+                print(f"🎉 Validator registration transaction created (post-sync)!")
+                print(f"   Address: {self.reward_address}")
+                print(f"   Device: {device_hash[:32]}...")
+                print(f"   📡 Will broadcast to network after 5 second delay")
+            else:
+                print(f"✅ Already registered as validator: {self.reward_address}")
+                print(f"   Total validators: {self.ledger.get_validator_count()}")
         
         # Broadcast pending validator registration transaction (if any) with delayed retry
         if self.pending_validator_registration:
