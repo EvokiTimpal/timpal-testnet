@@ -193,6 +193,14 @@ class Node:
             block = Block.from_dict(data["block"])
             latest = self.ledger.get_latest_block()
             
+            # 🛡️ TESTNET BOOTSTRAP PROTECTION
+            # Ignore any foreign blocks when running the bootstrap node in testnet mode
+            if getattr(self, 'testnet_mode', False) and not self.p2p.seed_nodes:
+                local_height = latest.height if latest else 0
+                if block.height > local_height + 1:
+                    print(f"🛑 TESTNET BOOTSTRAP: Ignoring foreign block {block.height} (bootstrap node only accepts local blocks)")
+                    return
+            
             # PERMANENT FIX: Handle height gaps to prevent deadlock
             # If we receive a future block, trigger sync to backfill missing blocks
             if latest and block.height > latest.height + 1:
