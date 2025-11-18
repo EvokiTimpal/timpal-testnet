@@ -208,6 +208,28 @@ Explorer URL: http://0.0.0.0:<port>
 
 ---
 
+## 🔄 Resetting Testnet (Starting Fresh from Genesis)
+
+If you need to reset your local testnet blockchain and start from height 0:
+
+```bash
+# Stop your node (Ctrl+C), then restart with --reset flag:
+export TIMPAL_WALLET_PIN="your_secure_pin"
+python3 run_testnet_node.py --port 9000 --reset
+
+# For validators joining the public testnet:
+python3 run_testnet_node.py --port 8001 --seed ws://143.110.129.211:9000 --reset
+```
+
+⚠️ **WARNING:** The `--reset` flag **deletes all your local blockchain data**! Use this only when you need to start completely fresh.
+
+**When to use `--reset`:**
+- Testing new changes to the testnet from genesis
+- Your blockchain data is corrupted
+- You want to sync fresh from the network
+
+---
+
 ## Troubleshooting
 
 ### Port 5000 is Busy

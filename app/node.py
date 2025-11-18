@@ -995,6 +995,14 @@ class Node:
             end_height: Last missing block height
         """
         
+        # -----------------------------------------------
+        # TESTNET BOOTSTRAP FIX: Skip backfill when running as bootstrap node
+        # -----------------------------------------------
+        if getattr(self, 'testnet_mode', False) and not self.p2p.seed_nodes:
+            print(f"⚠️  TESTNET BOOTSTRAP: No seed nodes configured, skipping backfill.")
+            print(f"   This node is the canonical chain starting from genesis.")
+            return
+        
         print(f"🔄 BACKFILL: Fetching blocks {start_height} to {end_height}...")
         
         # Build list of HTTP endpoints to try
@@ -1013,9 +1021,11 @@ class Node:
                     except ValueError:
                         pass
         
-        # Try localhost ports (for local testnet nodes)
-        for port in [9001, 3001, 3003, 6001]:
-            peer_http_urls.append(f"http://localhost:{port}")
+        # Try localhost ports (for local testnet nodes) - ONLY for mainnet
+        # Testnet validators must use explicit --seed configuration
+        if not getattr(self, 'testnet_mode', False):
+            for port in [9001, 3001, 3003, 6001]:
+                peer_http_urls.append(f"http://localhost:{port}")
         
         # CRITICAL FIX: Split requests into chunks of 100 blocks (server limit)
         # Server enforces max 100 blocks per request to prevent memory issues
