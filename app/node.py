@@ -29,6 +29,7 @@ class Node:
         self.public_key = public_key
         self.data_dir = data_dir
         self.use_production_storage = use_production_storage
+        self.testnet_mode = testnet_mode
         
         self.ledger = Ledger(data_dir=data_dir, use_production_storage=use_production_storage)
         self.mempool = Mempool()
