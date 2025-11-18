@@ -18,6 +18,9 @@ USAGE EXAMPLES:
     python3 run_testnet_node.py --port 8002 --seed ws://143.110.129.211:9000
     python3 run_testnet_node.py --port 9005 --seed ws://143.110.129.211:9000
 
+    # Reset testnet: Start fresh from genesis (deletes local blockchain data)
+    python3 run_testnet_node.py --port 9000 --reset
+
 ⚠️  If you forget --seed, you will create a private chain instead of joining the testnet!
 """
 
@@ -41,10 +44,19 @@ from wallet import Wallet
 class TestnetNode:
     """TIMPAL Testnet Validator Node"""
     
-    def __init__(self, port: int = 8765, data_dir: str = None, seed_nodes: list = None):
+    def __init__(self, port: int = 8765, data_dir: str = None, seed_nodes: list = None, reset: bool = False):
         self.port = port
         self.data_dir = data_dir or f"testnet_data_node_{port}"
         self.seed_nodes = seed_nodes or []
+        
+        # -----------------------------------------------
+        # TESTNET RESET: Delete blockchain data if --reset flag is set
+        # -----------------------------------------------
+        if reset and os.path.exists(self.data_dir):
+            import shutil
+            print(f"\n🔄 RESET MODE: Deleting existing testnet data at {self.data_dir}")
+            shutil.rmtree(self.data_dir)
+            print(f"✅ Testnet data cleared - starting fresh from genesis\n")
         
         os.makedirs(self.data_dir, exist_ok=True)
         
@@ -554,6 +566,12 @@ Examples:
         help="Seed node address (can be specified multiple times). Example: ws://192.168.1.10:9000"
     )
     
+    parser.add_argument(
+        "--reset",
+        action="store_true",
+        help="🔄 Reset testnet: Delete all blockchain data and start fresh from genesis (⚠️ WARNING: This deletes your local blockchain!)"
+    )
+    
     args = parser.parse_args()
     
     # VALIDATION: Prevent validators from using port 9000
@@ -583,7 +601,8 @@ Examples:
     node = TestnetNode(
         port=args.port,
         data_dir=args.data_dir,
-        seed_nodes=seed_nodes
+        seed_nodes=seed_nodes,
+        reset=args.reset
     )
     
     try:
