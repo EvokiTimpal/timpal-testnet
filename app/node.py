@@ -118,6 +118,21 @@ class Node:
         # Used for reward distribution when attestations are unavailable
         self.ledger.set_online_validators_callback(self.get_connected_validators)
     
+    async def delayed_registration(self, tx):
+        """
+        Delayed validator registration with retry logic.
+        Waits for block sync before submitting registration transaction.
+        """
+        await asyncio.sleep(5)  # allow time for block sync
+        print("⏳ Delayed registration: submitting validator registration TX...")
+        
+        if not self.submit_transaction(tx):
+            print("❌ Validator registration failed — will retry in 5 seconds")
+            await asyncio.sleep(5)
+            asyncio.create_task(self.delayed_registration(tx))
+        else:
+            print("✅ Validator successfully registered AND saved to ledger!")
+    
     def get_connected_validators(self) -> set:
         """
         Get validator addresses that are currently connected via P2P.
@@ -1215,22 +1230,11 @@ class Node:
         if checkpoint_validators:
             self.consensus.set_validator_set(checkpoint_validators)
         
-        # Broadcast pending validator registration transaction (if any)
+        # Broadcast pending validator registration transaction (if any) with delayed retry
         if self.pending_validator_registration:
-            await asyncio.sleep(2)  # Wait for P2P connections to establish
-            
-            # Add to our own mempool
-            self.mempool.add_transaction(self.pending_validator_registration)
-            
-            # Broadcast to network
-            await self.p2p.broadcast("new_transaction", {
-                "transaction": self.pending_validator_registration.to_dict()
-            })
-            
-            print(f"📡 Validator registration broadcast to network!")
-            print(f"   Waiting for inclusion in next block...")
-            
-            self.pending_validator_registration = None  # Clear after broadcasting
+            print(f"📡 Starting delayed validator registration...")
+            asyncio.create_task(self.delayed_registration(self.pending_validator_registration))
+            self.pending_validator_registration = None  # Clear to avoid double-registration
         
         await asyncio.gather(
             self.mine_blocks(),
