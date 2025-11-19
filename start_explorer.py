@@ -24,10 +24,10 @@ if __name__ == "__main__":
     
     # Import uvicorn and explorer after path is set
     import uvicorn
-    from explorer import explorer
+    from explorer import app as explorer_app
     
     print(f"Starting TIMPAL Block Explorer on port {args.port}...")
     print(f"Explorer URL: http://0.0.0.0:{args.port}")
     print(f"Press Ctrl+C to stop")
     
-    uvicorn.run(explorer.app, host="0.0.0.0", port=args.port, log_level="info")
+    uvicorn.run(explorer_app, host="0.0.0.0", port=args.port, log_level="info")
