@@ -114,6 +114,7 @@ class P2PNetwork:
         peer_ip = self._get_peer_ip(websocket)
         
         if self._is_ip_rate_limited(peer_ip):
+            print(f"🚫 P2P: Rejected incoming connection from {peer_ip} - rate limited or banned")
             await websocket.close()
             return
         
@@ -128,11 +129,13 @@ class P2PNetwork:
         self.peer_ips[peer_id] = peer_ip
         self.ip_connection_count[peer_ip] += 1
         
+        print(f"✅ P2P: Accepted incoming connection from {peer_ip} (peer_id: {peer_id[:8]}...)")
+        
         try:
             async for message in websocket:
                 await self.handle_message(message, peer_id, websocket)
         except websockets.exceptions.ConnectionClosed:
-            pass
+            print(f"🔌 P2P: Connection closed from {peer_ip} (peer_id: {peer_id[:8]}...)")
         finally:
             if peer_id in self.peers:
                 del self.peers[peer_id]
@@ -191,6 +194,7 @@ class P2PNetwork:
                 device_id = data.get("device_id")
                 if device_id and device_id not in self.known_device_ids:
                     self.known_device_ids.add(device_id)
+                    print(f"🤝 P2P: Completed handshake with peer {peer_id[:8]}... (device: {device_id[:16]}...)")
             
             elif message_type == "peer_list":
                 peers = data.get("peers", [])
@@ -420,6 +424,8 @@ class P2PNetwork:
         if peer_address == f"ws://localhost:{self.port}":
             return
         
+        print(f"🔄 P2P: Attempting to connect to {peer_address}...")
+        
         try:
             websocket = await asyncio.wait_for(
                 websockets.connect(peer_address),
@@ -452,24 +458,39 @@ class P2PNetwork:
             
             await websocket.send(json.dumps(announce_msg))
             
+            print(f"✅ P2P: Connected to {peer_address} successfully!")
+            
             asyncio.create_task(self.handle_outbound_peer(peer_address, websocket))
             
-        except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
-            pass
-        except Exception:
-            pass
+        except asyncio.TimeoutError:
+            print(f"⏱️  P2P: Connection to {peer_address} timed out after 5 seconds")
+            print(f"   Possible causes: Node offline, firewall blocking, wrong IP/port")
+        except ConnectionRefusedError:
+            print(f"🚫 P2P: Connection to {peer_address} refused")
+            print(f"   Possible causes: Node not running, port not open, firewall blocking")
+        except OSError as e:
+            print(f"⚠️  P2P: Network error connecting to {peer_address}: {e}")
+            print(f"   Possible causes: DNS resolution failed, network unreachable, firewall")
+        except ValueError as e:
+            print(f"🔐 P2P: Authentication error connecting to {peer_address}: {e}")
+        except Exception as e:
+            print(f"❌ P2P: Unexpected error connecting to {peer_address}: {type(e).__name__}: {e}")
     
     async def handle_outbound_peer(self, peer_address: str, websocket):
         try:
             async for message in websocket:
                 await self.handle_message(message, peer_address, websocket)
-        except websockets.exceptions.ConnectionClosed:
-            pass
-        except Exception:
-            pass
+        except websockets.exceptions.ConnectionClosed as e:
+            print(f"🔌 P2P: Outbound connection to {peer_address} closed")
+            if e.code:
+                print(f"   Close code: {e.code}, reason: {e.reason or 'none'}")
+        except Exception as e:
+            print(f"⚠️  P2P: Unexpected error in outbound connection to {peer_address}")
+            print(f"   Error: {type(e).__name__}: {e}")
         finally:
             if peer_address in self.outbound_peers:
                 del self.outbound_peers[peer_address]
+                print(f"🔗 P2P: Removed outbound peer {peer_address} from active connections")
     
     async def connect_to_seeds(self):
         for seed_node in self.seed_nodes:

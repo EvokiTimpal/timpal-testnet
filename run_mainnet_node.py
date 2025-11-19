@@ -474,6 +474,14 @@ class MainnetNode:
 
 
 def main():
+    # ==========================================
+    # 🔒 MAINNET SAFETY: NO RESET FLAG ALLOWED
+    # ==========================================
+    # CRITICAL: This is the mainnet launcher - NEVER add a --reset flag here!
+    # Testnet has --reset for development, but mainnet data is PERMANENT.
+    # Any destructive operations on mainnet would be catastrophic.
+    # ==========================================
+    
     parser = argparse.ArgumentParser(
         description="Run a TIMPAL mainnet validator node",
         formatter_class=argparse.RawDescriptionHelpFormatter,

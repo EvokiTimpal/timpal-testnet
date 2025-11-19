@@ -24,8 +24,8 @@ This guide walks you through joining the TIMPAL testnet as a validator.
 ## Step 1: Clone the Repository
 
 ```bash
-git clone https://github.com/EvokiTimpal/timpal-testnet
-cd timpal-testnet
+git clone https://github.com/[username]/timpal-blockchain.git
+cd timpal-blockchain
 ```
 
 ---
@@ -47,7 +47,8 @@ pip3 install -r requirements.txt
 ## Step 3: Create Your Wallet
 
 ```bash
-python3 wallet_cli.py
+cd app
+python wallet_cli.py
 ```
 
 **CRITICAL: Save your recovery phrase!** This is the ONLY way to recover your wallet.
@@ -56,7 +57,7 @@ The wallet will be saved to `wallet.json` (encrypted with your PIN).
 
 ---
 
-## Official Bootstrap Node Information
+## Step 4: Official Bootstrap Node Information
 
 The TIMPAL testnet uses a dedicated VPS bootstrap node:
 - **Bootstrap IP address:** `143.110.129.211`
@@ -65,34 +66,12 @@ The TIMPAL testnet uses a dedicated VPS bootstrap node:
 
 ---
 
-## Step 4: Set Your Wallet PIN
-
-Before starting your node, set your wallet PIN as an environment variable:
-
-```bash
-export TIMPAL_WALLET_PIN="your_secure_pin"
-```
-
-**Note:** Use `set TIMPAL_WALLET_PIN=your_secure_pin` instead of `export` on Windows.
-
----
-
 ## Step 5: Start Your Validator Node
-
-### ⚠️ Important: One Device = One Validator
-
-TIMPAL enforces a **one device, one validator** rule (same as mainnet):
-- Each device can run only **ONE validator node**
-- If you try to start a second node on the same device, it will refuse to start
-- This prevents validator centralization and ensures fair distribution
-
-**Your wallet.json file identifies your validator - keep it safe!**
-
----
 
 **Every validator must connect to the official bootstrap node:**
 
 ```bash
+cd ..  # Go back to project root
 python3 run_testnet_node.py --port YOUR_PORT --seed ws://143.110.129.211:9000
 ```
 
@@ -102,18 +81,15 @@ python3 run_testnet_node.py --port YOUR_PORT --seed ws://143.110.129.211:9000
 ### Examples
 
 ```bash
-# Set your wallet PIN
-export TIMPAL_WALLET_PIN="your_secure_pin"
-
-# Start validator (choose any available port except 9000)
+# Validator using port 8001
 python3 run_testnet_node.py --port 8001 --seed ws://143.110.129.211:9000
-# OR
+
+# Validator using port 8012
 python3 run_testnet_node.py --port 8012 --seed ws://143.110.129.211:9000
-# OR
+
+# Validator using port 9005
 python3 run_testnet_node.py --port 9005 --seed ws://143.110.129.211:9000
 ```
-
-**Note:** After syncing, the node will automatically submit a validator registration transaction. Registration will retry every 5 seconds until successful.
 
 ### ⚠️ Common Mistakes to Avoid
 
@@ -167,7 +143,8 @@ Your validator will automatically:
 Check your balance:
 
 ```bash
-python3 wallet_cli.py
+cd app
+python wallet_cli.py
 # Select "View Balance"
 ```
 
@@ -208,28 +185,6 @@ Explorer URL: http://0.0.0.0:<port>
 
 ---
 
-## 🔄 Resetting Testnet (Starting Fresh from Genesis)
-
-If you need to reset your local testnet blockchain and start from height 0:
-
-```bash
-# Stop your node (Ctrl+C), then restart with --reset flag:
-export TIMPAL_WALLET_PIN="your_secure_pin"
-python3 run_testnet_node.py --port 9000 --reset
-
-# For validators joining the public testnet:
-python3 run_testnet_node.py --port 8001 --seed ws://143.110.129.211:9000 --reset
-```
-
-⚠️ **WARNING:** The `--reset` flag **deletes all your local blockchain data**! Use this only when you need to start completely fresh.
-
-**When to use `--reset`:**
-- Testing new changes to the testnet from genesis
-- Your blockchain data is corrupted
-- You want to sync fresh from the network
-
----
-
 ## Troubleshooting
 
 ### Port 5000 is Busy
@@ -262,12 +217,6 @@ python3 app/explorer.py --port 6000
    ```bash
    python3 run_testnet_node.py --port 8001 --seed ws://143.110.129.211:9000
    ```
-
-### "Only one validator per device is allowed"
-
-**Cause:** You tried to start a second validator node on the same device.
-
-**Fix:** TIMPAL enforces one validator per device (same as mainnet). This is intentional and prevents validator centralization. If you need to run multiple validators, use separate physical devices or VPS instances.
 
 ### "ERROR: Port 9000 is reserved for the bootstrap node only"
 

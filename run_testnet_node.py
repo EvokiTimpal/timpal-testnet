@@ -18,9 +18,6 @@ USAGE EXAMPLES:
     python3 run_testnet_node.py --port 8002 --seed ws://143.110.129.211:9000
     python3 run_testnet_node.py --port 9005 --seed ws://143.110.129.211:9000
 
-    # Reset testnet: Start fresh from genesis (deletes local blockchain data)
-    python3 run_testnet_node.py --port 9000 --reset
-
 ⚠️  If you forget --seed, you will create a private chain instead of joining the testnet!
 """
 
@@ -44,30 +41,19 @@ from wallet import Wallet
 class TestnetNode:
     """TIMPAL Testnet Validator Node"""
     
-    def __init__(self, port: int = 8765, data_dir: str = None, seed_nodes: list = None, reset: bool = False):
+    def __init__(self, port: int = 8765, data_dir: str = None, seed_nodes: list = None):
         self.port = port
         self.data_dir = data_dir or f"testnet_data_node_{port}"
         self.seed_nodes = seed_nodes or []
         
-        # -----------------------------------------------
-        # TESTNET RESET: Delete blockchain data if --reset flag is set
-        # -----------------------------------------------
-        if reset and os.path.exists(self.data_dir):
-            import shutil
-            print(f"\n🔄 RESET MODE: Deleting existing testnet data at {self.data_dir}")
-            shutil.rmtree(self.data_dir)
-            print(f"✅ Testnet data cleared - starting fresh from genesis\n")
-        
         os.makedirs(self.data_dir, exist_ok=True)
         
         # -----------------------------------------------
-        # TESTNET: Load wallet.json (one wallet per device)
+        # TESTNET: Load wallet.json and set genesis validator
         # -----------------------------------------------
         wallet_path = "wallet.json"
-        
         if not os.path.exists(wallet_path):
-            raise ValueError(f"wallet.json not found — cannot start testnet node\n"
-                           f"💡 Create a wallet first: python3 wallet_cli.py")
+            raise ValueError("wallet.json not found — cannot start testnet node")
         
         temp_wallet = Wallet(wallet_path)
         
@@ -89,42 +75,37 @@ class TestnetNode:
         
         print(f"[TESTNET] Loaded validator key from wallet.json")
         print(f"[TESTNET] Address: {reward_address}")
-        print(f"[TESTNET] Genesis validator: {reward_address}")
+        print(f"[TESTNET] Genesis validator set to: {reward_address}")
         
         ledger_data_dir = os.path.join(self.data_dir, "ledger")
         
         # -----------------------------------------------
-        # GENESIS VALIDATOR ONLY: Pre-register the bootstrap node (port 9000)
-        # All other validators must self-register via validator_registration transaction
+        # CRITICAL FIX: Write genesis validator to ledger BEFORE consensus starts
+        # This ensures the validator exists at height 0 so consensus sees 1 active validator
         # -----------------------------------------------
-        if port == 9000:
-            from ledger import Ledger
-            
-            print(f"🔧 Pre-initializing ledger with genesis validator (bootstrap node only)...")
-            temp_ledger = Ledger(data_dir=ledger_data_dir, use_production_storage=True)
-            
-            # Add genesis validator to registry
-            temp_ledger.validator_registry[reward_address] = {
-                "public_key": public_key,
-                "stake": 0,
-                "device_id": "genesis",
-                "registered_at": 0,
-                "status": "genesis"
-            }
-            
-            # Save ledger state to disk
-            temp_ledger.save_state()
-            print(f"✅ Genesis validator written to ledger at {ledger_data_dir}")
-            
-            # Clean up temp ledger reference
-            del temp_ledger
-        else:
-            print(f"ℹ️  Validator node (port {port}) will self-register via transaction")
+        from ledger import Ledger
+        
+        print(f"🔧 Pre-initializing ledger with genesis validator...")
+        temp_ledger = Ledger(data_dir=ledger_data_dir, use_production_storage=True)
+        
+        # Add genesis validator to registry
+        temp_ledger.validator_registry[reward_address] = {
+            "public_key": public_key,
+            "stake": 0,
+            "device_id": "genesis",
+            "registered_at": 0
+        }
+        
+        # Save ledger state to disk
+        temp_ledger.save_state()
+        print(f"✅ Genesis validator written to ledger at {ledger_data_dir}")
+        
+        # Clean up temp ledger reference
+        del temp_ledger
         
         # Create node with loaded validator keys
-        # ENFORCES: One device = One validator (same as mainnet)
         self.node = Node(
-            skip_device_check=False,  # Enable device fingerprint enforcement
+            skip_device_check=True,
             reward_address=reward_address,
             private_key=private_key,
             public_key=public_key,
@@ -569,10 +550,92 @@ Examples:
     parser.add_argument(
         "--reset",
         action="store_true",
-        help="🔄 Reset testnet: Delete all blockchain data and start fresh from genesis (⚠️ WARNING: This deletes your local blockchain!)"
+        help="🚨 TESTNET ONLY: Delete all blockchain data and start fresh from block 0. Requires confirmation."
     )
     
     args = parser.parse_args()
+    
+    # ==========================================
+    # TESTNET RESET: Delete blockchain data and start fresh
+    # ==========================================
+    if args.reset:
+        import shutil
+        
+        data_dir = args.data_dir or f"testnet_data_node_{args.port}"
+        
+        # CRITICAL SAFETY: Only allow deleting testnet directories
+        # This prevents accidental deletion of mainnet or system directories
+        abs_data_dir = os.path.abspath(data_dir)
+        dir_name = os.path.basename(abs_data_dir)
+        
+        # Check 1: Directory name MUST start with "testnet_data_node_"
+        if not dir_name.startswith("testnet_data_node_"):
+            print("\n" + "="*80)
+            print("🔒 MAINNET PROTECTION: RESET BLOCKED")
+            print("="*80)
+            print(f"\n❌ ERROR: Cannot reset directory: {abs_data_dir}")
+            print(f"\nReset is ONLY allowed for testnet directories matching:")
+            print(f"   testnet_data_node_<PORT>")
+            print(f"\nYour directory: {dir_name}")
+            print(f"This does NOT match the required pattern.")
+            print(f"\n🔒 This safety check protects mainnet data from accidental deletion.")
+            print(f"   Mainnet directories: mainnet_data_node_*")
+            print(f"   Testnet directories: testnet_data_node_*")
+            sys.exit(1)
+        
+        # Check 2: Resolve symlinks and prevent path traversal attacks
+        try:
+            real_path = os.path.realpath(abs_data_dir)
+            real_dir_name = os.path.basename(real_path)
+            
+            # After resolving symlinks, name must still match testnet pattern
+            if not real_dir_name.startswith("testnet_data_node_"):
+                print("\n" + "="*80)
+                print("🔒 SYMLINK ATTACK DETECTED: RESET BLOCKED")
+                print("="*80)
+                print(f"\n❌ ERROR: Symlink resolves to non-testnet directory")
+                print(f"   Provided path: {abs_data_dir}")
+                print(f"   Resolves to: {real_path}")
+                print(f"\nSymlinks pointing to mainnet or system directories are not allowed.")
+                sys.exit(1)
+        except Exception as e:
+            print(f"\n❌ ERROR: Failed to validate directory path: {e}")
+            sys.exit(1)
+        
+        # Validation passed - show warning and get confirmation
+        print("\n" + "="*80)
+        print("🚨 TESTNET RESET WARNING")
+        print("="*80)
+        print(f"\nYou are about to DELETE all blockchain data in:")
+        print(f"   {abs_data_dir}")
+        print(f"\nThis will:")
+        print(f"   ✗ Delete all blocks ({os.path.exists(data_dir) and 'EXISTS' or 'does not exist yet'})")
+        print(f"   ✗ Delete all transactions")
+        print(f"   ✗ Delete all account balances")
+        print(f"   ✗ Delete finality checkpoints")
+        print(f"   ✓ Keep wallet.json (validator keys are safe)")
+        print(f"\n⚠️  This operation CANNOT be undone!")
+        print(f"⚠️  This is TESTNET ONLY - mainnet data is protected")
+        print(f"\nType 'DELETE' (all caps) to confirm, or anything else to cancel: ", end="")
+        
+        confirmation = input().strip()
+        
+        if confirmation != "DELETE":
+            print("❌ Reset cancelled - no data was deleted")
+            sys.exit(0)
+        
+        # User confirmed - proceed with reset
+        if os.path.exists(data_dir):
+            try:
+                shutil.rmtree(data_dir)
+                print(f"\n✅ Deleted: {data_dir}")
+                print(f"✅ Testnet reset complete - starting fresh from block 0\n")
+            except Exception as e:
+                print(f"\n❌ ERROR: Failed to delete {data_dir}: {e}")
+                sys.exit(1)
+        else:
+            print(f"\n⚠️  Directory {data_dir} does not exist (already clean)")
+            print(f"✅ Starting fresh from block 0\n")
     
     # VALIDATION: Prevent validators from using port 9000
     if args.port == 9000 and args.seeds:
@@ -601,8 +664,7 @@ Examples:
     node = TestnetNode(
         port=args.port,
         data_dir=args.data_dir,
-        seed_nodes=seed_nodes,
-        reset=args.reset
+        seed_nodes=seed_nodes
     )
     
     try:
