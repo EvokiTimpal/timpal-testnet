@@ -156,6 +156,7 @@ class Node:
             tx = Transaction.from_dict(data["transaction"])
             
             if not tx.verify():
+                print(f"❌ TX REJECT: Signature verification failed for {tx.tx_type} from {tx.sender[:20]}...")
                 return
             
             balances = {addr: bal for addr, bal in self.ledger.balances.items()}
@@ -163,14 +164,24 @@ class Node:
             
             # Heartbeat and validator_registration transactions don't use nonce system
             # They use timestamp-based deduplication instead
-            if tx.tx_type not in ("validator_heartbeat", "validator_registration"):
+            if tx.tx_type not in ("validator_heartbeat", "validator_registration", "epoch_attestation"):
                 expected_nonce = max(nonces.get(tx.sender, 0), self.mempool.get_pending_nonce(tx.sender))
                 if tx.nonce != expected_nonce:
+                    print(f"❌ TX REJECT: Nonce mismatch for {tx.tx_type} from {tx.sender[:20]}... (expected {expected_nonce}, got {tx.nonce})")
                     return
             
             if tx.is_valid(balances):
-                self.mempool.add_transaction(tx)
-        except Exception:
+                added = self.mempool.add_transaction(tx)
+                if tx.tx_type == "validator_registration":
+                    if added:
+                        print(f"✅ VALIDATOR REGISTRATION received and added to mempool from {tx.sender[:20]}...")
+                        print(f"   Mempool size: {len(self.mempool.pending_transactions)} transactions")
+                    else:
+                        print(f"⚠️  VALIDATOR REGISTRATION rejected by mempool (duplicate?) from {tx.sender[:20]}...")
+            else:
+                print(f"❌ TX REJECT: Validation failed for {tx.tx_type} from {tx.sender[:20]}...")
+        except Exception as e:
+            print(f"❌ TX ERROR: {str(e)} for transaction from peer {peer_id}")
             pass
     
     async def handle_new_block(self, data: dict, peer_id: str):
@@ -675,6 +686,10 @@ class Node:
                 if tx.is_valid(temp_balances, temp_nonces) and tx.verify():
                     valid_txs.append(tx)
                     total_fees += tx.fee
+                    
+                    # Debug: Log validator registration inclusions
+                    if tx.tx_type == "validator_registration":
+                        print(f"📝 Including VALIDATOR_REGISTRATION in block {next_height} from {tx.sender[:20]}...")
                     
                     # Validator registration and heartbeat transactions don't transfer funds
                     # They only register the validator or signal liveness
@@ -1216,18 +1231,36 @@ class Node:
             self.consensus.set_validator_set(checkpoint_validators)
         
         # Broadcast pending validator registration transaction (if any)
+        # CRITICAL FIX: Create fresh transaction with new timestamp to avoid duplicate hash
         if self.pending_validator_registration:
             await asyncio.sleep(2)  # Wait for P2P connections to establish
             
+            # CRITICAL: Regenerate registration with fresh timestamp to ensure unique tx_hash
+            # This prevents duplicate-hash rejection if previous broadcast wasn't mined
+            device_hash = hashlib.sha256(self.device_id.encode()).hexdigest()
+            nonce = self.ledger.get_nonce(self.reward_address)
+            
+            fresh_reg_tx = Transaction.create_validator_registration(
+                sender=self.reward_address,
+                public_key=self.public_key,
+                device_id=device_hash,
+                timestamp=time.time(),  # FRESH timestamp = unique hash
+                nonce=nonce
+            )
+            fresh_reg_tx.sign(self.private_key)
+            
             # Add to our own mempool
-            self.mempool.add_transaction(self.pending_validator_registration)
+            added = self.mempool.add_transaction(fresh_reg_tx)
+            if not added:
+                print(f"⚠️  Failed to add validator registration to local mempool (duplicate?)")
             
             # Broadcast to network
             await self.p2p.broadcast("new_transaction", {
-                "transaction": self.pending_validator_registration.to_dict()
+                "transaction": fresh_reg_tx.to_dict()
             })
             
             print(f"📡 Validator registration broadcast to network!")
+            print(f"   TX Hash: {fresh_reg_tx.tx_hash[:32]}...")
             print(f"   Waiting for inclusion in next block...")
             
             self.pending_validator_registration = None  # Clear after broadcasting

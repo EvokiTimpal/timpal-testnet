@@ -189,6 +189,35 @@ EOF
 
 ---
 
+# 🔧 Troubleshooting
+
+## Import Errors on Older Systems
+
+If you see `ModuleNotFoundError: No module named 'config'` when running wallet or scripts, this has been fixed in the latest version. Make sure you have the latest code:
+
+```bash
+git pull origin main
+```
+
+The issue was that older Python environments needed explicit PYTHONPATH setup. This is now handled automatically in all launcher scripts (`wallet_cli.py`, `start_explorer.py`, `run_testnet_node.py`).
+
+**If you still see import errors after updating:**
+- Verify you're using Python 3.8 or higher: `python3 --version`
+- Ensure all files are up to date from GitHub
+- Try running from the project root directory
+
+## Validator Registration Not Appearing
+
+**FIXED in latest version!** Validator registration transactions now use fresh timestamps on each broadcast attempt, preventing duplicate-hash rejection. 
+
+If your node shows "Network nodes: 2" but you don't appear as a validator:
+1. Update to the latest code: `git pull origin main`
+2. Restart your node
+3. The registration will be broadcast with a unique hash and included in the next block
+4. Check the block explorer after 2-3 blocks to confirm registration
+
+---
+
 # 🧰 Need Help?
 Open an issue on the GitHub repository.  
 We're building a fair, equal-reward blockchain — welcome aboard!
