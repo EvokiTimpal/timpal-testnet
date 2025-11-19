@@ -2,7 +2,7 @@ import hashlib
 import json
 import time
 from typing import List, Optional, Dict
-from transaction import Transaction
+from app.transaction import Transaction
 
 
 class Block:

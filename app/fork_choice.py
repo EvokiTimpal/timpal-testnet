@@ -17,7 +17,7 @@ Security improvements over original design:
 
 import hashlib
 from typing import List, Optional, Tuple, Callable
-from block import Block
+from app.block import Block
 import config
 
 

@@ -4,14 +4,14 @@ import uuid
 import hashlib
 import aiohttp
 from typing import Optional, Dict, Any
-from block import Block
-from transaction import Transaction
-from ledger import Ledger
-from mempool import Mempool
-from consensus import Consensus
-from rewards import RewardCalculator
-from p2p import P2PNetwork
-from device_fingerprint import enforce_single_node
+from app.block import Block
+from app.transaction import Transaction
+from app.ledger import Ledger
+from app.mempool import Mempool
+from app.consensus import Consensus
+from app.rewards import RewardCalculator
+from app.p2p import P2PNetwork
+from app.device_fingerprint import enforce_single_node
 import config
 
 
