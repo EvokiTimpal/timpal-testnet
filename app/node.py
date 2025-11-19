@@ -1233,12 +1233,18 @@ class Node:
         # Broadcast pending validator registration transaction (if any)
         # CRITICAL FIX: Create fresh transaction with new timestamp to avoid duplicate hash
         if self.pending_validator_registration:
+            print(f"🔄 Preparing to broadcast validator registration...")
+            print(f"   Current P2P connections: {len(self.p2p.peers)}")
             await asyncio.sleep(2)  # Wait for P2P connections to establish
             
             # CRITICAL: Regenerate registration with fresh timestamp to ensure unique tx_hash
             # This prevents duplicate-hash rejection if previous broadcast wasn't mined
             device_hash = hashlib.sha256(self.device_id.encode()).hexdigest()
             nonce = self.ledger.get_nonce(self.reward_address)
+            
+            print(f"   Regenerating registration with fresh timestamp...")
+            print(f"   Address: {self.reward_address[:20]}...")
+            print(f"   Nonce: {nonce}")
             
             fresh_reg_tx = Transaction.create_validator_registration(
                 sender=self.reward_address,
@@ -1249,12 +1255,19 @@ class Node:
             )
             fresh_reg_tx.sign(self.private_key)
             
+            print(f"   TX Hash: {fresh_reg_tx.tx_hash[:32]}...")
+            print(f"   Signature verified: {fresh_reg_tx.verify()}")
+            
             # Add to our own mempool
             added = self.mempool.add_transaction(fresh_reg_tx)
+            print(f"   Added to local mempool: {added}")
             if not added:
-                print(f"⚠️  Failed to add validator registration to local mempool (duplicate?)")
+                print(f"   ⚠️  Mempool rejected - checking why...")
+                print(f"   Current mempool size: {len(self.mempool.pending_transactions)}")
+                print(f"   TX already in mempool: {fresh_reg_tx.tx_hash in self.mempool.pending_transactions}")
             
             # Broadcast to network
+            print(f"   Broadcasting to {len(self.p2p.peers)} peer(s)...")
             await self.p2p.broadcast("new_transaction", {
                 "transaction": fresh_reg_tx.to_dict()
             })

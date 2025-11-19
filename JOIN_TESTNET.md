@@ -48,6 +48,12 @@ cd timpal-testnet
 pip install -r requirements.txt
 ```
 
+**For older systems (macOS, older Linux):**  
+If you see `command not found: pip`, use `pip3` instead:
+```bash
+pip3 install -r requirements.txt
+```
+
 ---
 
 # 🟨 3. Create your validator wallet
@@ -60,6 +66,13 @@ Run this command and **write down** your:
 - **PIN you choose later**
 
 ```bash
+python3 wallet_cli.py
+```
+
+**For older systems (macOS, older Python):**  
+If you see `ModuleNotFoundError: No module named 'config'`, set PYTHONPATH first:
+```bash
+export PYTHONPATH="$PWD/app:$PWD"
 python3 wallet_cli.py
 ```
 
@@ -215,6 +228,17 @@ If your node shows "Network nodes: 2" but you don't appear as a validator:
 2. Restart your node
 3. The registration will be broadcast with a unique hash and included in the next block
 4. Check the block explorer after 2-3 blocks to confirm registration
+
+## Wallet Creation Issues on Older Systems
+
+If `python3 wallet_cli.py` shows `ModuleNotFoundError: No module named 'config'`, set PYTHONPATH first:
+
+```bash
+export PYTHONPATH="$PWD/app:$PWD"
+python3 wallet_cli.py
+```
+
+**Note:** The latest version should handle this automatically, but if you're on a very old Python environment (pre-3.8) or older macOS, this workaround ensures imports work correctly.
 
 ---
 
