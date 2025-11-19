@@ -4,14 +4,14 @@ import uuid
 import hashlib
 import aiohttp
 from typing import Optional, Dict, Any
-from app.block import Block
-from app.transaction import Transaction
-from app.ledger import Ledger
-from app.mempool import Mempool
-from app.consensus import Consensus
-from app.rewards import RewardCalculator
-from app.p2p import P2PNetwork
-from app.device_fingerprint import enforce_single_node
+from block import Block
+from transaction import Transaction
+from ledger import Ledger
+from mempool import Mempool
+from consensus import Consensus
+from rewards import RewardCalculator
+from p2p import P2PNetwork
+from device_fingerprint import enforce_single_node
 import config
 
 
@@ -29,7 +29,6 @@ class Node:
         self.public_key = public_key
         self.data_dir = data_dir
         self.use_production_storage = use_production_storage
-        self.testnet_mode = testnet_mode
         
         self.ledger = Ledger(data_dir=data_dir, use_production_storage=use_production_storage)
         self.mempool = Mempool()
@@ -75,29 +74,49 @@ class Node:
             self.consensus.set_validator_set(on_chain_validators)
         
         # AUTO-REGISTER AS VALIDATOR (On-Chain Decentralization!)
-        # CRITICAL FIX: Registration check moved to start() AFTER sync
-        # This ensures we check against synced ledger state, not empty initial state
+        # Create and broadcast validator registration transaction to ALL nodes
         self.pending_validator_registration = None
+        
+        if self.public_key and self.reward_address and self.private_key:
+            # Generate device hash for Sybil resistance
+            device_hash = hashlib.sha256(self.device_id.encode()).hexdigest()
+            
+            # Check if already registered
+            if not self.ledger.is_validator_registered(self.reward_address):
+                # Create validator registration transaction
+                # This will be broadcast to ALL nodes and included in the next block
+                nonce = self.ledger.get_nonce(self.reward_address)
+                
+                reg_tx = Transaction.create_validator_registration(
+                    sender=self.reward_address,
+                    public_key=self.public_key,
+                    device_id=device_hash,
+                    timestamp=time.time(),
+                    nonce=nonce
+                )
+                
+                # Sign the transaction
+                reg_tx.sign(self.private_key)
+                
+                # Store for broadcasting after node starts
+                self.pending_validator_registration = reg_tx
+                
+                print(f"🎉 Validator registration transaction created!")
+                print(f"   Address: {self.reward_address}")
+                print(f"   Device: {device_hash[:32]}...")
+                print(f"   📡 Will broadcast to network when node starts")
+                print(f"   ⛓️ Registration will be on-chain after next block")
+            else:
+                print(f"✅ Already registered as validator: {self.reward_address}")
+                print(f"   Total validators: {self.ledger.get_validator_count()}")
+        else:
+            print(f"⚠️ Cannot register as validator: Missing wallet credentials")
+            print(f"   Create a wallet first: python app/wallet.py")
         
         # CRITICAL FIX: Set callback for online validator detection
         # This allows Ledger to check which validators are actually connected via P2P
         # Used for reward distribution when attestations are unavailable
         self.ledger.set_online_validators_callback(self.get_connected_validators)
-    
-    async def delayed_registration(self, tx):
-        """
-        Delayed validator registration with retry logic.
-        Waits for block sync before submitting registration transaction.
-        """
-        await asyncio.sleep(5)  # allow time for block sync
-        print("⏳ Delayed registration: submitting validator registration TX...")
-        
-        if not self.submit_transaction(tx):
-            print("❌ Validator registration failed — will retry in 5 seconds")
-            await asyncio.sleep(5)
-            asyncio.create_task(self.delayed_registration(tx))
-        else:
-            print("✅ Validator successfully registered AND saved to ledger!")
     
     def get_connected_validators(self) -> set:
         """
@@ -109,7 +128,7 @@ class Node:
         Returns:
             set: Addresses of validators with active P2P connections
         """
-        from app.crypto_utils import derive_address
+        from crypto_utils import derive_address
         
         connected_validators = set()
         
@@ -158,14 +177,6 @@ class Node:
         try:
             block = Block.from_dict(data["block"])
             latest = self.ledger.get_latest_block()
-            
-            # 🛡️ TESTNET BOOTSTRAP PROTECTION
-            # Ignore any foreign blocks when running the bootstrap node in testnet mode
-            if getattr(self, 'testnet_mode', False) and not self.p2p.seed_nodes:
-                local_height = latest.height if latest else 0
-                if block.height > local_height + 1:
-                    print(f"🛑 TESTNET BOOTSTRAP: Ignoring foreign block {block.height} (bootstrap node only accepts local blocks)")
-                    return
             
             # PERMANENT FIX: Handle height gaps to prevent deadlock
             # If we receive a future block, trigger sync to backfill missing blocks
@@ -969,14 +980,6 @@ class Node:
             end_height: Last missing block height
         """
         
-        # -----------------------------------------------
-        # TESTNET BOOTSTRAP FIX: Skip backfill when running as bootstrap node
-        # -----------------------------------------------
-        if getattr(self, 'testnet_mode', False) and not self.p2p.seed_nodes:
-            print(f"⚠️  TESTNET BOOTSTRAP: No seed nodes configured, skipping backfill.")
-            print(f"   This node is the canonical chain starting from genesis.")
-            return
-        
         print(f"🔄 BACKFILL: Fetching blocks {start_height} to {end_height}...")
         
         # Build list of HTTP endpoints to try
@@ -995,11 +998,9 @@ class Node:
                     except ValueError:
                         pass
         
-        # Try localhost ports (for local testnet nodes) - ONLY for mainnet
-        # Testnet validators must use explicit --seed configuration
-        if not getattr(self, 'testnet_mode', False):
-            for port in [9001, 3001, 3003, 6001]:
-                peer_http_urls.append(f"http://localhost:{port}")
+        # Try localhost ports (for local testnet nodes)
+        for port in [9001, 3001, 3003, 6001]:
+            peer_http_urls.append(f"http://localhost:{port}")
         
         # CRITICAL FIX: Split requests into chunks of 100 blocks (server limit)
         # Server enforces max 100 blocks per request to prevent memory issues
@@ -1214,44 +1215,22 @@ class Node:
         if checkpoint_validators:
             self.consensus.set_validator_set(checkpoint_validators)
         
-        # CRITICAL FIX: Check validator registration AFTER sync completes
-        # This ensures we check against synced ledger state, not empty initial state
-        if self.public_key and self.reward_address and self.private_key:
-            # Generate device hash for Sybil resistance
-            device_hash = hashlib.sha256(self.device_id.encode()).hexdigest()
-            
-            # Check if already registered (against synced ledger)
-            if not self.ledger.is_validator_registered(self.reward_address):
-                # Create validator registration transaction
-                nonce = self.ledger.get_nonce(self.reward_address)
-                
-                reg_tx = Transaction.create_validator_registration(
-                    sender=self.reward_address,
-                    public_key=self.public_key,
-                    device_id=device_hash,
-                    timestamp=time.time(),
-                    nonce=nonce
-                )
-                
-                # Sign the transaction
-                reg_tx.sign(self.private_key)
-                
-                # Store for broadcasting
-                self.pending_validator_registration = reg_tx
-                
-                print(f"🎉 Validator registration transaction created (post-sync)!")
-                print(f"   Address: {self.reward_address}")
-                print(f"   Device: {device_hash[:32]}...")
-                print(f"   📡 Will broadcast to network after 5 second delay")
-            else:
-                print(f"✅ Already registered as validator: {self.reward_address}")
-                print(f"   Total validators: {self.ledger.get_validator_count()}")
-        
-        # Broadcast pending validator registration transaction (if any) with delayed retry
+        # Broadcast pending validator registration transaction (if any)
         if self.pending_validator_registration:
-            print(f"📡 Starting delayed validator registration...")
-            asyncio.create_task(self.delayed_registration(self.pending_validator_registration))
-            self.pending_validator_registration = None  # Clear to avoid double-registration
+            await asyncio.sleep(2)  # Wait for P2P connections to establish
+            
+            # Add to our own mempool
+            self.mempool.add_transaction(self.pending_validator_registration)
+            
+            # Broadcast to network
+            await self.p2p.broadcast("new_transaction", {
+                "transaction": self.pending_validator_registration.to_dict()
+            })
+            
+            print(f"📡 Validator registration broadcast to network!")
+            print(f"   Waiting for inclusion in next block...")
+            
+            self.pending_validator_registration = None  # Clear after broadcasting
         
         await asyncio.gather(
             self.mine_blocks(),
