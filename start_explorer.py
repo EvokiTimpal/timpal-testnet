@@ -6,10 +6,15 @@ Handles import paths correctly for both development and production
 import sys
 import os
 import argparse
+from pathlib import Path
 
-# Add project root to Python path
-project_root = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, project_root)
+# Add app directory to Python path (so 'import config' works)
+project_root = Path(__file__).parent
+sys.path.insert(0, str(project_root / "app"))
+
+# Load testnet config BEFORE importing explorer
+import app.config_testnet as config_testnet
+sys.modules["config"] = config_testnet
 
 # Now import and run the explorer
 if __name__ == "__main__":
@@ -17,9 +22,9 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8080, help="Port to run the explorer on (default: 8080)")
     args = parser.parse_args()
     
-    # Import uvicorn and app after path is set
+    # Import uvicorn and explorer after path is set
     import uvicorn
-    from app import explorer
+    from explorer import explorer
     
     print(f"Starting TIMPAL Block Explorer on port {args.port}...")
     print(f"Explorer URL: http://0.0.0.0:{args.port}")
