@@ -871,8 +871,10 @@ class Node:
                         
                         print(f"📡 Peer {peer_url} has {peer_height} blocks, starting HTTP batch sync...")
                         
-                        # Download blocks in batches of 100
-                        current_height = -1  # Start at -1 so first batch starts at 0 (genesis)
+                        # SECURITY: Never sync genesis block from network (prevents eclipse attacks)
+                        # Genesis must be created locally and validated against CANONICAL_GENESIS_HASH
+                        # Network sync ALWAYS starts from block 1
+                        current_height = 0  # Start at 0 so first batch starts at 1 (skip genesis)
                         batch_size = 100
                         
                         while current_height < peer_height:
@@ -931,8 +933,11 @@ class Node:
     
     async def _fetch_full_chain(self, peer_url: str, session, end_height: int):
         """
-        Fetch complete blockchain from genesis to end_height from a peer.
+        Fetch complete blockchain from block 1 to end_height from a peer.
         Used for chain reorganization to get the competing chain.
+        
+        SECURITY: Never fetches genesis block (height 0) from network.
+        Genesis must be created locally and validated against CANONICAL_GENESIS_HASH.
         
         Args:
             peer_url: HTTP URL of the peer
@@ -942,13 +947,14 @@ class Node:
         Returns:
             List[Block] if successful, None if failed
         """
-        print(f"📥 Fetching full competing chain from {peer_url} (genesis to {end_height})...")
+        print(f"📥 Fetching full competing chain from {peer_url} (block 1 to {end_height})...")
         
         CHUNK_SIZE = 100
         all_blocks = []
         
         try:
-            current_start = 0  # Start from genesis
+            # SECURITY: Never sync genesis from network (prevents eclipse attacks)
+            current_start = 1  # Start from block 1, skip genesis
             
             while current_start <= end_height:
                 current_end = min(current_start + CHUNK_SIZE - 1, end_height)
@@ -990,6 +996,12 @@ class Node:
             start_height: First missing block height
             end_height: Last missing block height
         """
+        
+        # SECURITY: Never sync genesis block from network (prevents eclipse attacks)
+        if start_height == 0:
+            print(f"⚠️  SECURITY: Refusing to sync genesis block from network")
+            print(f"   Genesis must be created locally and validated against CANONICAL_GENESIS_HASH")
+            start_height = 1
         
         print(f"🔄 BACKFILL: Fetching blocks {start_height} to {end_height}...")
         

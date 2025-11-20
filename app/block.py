@@ -133,15 +133,27 @@ class Block:
         )
     
     @classmethod
-    def create_genesis_block(cls, genesis_address: str, genesis_public_key: str = None):
+    def create_genesis_block(cls, genesis_address: str = None, genesis_public_key: str = None):
         import config
         import time
         from transaction import Transaction
         
-        # CRITICAL FIX: Use config.GENESIS_TIMESTAMP so ALL nodes create identical genesis blocks
-        # Testnet uses current time for testing, mainnet uses fixed historical timestamp
+        # SECURITY: ALWAYS use config.GENESIS_VALIDATORS to create identical genesis blocks
+        # This ensures ALL nodes create the exact same genesis block hash for validation
+        # Parameters genesis_address and genesis_public_key are IGNORED
         
-        # Create genesis validator registration transaction if public key provided
+        # Get genesis validator from config (first validator in GENESIS_VALIDATORS)
+        if hasattr(config, 'GENESIS_VALIDATORS') and config.GENESIS_VALIDATORS:
+            genesis_address = list(config.GENESIS_VALIDATORS.keys())[0]
+            genesis_public_key = config.GENESIS_VALIDATORS[genesis_address]
+            print(f"🔒 SECURITY: Using canonical genesis validator from config: {genesis_address[:20]}...")
+        else:
+            # Fallback for backward compatibility (no canonical genesis validation)
+            print(f"⚠️  WARNING: No GENESIS_VALIDATORS in config, using provided parameters")
+            if not genesis_address:
+                genesis_address = "genesis"
+        
+        # Create genesis validator registration transaction
         transactions = []
         if genesis_public_key and genesis_address.startswith('tmpl'):
             # Create validator registration transaction for genesis validator

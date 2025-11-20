@@ -256,9 +256,37 @@ class Ledger:
             self.increment_round(block.height)
             print(f"✅ Timeout certificate accepted, round incremented for height {block.height}")
         
-        # CRITICAL SECURITY #4: Validate proposer is a registered validator
-        # Only skip validation for TRUE genesis block (height 0 AND proposer is "genesis")
-        is_genesis = (block.height == 0 and hasattr(block, 'proposer') and block.proposer == "genesis")
+        # CRITICAL SECURITY #4: CANONICAL GENESIS VALIDATION
+        # Prevent eclipse attacks by validating genesis block hash against known canonical value
+        is_genesis = False
+        
+        if block.height == 0:
+            if len(self.blocks) == 0:
+                # Fresh bootstrap - validate genesis block matches canonical hash
+                block_hash = block.calculate_hash()
+                
+                # Check if config has canonical genesis hash (testnet/mainnet security)
+                if hasattr(config, 'CANONICAL_GENESIS_HASH'):
+                    if block_hash != config.CANONICAL_GENESIS_HASH:
+                        print(f"🚨 SECURITY: Genesis block REJECTED - hash mismatch!")
+                        print(f"  Expected (canonical): {config.CANONICAL_GENESIS_HASH}")
+                        print(f"  Received: {block_hash}")
+                        print(f"  This prevents eclipse attacks via forged genesis blocks")
+                        return False
+                    else:
+                        print(f"✅ SECURITY: Genesis block validated against canonical hash")
+                        print(f"  Hash: {block_hash}")
+                        is_genesis = True
+                else:
+                    # No canonical hash in config - accept with warning (backward compatibility)
+                    print(f"⚠️  WARNING: No CANONICAL_GENESIS_HASH in config - accepting genesis without validation")
+                    print(f"  Hash: {block_hash}")
+                    is_genesis = True
+            else:
+                # We already have blocks - REJECT any genesis block (duplicate or malicious)
+                print(f"REJECT: Genesis block rejected - chain already has {len(self.blocks)} blocks")
+                print(f"  This prevents eclipse attacks via duplicate genesis injection")
+                return False
         
         # BOOTSTRAP GRACE PERIOD: During early blocks, allow any node to propose
         # This solves the chicken-egg problem: new networks need blocks to register validators
@@ -350,39 +378,43 @@ class Ledger:
         temp_attested = set()
         
         for tx in block.transactions:
-            # Verify transaction signature
-            if not tx.verify():
+            # Verify transaction signature (SKIP for genesis block transactions)
+            # Genesis block transactions are pre-validated during network bootstrap
+            if not is_genesis and not tx.verify():
                 print(f"REJECT: Block {block.height} contains transaction with invalid signature: {tx.tx_hash}")
                 return False
             
             # Handle different transaction types
             if tx.tx_type == "validator_registration":
-                # Validate validator registration transaction
-                if not tx.is_valid_validator_registration(temp_balances, temp_nonces):
+                # Validate validator registration transaction (SKIP for genesis block)
+                # Genesis transactions are pre-validated during network bootstrap
+                if not is_genesis and not tx.is_valid_validator_registration(temp_balances, temp_nonces):
                     print(f"REJECT: Block {block.height} contains invalid validator registration: {tx.tx_hash}")
                     return False
                 
                 # CRITICAL: Check for duplicate registration in EXISTING registry (Sybil prevention)
-                for existing_addr, data in self.validator_registry.items():
-                    if isinstance(data, dict):
-                        if data.get('device_id') == tx.device_id:
-                            print(f"REJECT: Device {tx.device_id[:16]}... already registered to {existing_addr}")
-                            return False
-                        if data.get('public_key') == tx.public_key:
-                            print(f"REJECT: Public key already registered to {existing_addr}")
-                            return False
-                
-                # CRITICAL: Check for duplicate registration WITHIN THIS BLOCK (Sybil bypass prevention!)
-                # A malicious proposer could try to register same device multiple times in one block
-                if tx.device_id in temp_registered_devices:
-                    print(f"REJECT: Block {block.height} contains multiple registrations for device {tx.device_id[:16]}...")
-                    print(f"       Sybil bypass attempt detected!")
-                    return False
-                
-                if tx.public_key in temp_registered_pubkeys:
-                    print(f"REJECT: Block {block.height} contains multiple registrations for same public key")
-                    print(f"       Sybil bypass attempt detected!")
-                    return False
+                # SKIP for genesis block since bootstrap pre-initialization may have registered the validator
+                if not is_genesis:
+                    for existing_addr, data in self.validator_registry.items():
+                        if isinstance(data, dict):
+                            if data.get('device_id') == tx.device_id:
+                                print(f"REJECT: Device {tx.device_id[:16]}... already registered to {existing_addr}")
+                                return False
+                            if data.get('public_key') == tx.public_key:
+                                print(f"REJECT: Public key already registered to {existing_addr}")
+                                return False
+                    
+                    # CRITICAL: Check for duplicate registration WITHIN THIS BLOCK (Sybil bypass prevention!)
+                    # A malicious proposer could try to register same device multiple times in one block
+                    if tx.device_id in temp_registered_devices:
+                        print(f"REJECT: Block {block.height} contains multiple registrations for device {tx.device_id[:16]}...")
+                        print(f"       Sybil bypass attempt detected!")
+                        return False
+                    
+                    if tx.public_key in temp_registered_pubkeys:
+                        print(f"REJECT: Block {block.height} contains multiple registrations for same public key")
+                        print(f"       Sybil bypass attempt detected!")
+                        return False
                 
                 # Track this registration
                 temp_registered_devices.add(tx.device_id)
