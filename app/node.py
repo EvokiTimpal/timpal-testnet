@@ -1222,6 +1222,35 @@ class Node:
         if checkpoint_validators:
             self.consensus.set_validator_set(checkpoint_validators)
         
+        # CRITICAL FIX: Re-check validator registration AFTER sync completes
+        # The initial check (line 85) may have been against pre-initialized local ledger
+        # After sync, we have the real blockchain state and need to verify again
+        if self.public_key and self.reward_address and self.private_key:
+            if not self.ledger.is_validator_registered(self.reward_address):
+                # Not registered on the synced chain! Create pending registration
+                device_hash = hashlib.sha256(self.device_id.encode()).hexdigest()
+                nonce = self.ledger.get_nonce(self.reward_address)
+                
+                reg_tx = Transaction.create_validator_registration(
+                    sender=self.reward_address,
+                    public_key=self.public_key,
+                    device_id=device_hash,
+                    timestamp=time.time(),
+                    nonce=nonce
+                )
+                reg_tx.sign(self.private_key)
+                
+                # Set pending registration for broadcasting below
+                self.pending_validator_registration = reg_tx
+                
+                print(f"\n🎉 POST-SYNC: Validator registration transaction created!")
+                print(f"   Address: {self.reward_address}")
+                print(f"   Device: {device_hash[:32]}...")
+                print(f"   Will broadcast to network in 2 seconds...")
+            else:
+                print(f"\n✅ POST-SYNC: Already registered as validator: {self.reward_address}")
+                print(f"   Total validators on chain: {self.ledger.get_validator_count()}")
+        
         # Broadcast pending validator registration transaction (if any)
         # CRITICAL FIX: Create fresh transaction with new timestamp to avoid duplicate hash
         if self.pending_validator_registration:
