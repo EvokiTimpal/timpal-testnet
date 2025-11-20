@@ -1453,6 +1453,10 @@ async def get_validators(request: Request):
     ledger = get_ledger()
     validators = []
     
+    # Get current height for liveness detection
+    current_height = ledger.get_block_count() - 1
+    LIVENESS_WINDOW = 100  # Consider validator offline if no blocks proposed in last 100 blocks (~5 minutes)
+    
     # Iterate through ALL registered validators in the ledger
     for address, validator_data in ledger.validator_registry.items():
         # Get validator info (handles both old and new format)
@@ -1462,13 +1466,28 @@ async def get_validators(request: Request):
             balance = ledger.get_balance(address)
             block_count = sum(1 for block in ledger.blocks if block.proposer == address)
             
+            # LIVENESS DETECTION: Check if validator proposed a block recently
+            last_block_height = -1
+            for block in reversed(ledger.blocks):
+                if block.proposer == address:
+                    last_block_height = block.height
+                    break
+            
+            # Determine real-time online/offline status
+            if current_height < 10:
+                display_status = "active"
+            elif last_block_height >= 0 and (current_height - last_block_height) <= LIVENESS_WINDOW:
+                display_status = "active"
+            else:
+                display_status = "offline"
+            
             validators.append({
                 "address": address,
                 "public_key": info.get('public_key', 'N/A'),
                 "balance": balance,
                 "balance_tmpl": format_pals(balance),
                 "blocks_proposed": block_count,
-                "status": info.get('status', 'unknown'),
+                "status": display_status,
                 "registered_at": info.get('registered_at', 0),
                 "device_id_preview": info.get('device_id', 'N/A')[:32] + '...' if info.get('device_id') and len(info.get('device_id', '')) > 32 else info.get('device_id', 'N/A')
             })
@@ -1575,6 +1594,10 @@ async def validators_dashboard(request: Request):
     ledger = get_ledger()
     validators = []
     
+    # Get current height for liveness detection
+    current_height = ledger.get_block_count() - 1
+    LIVENESS_WINDOW = 100  # Consider validator offline if no blocks proposed in last 100 blocks (~5 minutes)
+    
     # Get all validators with detailed stats
     for address, validator_data in ledger.validator_registry.items():
         info = ledger.get_validator_info(address)
@@ -1589,6 +1612,25 @@ async def validators_dashboard(request: Request):
                 if block.reward_allocations and address in block.reward_allocations:
                     total_rewards += block.reward_allocations[address]
             
+            # LIVENESS DETECTION: Check if validator proposed a block recently
+            # Find the most recent block proposed by this validator
+            last_block_height = -1
+            for block in reversed(ledger.blocks):
+                if block.proposer == address:
+                    last_block_height = block.height
+                    break
+            
+            # Determine real-time online/offline status
+            if current_height < 10:
+                # Bootstrap period - all registered validators shown as active
+                display_status = "active"
+            elif last_block_height >= 0 and (current_height - last_block_height) <= LIVENESS_WINDOW:
+                # Proposed a block recently - ONLINE
+                display_status = "active"
+            else:
+                # No recent blocks - OFFLINE
+                display_status = "offline"
+            
             validators.append({
                 "address": address,
                 "public_key": info.get('public_key', 'N/A')[:64] + '...',
@@ -1597,7 +1639,7 @@ async def validators_dashboard(request: Request):
                 "blocks_proposed": block_count,
                 "total_rewards": total_rewards,
                 "total_rewards_tmpl": format_pals(total_rewards),
-                "status": info.get('status', 'unknown'),
+                "status": display_status,
                 "registered_at": info.get('registered_at', 0),
                 "device_id_preview": info.get('device_id', 'N/A')[:32] + '...' if info.get('device_id') and len(info.get('device_id', '')) > 32 else info.get('device_id', 'N/A')
             })
