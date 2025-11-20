@@ -133,17 +133,46 @@ class Block:
         )
     
     @classmethod
-    def create_genesis_block(cls, genesis_address: str):
+    def create_genesis_block(cls, genesis_address: str, genesis_public_key: str = None):
         import config
         import time
+        from transaction import Transaction
+        
         # CRITICAL FIX: Use config.GENESIS_TIMESTAMP so ALL nodes create identical genesis blocks
         # Testnet uses current time for testing, mainnet uses fixed historical timestamp
+        
+        # Create genesis validator registration transaction if public key provided
+        transactions = []
+        if genesis_public_key and genesis_address.startswith('tmpl'):
+            # Create validator registration transaction for genesis validator
+            # This ensures ALL nodes (including network syncing nodes) can extract the public key
+            try:
+                import hashlib
+                genesis_reg_tx = Transaction(
+                    sender=genesis_address,
+                    recipient=genesis_address,
+                    amount=0,
+                    fee=0,
+                    nonce=0,
+                    public_key=genesis_public_key,
+                    tx_type="validator_registration",
+                    device_id="genesis",
+                    timestamp=config.GENESIS_TIMESTAMP
+                )
+                # Sign the registration transaction (placeholder signature for genesis)
+                genesis_reg_tx.signature = hashlib.sha256(b"genesis_validator_registration").hexdigest()
+                genesis_reg_tx.tx_hash = hashlib.sha256(f"{genesis_address}{genesis_public_key}{config.GENESIS_TIMESTAMP}".encode()).hexdigest()
+                transactions.append(genesis_reg_tx)
+                print(f"✅ Genesis block includes validator registration for {genesis_address[:10]}...")
+            except Exception as e:
+                print(f"⚠️  Failed to create genesis registration tx: {e}")
+        
         return cls(
             height=0,
             timestamp=config.GENESIS_TIMESTAMP,
-            transactions=[],
+            transactions=transactions,
             previous_hash="0" * 64,
-            proposer="genesis",
+            proposer=genesis_address if genesis_address.startswith('tmpl') else "genesis",
             reward=0,
             reward_allocations={}
         )

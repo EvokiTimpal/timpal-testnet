@@ -1146,7 +1146,7 @@ class Node:
         peer_count = self.p2p.get_peer_count()
         if peer_count == 0:
             print("⚠️  No peers connected - creating genesis block (bootstrap node)")
-            genesis_block = Block.create_genesis_block(self.genesis_address)
+            genesis_block = Block.create_genesis_block(self.genesis_address, self.public_key)
             self.ledger.add_block(genesis_block)
             return
         
@@ -1182,7 +1182,7 @@ class Node:
         
         # Fallback: Create genesis if HTTP sync failed
         print("⚠️  HTTP batch sync failed - creating genesis block")
-        genesis_block = Block.create_genesis_block(self.genesis_address)
+        genesis_block = Block.create_genesis_block(self.genesis_address, self.public_key)
         self.ledger.add_block(genesis_block)
     
     

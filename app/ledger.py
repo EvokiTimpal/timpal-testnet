@@ -481,6 +481,61 @@ class Ledger:
         # Save new block to production storage (incremental, O(1) performance)
         self.save_new_block_to_storage(block)
         
+        # GENESIS VALIDATOR AUTO-REGISTRATION: When ANY node receives block 0, automatically
+        # register the proposer as the genesis validator. This ensures network nodes that sync
+        # from bootstrap have the genesis validator in their registry (not just bootstrap nodes).
+        if block.height == 0 and hasattr(block, 'proposer') and block.proposer.startswith('tmpl'):
+            if block.proposer not in self.validator_registry:
+                # Extract public key from genesis block's validator registration tx (if present)
+                genesis_public_key = None
+                genesis_device_id = "genesis"
+                
+                for tx in block.transactions:
+                    if tx.tx_type == "validator_registration" and tx.sender == block.proposer:
+                        genesis_public_key = tx.public_key
+                        genesis_device_id = tx.device_id
+                        break
+                
+                # If no registration tx found, check GENESIS_VALIDATORS config
+                if not genesis_public_key and hasattr(config, 'GENESIS_VALIDATORS'):
+                    if block.proposer in config.GENESIS_VALIDATORS:
+                        genesis_public_key = config.GENESIS_VALIDATORS[block.proposer]
+                
+                # Last resort: extract public key by recovering from block signature
+                if not genesis_public_key and hasattr(block, 'proposer_signature'):
+                    try:
+                        from ecdsa import VerifyingKey, SECP256k1
+                        from hashlib import sha256
+                        
+                        # Recover public key from signature
+                        # Block signature signs: block_hash + previous_hash + merkle_root
+                        signature_data = f"{block.block_hash}{block.previous_hash}{block.merkle_root}"
+                        message_hash = sha256(signature_data.encode()).digest()
+                        
+                        # Try to recover public key from signature (requires recovery_id, which we don't have)
+                        # So we'll use a placeholder and log a warning
+                        genesis_public_key = "pending_recovery"
+                        print(f"⚠️  GENESIS: Could not extract public key for {block.proposer[:10]}...")
+                        print(f"    Public key will be updated when validator registers")
+                    except Exception as e:
+                        genesis_public_key = "pending_recovery"
+                        print(f"⚠️  GENESIS: Failed to recover public key: {e}")
+                
+                # Register genesis validator with immediate activation (no delay for bootstrap)
+                self.validator_registry[block.proposer] = {
+                    'public_key': genesis_public_key or "pending_recovery",
+                    'device_id': genesis_device_id,
+                    'status': 'active',  # Genesis validator is immediately active
+                    'registered_at': block.timestamp,
+                    'registration_height': 0,
+                    'activation_height': 0,
+                    'deposit_amount': 0,
+                    'voting_power': 1,
+                    'proposer_priority': 0
+                }
+                
+                print(f"▶️  GENESIS: Auto-registered genesis validator {block.proposer[:10]}... from block 0")
+        
         # Add finality checkpoint if at checkpoint interval
         if block.height > 0 and block.height % self.fork_choice.FINALITY_CHECKPOINT_INTERVAL == 0:
             self.add_finality_checkpoint(block.height, block.block_hash)
