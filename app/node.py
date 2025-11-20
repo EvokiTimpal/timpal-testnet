@@ -433,10 +433,6 @@ class Node:
                     except ValueError:
                         pass
         
-        # Add localhost ports for local testnet
-        for port in [9001, 3001, 3003, 6001]:
-            peer_http_urls.append(f"http://localhost:{port}")
-        
         max_height = 0
         for peer_url in peer_http_urls:
             try:
@@ -1012,10 +1008,6 @@ class Node:
                         peer_http_urls.append(http_url)
                     except ValueError:
                         pass
-        
-        # Try localhost ports (for local testnet nodes)
-        for port in [9001, 3001, 3003, 6001]:
-            peer_http_urls.append(f"http://localhost:{port}")
         
         # CRITICAL FIX: Split requests into chunks of 100 blocks (server limit)
         # Server enforces max 100 blocks per request to prevent memory issues
