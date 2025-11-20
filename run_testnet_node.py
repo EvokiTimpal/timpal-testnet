@@ -93,7 +93,8 @@ class TestnetNode:
             "public_key": public_key,
             "stake": 0,
             "device_id": "genesis",
-            "registered_at": 0
+            "registered_at": 0,
+            "status": "active"
         }
         
         # Save ledger state to disk
