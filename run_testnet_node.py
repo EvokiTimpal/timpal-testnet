@@ -68,41 +68,50 @@ class TestnetNode:
         public_key = temp_wallet.public_key
         reward_address = temp_wallet.address
         
-        # Set genesis validator to match actual wallet
-        config.GENESIS_VALIDATORS = {
-            reward_address: public_key
-        }
-        
         print(f"[TESTNET] Loaded validator key from wallet.json")
         print(f"[TESTNET] Address: {reward_address}")
-        print(f"[TESTNET] Genesis validator set to: {reward_address}")
+        
+        # Only set GENESIS_VALIDATORS for bootstrap nodes (no seed nodes)
+        # Non-bootstrap nodes will sync validator registry from network
+        if not seed_nodes:
+            config.GENESIS_VALIDATORS = {
+                reward_address: public_key
+            }
+            print(f"[TESTNET] Bootstrap mode: Genesis validator set to {reward_address}")
+        else:
+            print(f"[TESTNET] Network mode: Will sync from {len(seed_nodes)} seed node(s)")
         
         ledger_data_dir = os.path.join(self.data_dir, "ledger")
         
         # -----------------------------------------------
-        # CRITICAL FIX: Write genesis validator to ledger BEFORE consensus starts
-        # This ensures the validator exists at height 0 so consensus sees 1 active validator
+        # CRITICAL: Only pre-initialize genesis validator for BOOTSTRAP nodes
+        # Non-bootstrap nodes (with --seed) should sync validator registry from network
         # -----------------------------------------------
-        from ledger import Ledger
-        
-        print(f"🔧 Pre-initializing ledger with genesis validator...")
-        temp_ledger = Ledger(data_dir=ledger_data_dir, use_production_storage=True)
-        
-        # Add genesis validator to registry
-        temp_ledger.validator_registry[reward_address] = {
-            "public_key": public_key,
-            "stake": 0,
-            "device_id": "genesis",
-            "registered_at": 0,
-            "status": "active"
-        }
-        
-        # Save ledger state to disk
-        temp_ledger.save_state()
-        print(f"✅ Genesis validator written to ledger at {ledger_data_dir}")
-        
-        # Clean up temp ledger reference
-        del temp_ledger
+        if not seed_nodes:
+            # BOOTSTRAP MODE: This is the genesis node, pre-initialize validator
+            from ledger import Ledger
+            
+            print(f"🔧 [BOOTSTRAP] Pre-initializing ledger with genesis validator...")
+            temp_ledger = Ledger(data_dir=ledger_data_dir, use_production_storage=True)
+            
+            # Add genesis validator to registry
+            temp_ledger.validator_registry[reward_address] = {
+                "public_key": public_key,
+                "stake": 0,
+                "device_id": "genesis",
+                "registered_at": 0,
+                "status": "active"
+            }
+            
+            # Save ledger state to disk
+            temp_ledger.save_state()
+            print(f"✅ [BOOTSTRAP] Genesis validator written to ledger at {ledger_data_dir}")
+            
+            # Clean up temp ledger reference
+            del temp_ledger
+        else:
+            # NETWORK MODE: This node will sync from seed nodes
+            print(f"🌐 [NETWORK] Skipping genesis pre-initialization (will sync from seeds)")
         
         # Create node with loaded validator keys
         self.node = Node(
