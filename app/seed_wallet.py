@@ -60,11 +60,11 @@ class SeedWallet:
         
     @staticmethod
     def public_key_to_address(public_key_hex: str) -> str:
-        """Convert public key to TIMPAL address."""
+        """Convert public key to TIMPAL address (44 hex chars after 'tmpl')."""
         pub_key_bytes = bytes.fromhex(public_key_hex)
         hash1 = hashlib.sha256(pub_key_bytes).digest()
         hash2 = hashlib.sha256(hash1).digest()
-        address_hash = hash2.hex()[:40]
+        address_hash = hash2.hex()[:44]  # CRITICAL: Must be 44 hex chars to match Transaction._public_key_to_address
         return f"tmpl{address_hash}"
     
     def set_pin(self, pin: str):
