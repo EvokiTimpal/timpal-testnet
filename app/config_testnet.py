@@ -37,7 +37,7 @@ GENESIS_TIMESTAMP = 1732147200
 # This hash MUST match the locally-created genesis block exactly
 # Any genesis block from the network that doesn't match this hash will be REJECTED
 # Generated with v2 wallet (BIP-39): generate_new_genesis_v2.py
-CANONICAL_GENESIS_HASH = "d7935f7729b76678e2e355fe06c4079f1136310c67f18877d69ce042994e62f3"
+CANONICAL_GENESIS_HASH = "749c8e9fd06a584114690c51ac56b70e5c70e1f1b3d5abf8e27f29b308341d17"
 
 # EPOCH-BASED CONSENSUS (for 100,000+ validator scalability)
 # TESTNET ADJUSTMENT: Shorter epochs (10 blocks = 30s) for faster testing
