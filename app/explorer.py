@@ -1096,7 +1096,7 @@ async def send_transfer_page(request: Request):
         <div class="container">
             <div class="header">
                 <h1>💸 Send Timpal (TMPL)</h1>
-                <p style="font-size: 1.1em; color: #888;">Submit a TMPL transfer to the blockchain network</p>
+                <p style="font-size: 1.1em; color: white;">Submit a TMPL transfer to the blockchain network</p>
             </div>
             
             <div class="info-box">
@@ -1108,9 +1108,12 @@ async def send_transfer_page(request: Request):
             <div class="card">
                 <h2>📝 Transfer Details</h2>
                 <form id="transferForm" method="POST" action="/send">
-                    <!-- Hidden wallet path field -->
-                    <input type="hidden" id="wallet_path" name="wallet_path" 
-                           value="{default_wallet_path}">
+                    <div class="form-group">
+                        <label for="wallet_path">Wallet File Path:</label>
+                        <input type="text" id="wallet_path" name="wallet_path" 
+                               value="wallet.json" placeholder="wallet.json" required>
+                        <small style="color: #888;">📂 Path to your wallet.json file (relative to project root)</small>
+                    </div>
                     
                     <div class="form-group">
                         <label for="sender_address">Sender Address:</label>
