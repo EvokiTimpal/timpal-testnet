@@ -72,9 +72,10 @@ def create_new_wallet():
         
         break
     
-    # Optional passphrase (25th word)
-    print("\n🔒 Optional: Add a passphrase (BIP-39 25th word)")
-    print("   This adds extra security but MUST be remembered!")
+    # Optional passphrase (extra word beyond the seed phrase)
+    print("\n🔒 Optional: Add a passphrase (extra security word)")
+    print("   ⚠️  Only use if you understand BIP-39 passphrases!")
+    print("   (For most users, answer 'no' - seed phrase alone is secure)")
     use_passphrase = input("   Add passphrase? (yes/no): ").strip().lower()
     
     passphrase = ""
@@ -189,7 +190,8 @@ def restore_wallet():
         break
     
     # Ask about passphrase
-    print("\n🔒 Did you use a passphrase (25th word) with this seed?")
+    print("\n🔒 Did you use an optional passphrase with this seed?")
+    print("   (Most users don't - if unsure, answer 'no')")
     use_passphrase = input("   Use passphrase? (yes/no): ").strip().lower()
     
     passphrase = ""
@@ -279,8 +281,7 @@ def check_wallet_type():
         print("📁 Found wallet_v2.json (BIP-39 compatible)")
         return "v2"
     elif has_v1:
-        print("📁 Found wallet.json (legacy format)")
-        print("⚠️  Consider migrating to v2 using: python migrate_wallet.py wallet.json")
+        print("📁 Found wallet.json (old format)")
         return "v1"
     else:
         return None
@@ -316,15 +317,9 @@ def main():
         print("  [1] View wallet info")
         print("  [2] Create new wallet (overwrites existing)")
         print("  [3] Restore wallet from seed phrase (overwrites existing)")
-        if wallet_type == "v1":
-            print("  [4] Migrate to v2 format")
-            print("  [5] Exit")
-            max_choice = 5
-        else:
-            print("  [4] Exit")
-            max_choice = 4
+        print("  [4] Exit")
         
-        choice = input(f"\nEnter your choice (1-{max_choice}): ").strip()
+        choice = input("\nEnter your choice (1-4): ").strip()
         
         if choice == "1":
             view_wallet_info()
@@ -340,15 +335,11 @@ def main():
                 restore_wallet()
             else:
                 print("\n✅ Cancelled. Your existing wallet is safe.")
-        elif choice == "4" and wallet_type == "v1":
-            print("\n📦 To migrate your wallet, run:")
-            print("   python migrate_wallet.py wallet.json")
-            print("\n   This will safely upgrade to BIP-39 format with backup.")
-        elif (choice == "4" and wallet_type == "v2") or (choice == "5" and wallet_type == "v1"):
+        elif choice == "4":
             print("\n👋 Goodbye!")
             sys.exit(0)
         else:
-            print(f"\n❌ Invalid choice. Please enter a number between 1 and {max_choice}.")
+            print("\n❌ Invalid choice. Please enter 1, 2, 3, or 4.")
             sys.exit(1)
 
 
