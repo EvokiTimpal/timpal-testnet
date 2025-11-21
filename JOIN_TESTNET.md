@@ -61,39 +61,49 @@ pip3 install -r requirements.txt
 A wallet is required to operate a validator.  
 Run this command and **write down** your:
 
-- **Wallet address**
-- **12-word recovery phrase**
-- **PIN you choose later**
+- **12-word seed phrase** (CRITICAL - needed for wallet recovery)
+- **Wallet address** (starts with "tmpl")
+- **Password** (8+ characters - used to decrypt wallet file)
+- **PIN** (6+ digits - used to authorize transactions)
 
 ```bash
-python3 wallet_cli.py
+python3 wallet_cli_v2.py
 ```
 
 **For older systems (macOS, older Python):**  
 If you see `ModuleNotFoundError: No module named 'config'`, set PYTHONPATH first:
 ```bash
 export PYTHONPATH="$PWD/app:$PWD"
-python3 wallet_cli.py
+python3 wallet_cli_v2.py
 ```
+
+**Follow the prompts:**
+1. Choose "Create new wallet"
+2. Enter a secure password (min 8 characters)
+3. Enter a secure PIN (min 6 digits)
+4. **WRITE DOWN the 12-word seed phrase on paper** (never store digitally!)
+5. Save as `wallet_v2.json`
+
+**Important:** The seed phrase is the ONLY way to recover your wallet if you lose the file. Store it safely!
 
 ---
 
-# 🟧 4. Choose a secure PIN
+# 🟧 4. Set your wallet password
 
-Your node uses this PIN to unlock the wallet during startup.
+Your node uses the PASSWORD to decrypt the wallet file during startup.
 
-**Choose a 6-digit PIN** (example: 123456) and remember it.  
+**Remember the password you chose** when creating your wallet.  
 You'll need to export it **every time** before starting the node.
 
-(We'll set it in the next step before starting the node.)
+(The PIN you chose is stored inside the wallet and is only used when making transactions)
 
 ---
 
 # 🟥 5. Start your validator node
 
-**First, set your wallet PIN:**
+**First, set your wallet password:**
 ```bash
-export TIMPAL_WALLET_PIN="your_secure_pin"
+export TIMPAL_WALLET_PASSWORD="your_secure_password"
 ```
 
 **Then start the node:**
@@ -102,7 +112,8 @@ python3 run_testnet_node.py --port 3000 --seed ws://143.110.129.211:9000
 ```
 
 **Important:**
-- You **MUST** export your PIN before running the node (every time)
+- You **MUST** export your PASSWORD before running the node (every time)
+- Use the same password you chose when creating the wallet
 - `--port 3000` - Your local P2P port (can be any available port like 3000, 8001, 8002, etc.)
 - `--seed ws://143.110.129.211:9000` - Official TIMPAL Testnet bootstrap node (REQUIRED)
 
@@ -139,7 +150,7 @@ To restart the node:
 Run the same command:
 
 ```bash
-export TIMPAL_WALLET_PIN="your_pin"
+export TIMPAL_WALLET_PASSWORD="your_password"
 python3 run_testnet_node.py --port 3000 --seed ws://143.110.129.211:9000
 ```
 
@@ -176,7 +187,8 @@ Press **Ctrl + C** to stop the explorer.
 
 ## Check your balance
 ```bash
-python3 wallet_cli.py
+python3 wallet_cli_v2.py
+# Choose "View balance" and enter your password
 ```
 
 ## Check active validators
@@ -196,9 +208,10 @@ EOF
 - **Port 9000 is reserved for the bootstrap node** - Use a different port (3000, 8001, 8002, etc.)
 - **Always include --seed ws://143.110.129.211:9000** to connect to the testnet
 - One validator per device (Sybil-resistant design)  
-- Your wallet PIN must always be set before running the node  
-- **Do NOT delete your 12-word recovery phrase**  
-- **Do NOT share your PIN or recovery phrase**  
+- Your wallet PASSWORD must always be set before running the node (use `export TIMPAL_WALLET_PASSWORD`)
+- **Do NOT delete your 12-word seed phrase** - it's the ONLY way to recover your wallet
+- **Do NOT share your password, PIN, or seed phrase** - anyone with these can steal your funds
+- The PIN is stored inside your wallet and is only used when making transactions, not when starting the node  
 
 ---
 
@@ -229,16 +242,26 @@ If your node shows "Network nodes: 2" but you don't appear as a validator:
 3. The registration will be broadcast with a unique hash and included in the next block
 4. Check the block explorer after 2-3 blocks to confirm registration
 
-## Wallet Creation Issues on Older Systems
+## Wallet Creation Issues
 
-If `python3 wallet_cli.py` shows `ModuleNotFoundError: No module named 'config'`, set PYTHONPATH first:
+If `python3 wallet_cli_v2.py` shows `ModuleNotFoundError: No module named 'config'`, this is common on older systems. Set PYTHONPATH first:
 
 ```bash
+cd ~/Desktop/timpal-testnet
 export PYTHONPATH="$PWD/app:$PWD"
-python3 wallet_cli.py
+python3 wallet_cli_v2.py
 ```
 
-**Note:** The latest version should handle this automatically, but if you're on a very old Python environment (pre-3.8) or older macOS, this workaround ensures imports work correctly.
+**Note:** The v2 wallet system requires Python 3.8 or higher. Check your version with `python3 --version`.
+
+**For permanent fix on older systems:**
+Add this to your shell profile (~/.bashrc or ~/.zshrc):
+```bash
+# For TIMPAL testnet
+alias timpal-wallet='cd ~/Desktop/timpal-testnet && export PYTHONPATH="$PWD/app:$PWD" && python3 wallet_cli_v2.py'
+```
+
+Then you can just run `timpal-wallet` from anywhere.
 
 ---
 

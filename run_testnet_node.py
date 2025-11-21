@@ -36,6 +36,7 @@ config = config_testnet
 
 from node import Node
 from wallet import Wallet
+from seed_wallet import SeedWallet
 
 
 class TestnetNode:
@@ -49,35 +50,56 @@ class TestnetNode:
         os.makedirs(self.data_dir, exist_ok=True)
         
         # -----------------------------------------------
-        # TESTNET: Load wallet.json and set genesis validator
+        # TESTNET: Load wallet (v2 or v1) and set genesis validator
         # -----------------------------------------------
-        wallet_path = "wallet.json"
-        if not os.path.exists(wallet_path):
-            raise ValueError("wallet.json not found — cannot start testnet node")
         
-        temp_wallet = Wallet(wallet_path)
+        # Check for v2 wallet first, then v1
+        if os.path.exists("wallet_v2.json"):
+            wallet_path = "wallet_v2.json"
+            wallet_version = 2
+            print(f"[TESTNET] Loading v2 wallet (BIP-39)")
+        elif os.path.exists("wallet.json"):
+            wallet_path = "wallet.json"
+            wallet_version = 1
+            print(f"[TESTNET] Loading v1 wallet (legacy)")
+        else:
+            raise ValueError("No wallet found (wallet_v2.json or wallet.json) — cannot start testnet node")
         
-        wallet_pin = os.environ.get("TIMPAL_WALLET_PIN")
-        if not wallet_pin:
-            raise ValueError("TIMPAL_WALLET_PIN environment variable not set — cannot load wallet.json")
+        # Load wallet based on version
+        if wallet_version == 2:
+            # v2 wallet: Use TIMPAL_WALLET_PASSWORD for decryption
+            wallet_password = os.environ.get("TIMPAL_WALLET_PASSWORD")
+            if not wallet_password:
+                raise ValueError("TIMPAL_WALLET_PASSWORD environment variable not set — cannot decrypt v2 wallet")
+            
+            temp_wallet = SeedWallet(wallet_path)
+            temp_wallet.load_wallet(password=wallet_password)
+            account = temp_wallet.get_account(0)
+            private_key = account["private_key"]
+            public_key = account["public_key"]
+            reward_address = account["address"]
+        else:
+            # v1 wallet: Use TIMPAL_WALLET_PIN for decryption (legacy behavior)
+            wallet_pin = os.environ.get("TIMPAL_WALLET_PIN")
+            if not wallet_pin:
+                raise ValueError("TIMPAL_WALLET_PIN environment variable not set — cannot decrypt v1 wallet")
+            
+            temp_wallet = Wallet(wallet_path)
+            if not temp_wallet.load_wallet(wallet_pin):
+                raise ValueError(f"Failed to decrypt {wallet_path} — wrong PIN or corrupted file")
+            private_key = temp_wallet.private_key
+            public_key = temp_wallet.public_key
+            reward_address = temp_wallet.address
         
-        if not temp_wallet.load_wallet(wallet_pin):
-            raise ValueError("Failed to decrypt wallet.json — wrong PIN or corrupted file")
-        
-        private_key = temp_wallet.private_key
-        public_key = temp_wallet.public_key
-        reward_address = temp_wallet.address
-        
-        print(f"[TESTNET] Loaded validator key from wallet.json")
+        print(f"[TESTNET] Loaded validator key from {wallet_path}")
         print(f"[TESTNET] Address: {reward_address}")
         
-        # Only set GENESIS_VALIDATORS for bootstrap nodes (no seed nodes)
-        # Non-bootstrap nodes will sync validator registry from network
+        # SECURITY: DO NOT overwrite config.GENESIS_VALIDATORS
+        # All nodes MUST use the same static GENESIS_VALIDATORS from config
+        # to ensure canonical genesis block hash validation works
         if not seed_nodes:
-            config.GENESIS_VALIDATORS = {
-                reward_address: public_key
-            }
-            print(f"[TESTNET] Bootstrap mode: Genesis validator set to {reward_address}")
+            print(f"[TESTNET] Bootstrap mode: Using genesis validators from config")
+            print(f"  Genesis validators: {list(config.GENESIS_VALIDATORS.keys())}")
         else:
             print(f"[TESTNET] Network mode: Will sync from {len(seed_nodes)} seed node(s)")
         
@@ -239,26 +261,46 @@ class TestnetNode:
                         'message': 'Invalid amount format'
                     }, status=400)
                 
-                # Load wallet for this sender
-                wallet_path = "wallet.json"
-                
-                # Check if wallet exists
-                if not os.path.exists(wallet_path):
+                # Load wallet for this sender (support both v2 and v1)
+                if os.path.exists("wallet_v2.json"):
+                    wallet_path = "wallet_v2.json"
+                    wallet_version = 2
+                elif os.path.exists("wallet.json"):
+                    wallet_path = "wallet.json"
+                    wallet_version = 1
+                else:
                     return web.json_response({
                         'status': 'error',
                         'message': 'Wallet not found for this address'
                     }, status=404)
                 
-                # Load and decrypt wallet
-                temp_wallet = Wallet(wallet_path)
-                if not temp_wallet.load_wallet(pin):
+                # Load and decrypt wallet based on version
+                try:
+                    if wallet_version == 2:
+                        temp_wallet = SeedWallet(wallet_path)
+                        temp_wallet.load_wallet(password=pin)
+                        account = temp_wallet.get_account(0)
+                        wallet_address = account["address"]
+                        wallet_public_key = account["public_key"]
+                        wallet_private_key = account["private_key"]
+                    else:
+                        temp_wallet = Wallet(wallet_path)
+                        if not temp_wallet.load_wallet(pin):
+                            return web.json_response({
+                                'status': 'error',
+                                'message': 'Invalid PIN or wallet decryption failed'
+                            }, status=401)
+                        wallet_address = temp_wallet.address
+                        wallet_public_key = temp_wallet.public_key
+                        wallet_private_key = temp_wallet.private_key
+                except Exception as e:
                     return web.json_response({
                         'status': 'error',
-                        'message': 'Invalid PIN or wallet decryption failed'
+                        'message': f'Invalid PIN or wallet decryption failed: {str(e)}'
                     }, status=401)
                 
                 # Verify wallet address matches sender
-                if temp_wallet.address != sender:
+                if wallet_address != sender:
                     return web.json_response({
                         'status': 'error',
                         'message': 'Wallet address does not match sender address'
@@ -293,15 +335,16 @@ class TestnetNode:
                     fee=fee,
                     timestamp=time.time(),
                     nonce=next_nonce,
-                    public_key=temp_wallet.public_key,
+                    public_key=wallet_public_key,
                     tx_type='transfer'
                 )
                 
                 # Sign transaction
-                tx.sign(temp_wallet.private_key)
+                tx.sign(wallet_private_key)
                 
                 # Clear sensitive data
-                del temp_wallet
+                del wallet_private_key
+                del wallet_public_key
                 del pin
                 
                 # Submit to mempool

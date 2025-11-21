@@ -29,15 +29,15 @@ PHASE1_BLOCKS = 394_200_000
 FEE = 50_000  # 0.0005 TMPL (50,000 pals = 0.0005 × 100,000,000)
 
 # Genesis timestamp (STATIC for canonical genesis validation)
-# Testnet Genesis: November 20, 2025 00:00:00 UTC
+# Testnet Genesis v2: November 21, 2025 00:00:00 UTC (v2 wallet with BIP-39)
 # This MUST remain fixed to ensure all nodes agree on canonical genesis block hash
-GENESIS_TIMESTAMP = 1732060800
+GENESIS_TIMESTAMP = 1732147200
 
 # Canonical genesis block hash (SECURITY: prevents eclipse attacks)
 # This hash MUST match the locally-created genesis block exactly
 # Any genesis block from the network that doesn't match this hash will be REJECTED
-# Generated from: generate_canonical_genesis.py (matches Block.create_genesis_block())
-CANONICAL_GENESIS_HASH = "9970067eb17c1de6ac9f68b4124bf89df27aa26d00c3d21fe742f975578c5eb1"
+# Generated with v2 wallet (BIP-39): generate_new_genesis_v2.py
+CANONICAL_GENESIS_HASH = "d7935f7729b76678e2e355fe06c4079f1136310c67f18877d69ce042994e62f3"
 
 # EPOCH-BASED CONSENSUS (for 100,000+ validator scalability)
 # TESTNET ADJUSTMENT: Shorter epochs (10 blocks = 30s) for faster testing
@@ -66,9 +66,9 @@ MAX_BLOCK_SIZE_BYTES = 900_000
 MAX_FUTURE_TIMESTAMP_DRIFT = 300
 
 GENESIS_VALIDATORS = {
-    # Genesis validator from wallet.json (testnet bootstrap node)
-    "tmpl568d55ba3f9fb14f935ba37ccdd6c8033e7ba2558752":
-    "ef5dd20b86ce98c45eb64964a64dbb9f4528742a70e43d1f88eea889b5b510ac4c5a06f420795b5597a0c290fe9702c3fd720a333d35fa03e0585022c6d82ce9"
+    # Genesis validator from genesis_wallet_v2.json (BIP-39 testnet bootstrap node)
+    "tmpl7a255cb7912eed25bac00c5a2e6b5604518d2b0b":
+    "f65f0b2af11bd445c5f3e2c3d912138569a36a0e4f4a49dc000a0ef5355cc6a6b5bbe3248d49650e3c7b1de452840a6ea3631a87d69f0d09740a8033d90b06fd"
 }
 
 DEFAULT_P2P_PORT = 8765

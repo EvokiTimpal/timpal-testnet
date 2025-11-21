@@ -15,6 +15,8 @@ import os
 
 from app.ledger import Ledger
 from app.wallet import Wallet
+from app.seed_wallet import SeedWallet
+from app.wallet_loader import detect_wallet_version, load_wallet_unified
 from app import config_testnet as config
 
 def print_header(title):
@@ -25,17 +27,30 @@ def print_header(title):
 
 def load_wallet():
     """Load wallet and return address"""
-    wallet_file = "wallet.json"
-    if not os.path.exists(wallet_file):
+    # Check for v2 wallet first, then v1
+    wallet_file = None
+    if os.path.exists("wallet_v2.json"):
+        wallet_file = "wallet_v2.json"
+        wallet_version = 2
+    elif os.path.exists("wallet.json"):
+        wallet_file = "wallet.json"
+        wallet_version = 1
+    else:
         print(f"❌ Wallet not found. Please create a wallet first.")
-        print(f"   Run: python app/wallet.py")
+        print(f"   For v2 wallet (recommended): python wallet_cli_v2.py")
+        print(f"   For v1 wallet (legacy): python wallet_cli.py")
         return None
     
-    pin = input("Enter your wallet PIN: ")
+    pin = input(f"Enter your wallet PIN/password: ")
     try:
-        wallet = Wallet(wallet_file)
-        wallet.load_wallet(pin)
-        return wallet.address
+        if wallet_version == 2:
+            wallet = SeedWallet(wallet_file)
+            wallet.load_wallet(password=pin)
+            return wallet.get_account(0)["address"]
+        else:
+            wallet = Wallet(wallet_file)
+            wallet.load_wallet(pin)
+            return wallet.address
     except Exception as e:
         print(f"❌ Failed to load wallet: {e}")
         return None
