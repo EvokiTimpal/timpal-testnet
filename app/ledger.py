@@ -1236,12 +1236,14 @@ class Ledger:
                 except Exception as e:
                     print(f"⚠️  ERROR: Failed to get online validators from callback: {e}")
             
-            # No callback or callback failed - return empty set (no rewards)
+            # No callback or callback failed - return empty list (no rewards)
             if current_time - self._last_attestation_warning < 60:
                 print(f"   No P2P callback available - NO REWARDS will be distributed")
-            return set()
+            return []
         
-        return validators_with_attestations
+        # CRITICAL FIX: Return sorted list, not set (sets have non-deterministic order)
+        # This ensures reward_allocations dict is built in same order on all nodes
+        return sorted(list(validators_with_attestations))
     
 
     def get_active_validators(self) -> list:
@@ -1298,7 +1300,9 @@ class Ledger:
 
             active.append(addr)
 
-        return active
+        # CRITICAL FIX: Return sorted list for deterministic reward_allocations ordering
+        # This ensures all nodes build reward dicts in identical order → same block hash
+        return sorted(active)
     
     
     def register_validator(self, address: str, public_key: str, device_id: str) -> bool:
@@ -1861,6 +1865,9 @@ class Ledger:
         # Step 1: Increment ALL validators' priorities by their voting power
         for validator in active_validators:
             addr = validator['address']
+            # Initialize proposer_priority if missing (for old validators)
+            if 'proposer_priority' not in self.validator_registry[addr]:
+                self.validator_registry[addr]['proposer_priority'] = 0
             self.validator_registry[addr]['proposer_priority'] += validator['voting_power']
             validator['priority'] = self.validator_registry[addr]['proposer_priority']
         
@@ -1869,7 +1876,11 @@ class Ledger:
                                 key=lambda v: (v['priority'], -ord(v['address'][0])))
         
         # Step 3: Decrement selected validator's priority by total voting power
-        self.validator_registry[selected_validator['address']]['proposer_priority'] -= total_voting_power
+        sel_addr = selected_validator['address']
+        # Initialize if missing (safety check)
+        if 'proposer_priority' not in self.validator_registry[sel_addr]:
+            self.validator_registry[sel_addr]['proposer_priority'] = 0
+        self.validator_registry[sel_addr]['proposer_priority'] -= total_voting_power
     
     def activate_pending_validators(self, current_height: int):
         """
@@ -2161,7 +2172,7 @@ class Ledger:
         This is used during chain reorganization to undo blocks.
         
         Args:
-            target_height: Height to rollback to (-1 for empty chain)
+            target_height: Height to rollback to (minimum 0 to preserve genesis)
         
         Returns:
             True if successful, False otherwise
@@ -2170,9 +2181,13 @@ class Ledger:
             print(f"Cannot rollback to height {target_height} - current height is {len(self.blocks) - 1}")
             return False
         
-        if target_height < -1:
-            print(f"Invalid rollback height {target_height}")
-            return False
+        # CRITICAL FIX: Never rollback below genesis (height 0)
+        # Previous bug: allowed target_height=-1, which removed genesis block
+        # This caused reorg to fail with "expected block 0, got block 1"
+        if target_height < 0:
+            print(f"❌ Cannot rollback below genesis (target_height={target_height})")
+            print(f"   Clamping to height 0 to preserve genesis block")
+            target_height = 0
         
         current_height = len(self.blocks) - 1
         blocks_to_remove = current_height - target_height
