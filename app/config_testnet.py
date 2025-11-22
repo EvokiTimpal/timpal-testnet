@@ -36,8 +36,9 @@ GENESIS_TIMESTAMP = 1732147200
 # Canonical genesis block hash (SECURITY: prevents eclipse attacks)
 # This hash MUST match the locally-created genesis block exactly
 # Any genesis block from the network that doesn't match this hash will be REJECTED
-# Generated with v2 wallet (BIP-39): generate_new_genesis_v2.py - FIXED ADDRESS FORMAT (44 hex chars)
-CANONICAL_GENESIS_HASH = "a9a0e74b1c6a4faa72d448ad32312a93ade41265ee3f31b30d5cd3612c6fc801"
+# Generated with v2 wallet (BIP-39) - FIXED ADDRESS FORMAT (44 hex chars)
+# Seed phrase: "occur twice shock opinion detail round ridge tape modify stay bargain suffer"
+CANONICAL_GENESIS_HASH = "8060366d4a15ca7be0081c7e594afad76dd0100f0df29db66f290bd3ca582cd9"
 
 # EPOCH-BASED CONSENSUS (for 100,000+ validator scalability)
 # TESTNET ADJUSTMENT: Shorter epochs (10 blocks = 30s) for faster testing
@@ -66,10 +67,11 @@ MAX_BLOCK_SIZE_BYTES = 900_000
 MAX_FUTURE_TIMESTAMP_DRIFT = 300
 
 GENESIS_VALIDATORS = {
-    # Genesis validator from genesis_wallet_v2.json (BIP-39 testnet bootstrap node)
+    # Genesis validator from wallet_v2.json (BIP-39 testnet bootstrap node)
     # FIXED ADDRESS FORMAT: 44 hex chars after "tmpl" prefix (matches Transaction._public_key_to_address)
-    "tmpl0915f83565b5e70980568a1e6a131325488d78f56df5":
-    "56835768c535d488090180ddb51b0a81f3b4c522ebf983f2b682d143b0fede15503a6cbf7b3af061dbfaf820e68d9a7bf06491c5d0ac55b7c3c6b9b45e62dfb4"
+    # Seed phrase: "occur twice shock opinion detail round ridge tape modify stay bargain suffer"
+    "tmpl7a255cb7912eed25bac00c5a2e6b5604518d2b0b2c8e":
+    "f65f0b2af11bd445c5f3e2c3d912138569a36a0e4f4a49dc000a0ef5355cc6a6b5bbe3248d49650e3c7b1de452840a6ea3631a87d69f0d09740a8033d90b06fd"
 }
 
 DEFAULT_P2P_PORT = 8765
