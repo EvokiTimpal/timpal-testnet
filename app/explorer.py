@@ -1258,29 +1258,34 @@ async def submit_transfer(request: Request, sender_address: str = Form(...), pas
             try:
                 # Try to load as SeedWallet (v2)
                 temp_wallet = SeedWallet(wf)
-                if temp_wallet.unlock(password):
-                    # Check if this wallet has an account matching sender_address
-                    if hasattr(temp_wallet, 'accounts') and temp_wallet.accounts:
-                        # Get first account (index 0)
-                        account = temp_wallet.accounts.get(0)
-                        if account and account['address'] == sender_address:
-                            seed_wallet = temp_wallet
-                            wallet_address = account['address']
-                            break
-            except Exception:
+                # CRITICAL: load_wallet() doesn't return bool - it raises ValueError on failure
+                temp_wallet.load_wallet(password)  # Raises ValueError if password wrong
+                
+                # Check if this wallet has an account matching sender_address
+                # CRITICAL: accounts dict uses STRING keys, not integers
+                account = temp_wallet.accounts.get("0")  # Get first account (string "0")
+                if account and account['address'] == sender_address:
+                    seed_wallet = temp_wallet
+                    wallet_address = account['address']
+                    break
+            except ValueError as e:
+                # Bad password - try next wallet file
+                continue
+            except Exception as e:
+                # Other errors (file format, etc.)
                 continue
         
         if not seed_wallet:
             return JSONResponse({"error": "Wallet not found for this address, or incorrect password"}, status_code=400)
         
-        # Verify PIN
-        if not seed_wallet.verify_pin(pin):
-            return JSONResponse({"error": "Incorrect PIN"}, status_code=400)
-        
-        # Get account keys
-        account = seed_wallet.accounts.get(0)
+        # Get account keys (use string "0" not integer 0)
+        account = seed_wallet.accounts.get("0")
         if not account:
             return JSONResponse({"error": "No account found in wallet"}, status_code=500)
+        
+        # Verify PIN before using keys
+        if not seed_wallet.verify_pin(pin):
+            return JSONResponse({"error": "Incorrect PIN"}, status_code=400)
         
         wallet_private_key = account['private_key']
         wallet_public_key = account['public_key']
