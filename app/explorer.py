@@ -1134,10 +1134,17 @@ async def send_transfer_page(request: Request):
                     </div>
                     
                     <div class="form-group">
+                        <label for="password">Wallet Password:</label>
+                        <input type="password" id="password" name="password" 
+                               placeholder="Enter your wallet password" required>
+                        <small style="color: #888;">🔐 Password is used to decrypt your wallet file</small>
+                    </div>
+                    
+                    <div class="form-group">
                         <label for="pin">Wallet PIN:</label>
                         <input type="password" id="pin" name="pin" 
-                               placeholder="Enter your wallet PIN" required>
-                        <small style="color: #888;">🔒 Your PIN is never stored - only used to decrypt your wallet</small>
+                               placeholder="Enter your 6+ digit PIN" required>
+                        <small style="color: #888;">🔒 PIN is used to authorize this specific transfer</small>
                     </div>
                     
                     <div class="form-group">
@@ -1221,7 +1228,7 @@ async def send_transfer_page(request: Request):
 
 @app.post("/send")
 @limiter.limit("5/minute")
-async def submit_transfer(request: Request, sender_address: str = Form(...), pin: str = Form(...), recipient: str = Form(...), amount: float = Form(...)):
+async def submit_transfer(request: Request, sender_address: str = Form(...), password: str = Form(...), pin: str = Form(...), recipient: str = Form(...), amount: float = Form(...)):
     """Handle transfer submission"""
     try:
         # Validate inputs
@@ -1239,44 +1246,50 @@ async def submit_transfer(request: Request, sender_address: str = Form(...), pin
         except ValueError:
             return JSONResponse({"error": "Invalid amount format"}, status_code=400)
         
-        # Auto-discover wallet file for this address
+        # Auto-discover wallet_v2.json file
         import glob
+        from app.seed_wallet import SeedWallet
+        
         wallet_files = glob.glob("wallet*.json") + glob.glob("**/wallet*.json", recursive=True)
-        wallet_path = None
-        checked_wallets = []
+        seed_wallet = None
+        wallet_address = None
         
         for wf in wallet_files:
             try:
-                temp_wallet = Wallet(wf)
-                if temp_wallet.load_wallet(pin):
-                    checked_wallets.append(f"{wf}: {temp_wallet.address}")
-                    if temp_wallet.address == sender_address:
-                        wallet_path = wf
-                        break
-            except Exception as e:
-                checked_wallets.append(f"{wf}: error ({str(e)[:50]})")
+                # Try to load as SeedWallet (v2)
+                temp_wallet = SeedWallet(wf)
+                if temp_wallet.unlock(password):
+                    # Check if this wallet has an account matching sender_address
+                    if hasattr(temp_wallet, 'accounts') and temp_wallet.accounts:
+                        # Get first account (index 0)
+                        account = temp_wallet.accounts.get(0)
+                        if account and account['address'] == sender_address:
+                            seed_wallet = temp_wallet
+                            wallet_address = account['address']
+                            break
+            except Exception:
                 continue
         
-        if not wallet_path:
-            error_msg = "Wallet not found for this address, or incorrect PIN"
-            if checked_wallets:
-                error_msg += f". Checked: {', '.join(checked_wallets[:3])}"
-            return JSONResponse({"error": error_msg}, status_code=400)
+        if not seed_wallet:
+            return JSONResponse({"error": "Wallet not found for this address, or incorrect password"}, status_code=400)
         
-        # Load the correct wallet
-        wallet = Wallet(wallet_path)
-        if not wallet.load_wallet(pin):
-            return JSONResponse({"error": "Failed to load wallet - check PIN"}, status_code=400)
+        # Verify PIN
+        if not seed_wallet.verify_pin(pin):
+            return JSONResponse({"error": "Incorrect PIN"}, status_code=400)
         
-        # Ensure wallet is loaded properly
-        if not wallet.address or not wallet.private_key or not wallet.public_key:
-            return JSONResponse({"error": "Wallet data incomplete after loading"}, status_code=500)
+        # Get account keys
+        account = seed_wallet.accounts.get(0)
+        if not account:
+            return JSONResponse({"error": "No account found in wallet"}, status_code=500)
+        
+        wallet_private_key = account['private_key']
+        wallet_public_key = account['public_key']
         
         # Get current nonce from node
         import os
         node_api_port = os.getenv("EXPLORER_API_PORT", "9001")
         async with aiohttp.ClientSession() as session:
-            async with session.get(f"http://localhost:{node_api_port}/api/account/{wallet.address}") as resp:
+            async with session.get(f"http://localhost:{node_api_port}/api/account/{sender_address}") as resp:
                 if resp.status == 200:
                     account_data = await resp.json()
                     nonce = account_data['pending_nonce']
@@ -1286,15 +1299,15 @@ async def submit_transfer(request: Request, sender_address: str = Form(...), pin
         
         # Convert TMPL to pals
         amount_pals = int(amount * config.PALS_PER_TMPL)
-        fee_pals = 500000000  # 0.0005 TMPL fixed fee
+        fee_pals = 50000  # 0.0005 TMPL fixed fee
         
         # Check balance
         if balance < amount_pals + fee_pals:
-            return JSONResponse({"error": f"Insufficient balance. Need {(amount_pals + fee_pals) / 1e9:.8f} TMPL, have {balance / 1e9:.8f} TMPL"}, status_code=400)
+            return JSONResponse({"error": f"Insufficient balance. Need {(amount_pals + fee_pals) / config.PALS_PER_TMPL:.8f} TMPL, have {balance / config.PALS_PER_TMPL:.8f} TMPL"}, status_code=400)
         
         # Create and sign transaction
         tx = Transaction(
-            sender=wallet.address,
+            sender=sender_address,
             recipient=recipient,
             amount=amount_pals,
             fee=fee_pals,
@@ -1302,8 +1315,8 @@ async def submit_transfer(request: Request, sender_address: str = Form(...), pin
             nonce=nonce,
             tx_type="transfer"
         )
-        tx.public_key = wallet.public_key
-        tx.sign(wallet.private_key)
+        tx.public_key = wallet_public_key
+        tx.sign(wallet_private_key)
         
         # Submit to node's HTTP API
         import os
@@ -1321,8 +1334,6 @@ async def submit_transfer(request: Request, sender_address: str = Form(...), pin
                     error_text = await resp.text()
                     return JSONResponse({"error": f"Node rejected transaction: {error_text}"}, status_code=400)
                     
-    except FileNotFoundError:
-        return JSONResponse({"error": f"Wallet file not found: {wallet_path}"}, status_code=404)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
