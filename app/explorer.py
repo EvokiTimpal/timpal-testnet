@@ -59,9 +59,23 @@ def get_ledger() -> Ledger:
     """Get ledger instance with 5-second caching for performance"""
     global _ledger_cache, _ledger_cache_time
     
-    # Allow data directory to be configured via environment variable
+    # Auto-detect local node data directory or use environment variable
     import os
-    data_dir = os.getenv("EXPLORER_DATA_DIR", "testnet_data_node_9000/ledger")
+    import glob
+    
+    data_dir = os.getenv("EXPLORER_DATA_DIR")
+    
+    if not data_dir:
+        # Auto-detect: find any testnet_data_node_* directory with blockchain data
+        node_dirs = glob.glob("testnet_data_node_*/ledger")
+        if node_dirs:
+            # Prefer the most recently modified directory (active node)
+            data_dir = sorted(node_dirs, key=lambda x: os.path.getmtime(x), reverse=True)[0]
+            print(f"📊 Explorer auto-detected blockchain data: {data_dir}")
+        else:
+            # Fallback to default (VPS genesis node)
+            data_dir = "testnet_data_node_9000/ledger"
+            print(f"⚠️  No blockchain data found, using default: {data_dir}")
     
     current_time = time.time()
     if _ledger_cache is None or (current_time - _ledger_cache_time) > CACHE_TTL:
