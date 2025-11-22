@@ -1150,13 +1150,11 @@ async def send_transfer_page(request: Request):
                     <div class="form-group">
                         <label for="amount">Amount (TMPL):</label>
                         <input type="text" id="amount" name="amount" 
-                               placeholder="0.00000000" 
-                               pattern="[0-9]+(\.[0-9]{1,8})?" 
-                               title="Enter amount in TMPL (up to 8 decimal places)" required>
+                               placeholder="0.00000000" required>
                         <small style="color: #888;">Minimum: 0.00000001 TMPL (+ 0.0005 TMPL fee)</small>
                     </div>
                     
-                    <button type="submit" class="btn-submit">📤 Send Transfer</button>
+                    <button type="submit" class="btn-submit">📤 Send TMPL</button>
                 </form>
                 
                 <div id="result" style="margin-top: 20px;"></div>
