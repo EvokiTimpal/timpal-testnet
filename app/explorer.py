@@ -1241,21 +1241,27 @@ async def submit_transfer(request: Request, sender_address: str = Form(...), pin
         
         # Auto-discover wallet file for this address
         import glob
-        wallet_files = glob.glob("wallet_*.json") + glob.glob("**/wallet_*.json", recursive=True)
+        wallet_files = glob.glob("wallet*.json") + glob.glob("**/wallet*.json", recursive=True)
         wallet_path = None
+        checked_wallets = []
         
         for wf in wallet_files:
             try:
                 temp_wallet = Wallet(wf)
                 if temp_wallet.load_wallet(pin):
+                    checked_wallets.append(f"{wf}: {temp_wallet.address}")
                     if temp_wallet.address == sender_address:
                         wallet_path = wf
                         break
-            except:
+            except Exception as e:
+                checked_wallets.append(f"{wf}: error ({str(e)[:50]})")
                 continue
         
         if not wallet_path:
-            return JSONResponse({"error": "Wallet not found for this address, or incorrect PIN"}, status_code=400)
+            error_msg = "Wallet not found for this address, or incorrect PIN"
+            if checked_wallets:
+                error_msg += f". Checked: {', '.join(checked_wallets[:3])}"
+            return JSONResponse({"error": error_msg}, status_code=400)
         
         # Load the correct wallet
         wallet = Wallet(wallet_path)
