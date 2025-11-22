@@ -1221,10 +1221,13 @@ async def send_transfer_page(request: Request):
 
 @app.post("/send")
 @limiter.limit("5/minute")
-async def submit_transfer(request: Request, pin: str = Form(...), recipient: str = Form(...), amount: float = Form(...), wallet_path: str = Form("wallet_v2.json")):
+async def submit_transfer(request: Request, sender_address: str = Form(...), pin: str = Form(...), recipient: str = Form(...), amount: float = Form(...)):
     """Handle transfer submission"""
     try:
         # Validate inputs
+        if not sender_address.startswith("tmpl"):
+            return JSONResponse({"error": "Invalid sender address - must start with 'tmpl'"}, status_code=400)
+        
         if not recipient.startswith("tmpl"):
             return JSONResponse({"error": "Invalid recipient address - must start with 'tmpl'"}, status_code=400)
         
@@ -1236,10 +1239,28 @@ async def submit_transfer(request: Request, pin: str = Form(...), recipient: str
         except ValueError:
             return JSONResponse({"error": "Invalid amount format"}, status_code=400)
         
-        # Load wallet
+        # Auto-discover wallet file for this address
+        import glob
+        wallet_files = glob.glob("wallet_*.json") + glob.glob("**/wallet_*.json", recursive=True)
+        wallet_path = None
+        
+        for wf in wallet_files:
+            try:
+                temp_wallet = Wallet(wf)
+                if temp_wallet.load_wallet(pin):
+                    if temp_wallet.address == sender_address:
+                        wallet_path = wf
+                        break
+            except:
+                continue
+        
+        if not wallet_path:
+            return JSONResponse({"error": "Wallet not found for this address, or incorrect PIN"}, status_code=400)
+        
+        # Load the correct wallet
         wallet = Wallet(wallet_path)
         if not wallet.load_wallet(pin):
-            return JSONResponse({"error": "Failed to load wallet - check path and PIN"}, status_code=400)
+            return JSONResponse({"error": "Failed to load wallet - check PIN"}, status_code=400)
         
         # Ensure wallet is loaded properly
         if not wallet.address or not wallet.private_key or not wallet.public_key:
