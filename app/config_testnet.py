@@ -38,7 +38,8 @@ GENESIS_TIMESTAMP = 1732147200
 # Any genesis block from the network that doesn't match this hash will be REJECTED
 # Generated with v2 wallet (BIP-39) - FIXED ADDRESS FORMAT (44 hex chars)
 # Seed phrase: "occur twice shock opinion detail round ridge tape modify stay bargain suffer"
-CANONICAL_GENESIS_HASH = "8060366d4a15ca7be0081c7e594afad76dd0100f0df29db66f290bd3ca582cd9"
+# Address: tmpl7a255cb7912eed25bac00c5a2e6b5604518d2b0b2c8e
+CANONICAL_GENESIS_HASH = "e561a47a048302125afda454912f34a2b9fe7ef612d4762b67d74c499db17691"
 
 # EPOCH-BASED CONSENSUS (for 100,000+ validator scalability)
 # TESTNET ADJUSTMENT: Shorter epochs (10 blocks = 30s) for faster testing

@@ -1,6 +1,7 @@
 import hashlib
 import json
 import time
+import config  # CRITICAL: Import at module level so sys.modules override works
 from typing import List, Optional, Dict
 from app.transaction import Transaction
 
@@ -134,8 +135,7 @@ class Block:
     
     @classmethod
     def create_genesis_block(cls, genesis_address: str = None, genesis_public_key: str = None):
-        import config
-        import time
+        # config is imported at module level to respect sys.modules override
         from transaction import Transaction
         
         # SECURITY: ALWAYS use config.GENESIS_VALIDATORS to create identical genesis blocks
