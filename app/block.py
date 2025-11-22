@@ -134,7 +134,7 @@ class Block:
         )
     
     @classmethod
-    def create_genesis_block(cls, genesis_address: str = None, genesis_public_key: str = None):
+    def create_genesis_block(cls, genesis_address: Optional[str] = None, genesis_public_key: Optional[str] = None):
         # config is imported at module level to respect sys.modules override
         from transaction import Transaction
         

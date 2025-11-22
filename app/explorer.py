@@ -59,9 +59,13 @@ def get_ledger() -> Ledger:
     """Get ledger instance with 5-second caching for performance"""
     global _ledger_cache, _ledger_cache_time
     
+    # Allow data directory to be configured via environment variable
+    import os
+    data_dir = os.getenv("EXPLORER_DATA_DIR", "testnet_data_node_9000/ledger")
+    
     current_time = time.time()
     if _ledger_cache is None or (current_time - _ledger_cache_time) > CACHE_TTL:
-        _ledger_cache = Ledger(data_dir="testnet_data_node_9000/ledger", use_production_storage=True)
+        _ledger_cache = Ledger(data_dir=data_dir, use_production_storage=True)
         _ledger_cache_time = current_time
     
     return _ledger_cache
@@ -1109,13 +1113,6 @@ async def send_transfer_page(request: Request):
                 <h2>📝 Transfer Details</h2>
                 <form id="transferForm" method="POST" action="/send">
                     <div class="form-group">
-                        <label for="wallet_path">Wallet File Path:</label>
-                        <input type="text" id="wallet_path" name="wallet_path" 
-                               value="wallet.json" placeholder="wallet.json" required>
-                        <small style="color: #888;">📂 Path to your wallet.json file (relative to project root)</small>
-                    </div>
-                    
-                    <div class="form-group">
                         <label for="sender_address">Sender Address:</label>
                         <input type="text" id="sender_address" name="sender_address" 
                                placeholder="tmpl..." required>
@@ -1138,9 +1135,10 @@ async def send_transfer_page(request: Request):
                     
                     <div class="form-group">
                         <label for="amount">Amount (TMPL):</label>
-                        <input type="number" id="amount" name="amount" 
-                               step="0.00000001" min="0.00000001" 
-                               placeholder="0.00000000" required>
+                        <input type="text" id="amount" name="amount" 
+                               placeholder="0.00000000" 
+                               pattern="[0-9]+(\.[0-9]{1,8})?" 
+                               title="Enter amount in TMPL (up to 8 decimal places)" required>
                         <small style="color: #888;">Minimum: 0.00000001 TMPL (+ 0.0005 TMPL fee)</small>
                     </div>
                     
@@ -1211,15 +1209,20 @@ async def send_transfer_page(request: Request):
 
 @app.post("/send")
 @limiter.limit("5/minute")
-async def submit_transfer(request: Request, wallet_path: str = Form(...), pin: str = Form(...), recipient: str = Form(...), amount: float = Form(...)):
+async def submit_transfer(request: Request, pin: str = Form(...), recipient: str = Form(...), amount: float = Form(...), wallet_path: str = Form("wallet_v2.json")):
     """Handle transfer submission"""
     try:
         # Validate inputs
         if not recipient.startswith("tmpl"):
             return JSONResponse({"error": "Invalid recipient address - must start with 'tmpl'"}, status_code=400)
         
-        if amount <= 0:
-            return JSONResponse({"error": "Amount must be greater than 0"}, status_code=400)
+        # Validate amount
+        try:
+            amount = float(amount)
+            if amount <= 0:
+                return JSONResponse({"error": "Amount must be greater than 0"}, status_code=400)
+        except ValueError:
+            return JSONResponse({"error": "Invalid amount format"}, status_code=400)
         
         # Load wallet
         wallet = Wallet(wallet_path)
@@ -1231,8 +1234,10 @@ async def submit_transfer(request: Request, wallet_path: str = Form(...), pin: s
             return JSONResponse({"error": "Wallet data incomplete after loading"}, status_code=500)
         
         # Get current nonce from node
+        import os
+        node_api_port = os.getenv("EXPLORER_API_PORT", "9001")
         async with aiohttp.ClientSession() as session:
-            async with session.get(f"http://localhost:9001/api/account/{wallet.address}") as resp:
+            async with session.get(f"http://localhost:{node_api_port}/api/account/{wallet.address}") as resp:
                 if resp.status == 200:
                     account_data = await resp.json()
                     nonce = account_data['pending_nonce']
@@ -1262,8 +1267,10 @@ async def submit_transfer(request: Request, wallet_path: str = Form(...), pin: s
         tx.sign(wallet.private_key)
         
         # Submit to node's HTTP API
+        import os
+        node_api_port = os.getenv("EXPLORER_API_PORT", "9001")
         async with aiohttp.ClientSession() as session:
-            async with session.post("http://localhost:9001/submit_transaction", json=tx.to_dict()) as resp:
+            async with session.post(f"http://localhost:{node_api_port}/submit_transaction", json=tx.to_dict()) as resp:
                 if resp.status == 200:
                     result = await resp.json()
                     return JSONResponse({
