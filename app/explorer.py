@@ -453,13 +453,17 @@ async def get_blocks(request: Request, limit: int = 50, offset: int = 0):
         timestamp_str = datetime.fromtimestamp(block.timestamp).strftime('%Y-%m-%d %H:%M:%S')
         # Count only transfer transactions (exclude heartbeats and registrations)
         transfer_count = sum(1 for tx in block.transactions if tx.tx_type == "transfer")
+        
+        # Calculate total reward distributed (base + transaction fees)
+        total_distributed = sum(block.reward_allocations.values()) if block.reward_allocations else block.reward
+        
         block_rows += f"""
             <tr>
                 <td><a href="/blocks/{block.height}" style="font-weight: bold;">#{block.height}</a></td>
                 <td style="font-size: 0.85em;">{timestamp_str}</td>
                 <td><a href="/address/{block.proposer}" style="font-family: monospace; font-size: 0.85em;">{block.proposer[:12]}...</a></td>
                 <td>{transfer_count}</td>
-                <td>{format_pals(block.reward)}</td>
+                <td>{format_pals(total_distributed)}</td>
                 <td><a href="/blocks/{block.height}" style="font-family: monospace; font-size: 0.85em;">{block.block_hash[:16]}...</a></td>
             </tr>
         """
