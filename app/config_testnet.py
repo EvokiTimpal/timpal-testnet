@@ -83,6 +83,11 @@ FINALITY_CHECKPOINT_INTERVAL = 100
 ATTACK_PREVENTION_THRESHOLD = MAX_SUPPLY_PALS // 2
 ATTACK_REORG_THRESHOLD = 4
 
+# Validator liveness detection
+# Only validators within this many blocks of chain head receive rewards
+# 3 blocks = ~9 seconds tolerance (fair to online validators)
+VALIDATOR_SYNC_TOLERANCE_BLOCKS = 3
+
 # Validator economics (same as mainnet for realistic testing)
 VALIDATOR_DEPOSIT_PALS = 100 * PALS_PER_TMPL
 MIN_DEPOSIT_PALS = 50 * PALS_PER_TMPL
