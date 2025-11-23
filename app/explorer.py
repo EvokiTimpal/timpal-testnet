@@ -1314,8 +1314,8 @@ async def submit_transfer(request: Request, sender_address: str = Form(...), pas
                 else:
                     return JSONResponse({"error": "Failed to fetch account info from node"}, status_code=500)
         
-        # Convert TMPL to pals
-        amount_pals = int(amount * config.PALS_PER_TMPL)
+        # Convert TMPL to pals (use round() to avoid floating-point precision errors)
+        amount_pals = round(amount * config.PALS_PER_TMPL)
         fee_pals = 50000  # 0.0005 TMPL fixed fee
         
         # Check balance
