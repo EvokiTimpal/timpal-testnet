@@ -620,10 +620,27 @@ class Node:
                 # After catch-up, skip this mining cycle to refresh state
                 continue
             else:
-                # We're at head - mark as synced
-                if not self.synced:
-                    print(f"✅ SYNC STATUS: At network head (height: {local_height})")
+                # CRITICAL FIX: Only mark as synced if we have peers OR we're the bootstrap node
+                # This prevents validator nodes from creating independent chains when disconnected
+                # max_peer_height can be 0 in two cases:
+                #   1. Bootstrap node with no seeds (GOOD - should create blocks)
+                #   2. Validator node with no peer connections (BAD - should wait for peers)
+                has_peers = max_peer_height > 0 or peer_count > 0
+                can_be_synced = is_bootstrap or has_peers
+                
+                if not self.synced and can_be_synced:
+                    if is_bootstrap:
+                        print(f"✅ SYNC STATUS: Bootstrap node at height {local_height} (no peers required)")
+                    else:
+                        print(f"✅ SYNC STATUS: At network head (height: {local_height}, peers: {peer_count})")
                     self.synced = True
+                elif not self.synced and not can_be_synced:
+                    # Validator node with no peers - keep waiting
+                    if next_height % 30 == 0:
+                        print(f"⏸️  WAITING FOR PEERS: Cannot sync without peer connections (height: {local_height})")
+                        print(f"   Seed nodes: {self.p2p.seed_nodes}")
+                    await asyncio.sleep(1.0)
+                    continue
             
             # STAGE 3: Gate proposer participation until synced
             if not self.synced:
