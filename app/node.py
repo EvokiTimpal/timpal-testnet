@@ -144,8 +144,10 @@ class Node:
         # Get our current chain height
         our_height = len(self.ledger.blocks) - 1
         
-        # Maximum allowed height difference (100 blocks = ~5 minutes at 3s/block)
-        MAX_HEIGHT_DIFFERENCE = 100
+        # Maximum allowed height difference (3 blocks = ~9 seconds at 3s/block)
+        # This ensures only actively synced validators receive rewards
+        # User requirement: Offline validators should not continue earning for 100 blocks (unfair)
+        MAX_HEIGHT_DIFFERENCE = getattr(config, 'VALIDATOR_SYNC_TOLERANCE_BLOCKS', 3)
         
         # Check all connected peers and map their public keys to validator addresses
         for peer_id, public_key in self.p2p.peer_public_keys.items():
@@ -835,7 +837,7 @@ class Node:
                 transactions=valid_txs,
                 previous_hash=latest_block.block_hash,
                 proposer=self.reward_address,
-                reward=total_reward_pals,
+                reward=block_reward_pals,  # Only newly minted coins, NOT fees
                 reward_allocations=rewards,
                 slot=current_slot,
                 rank=my_rank
