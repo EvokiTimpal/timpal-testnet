@@ -14,7 +14,24 @@ class RewardCalculator:
         self.fee_pool = 0
         self.ledger = ledger  # Kept for backward compatibility
     
-    def calculate_reward(self, active_nodes: List[str], collected_fees: int, total_emitted_pals: int) -> Tuple[Dict[str, int], int]:
+    def calculate_reward(self, active_nodes: List[str], collected_fees: int, total_emitted_pals: int) -> Tuple[Dict[str, int], int, int]:
+        """
+        Calculate block rewards and transaction fee distribution.
+        
+        Args:
+            active_nodes: List of active validator addresses
+            collected_fees: Transaction fees collected in this block (in pals)
+            total_emitted_pals: Total coins emitted so far (for emission cap calculation)
+        
+        Returns:
+            Tuple of (reward_allocations, total_reward_pals, block_reward_pals)
+            - reward_allocations: Dict mapping validator addresses to reward amounts
+            - total_reward_pals: Total rewards distributed (block reward + fees)
+            - block_reward_pals: NEW coins minted (for total supply tracking)
+        
+        CRITICAL: block_reward_pals should be added to total_emitted_pals
+                  Transaction fees should NOT be added (already in circulation)
+        """
         remaining_emission = config.MAX_SUPPLY_PALS - total_emitted_pals
         
         if remaining_emission > 0:
@@ -26,7 +43,7 @@ class RewardCalculator:
         
         num_nodes = len(active_nodes)
         if num_nodes == 0:
-            return {}, total_reward_pals
+            return {}, total_reward_pals, block_reward_pals
         
         sorted_nodes = sorted(active_nodes)
         
@@ -39,7 +56,7 @@ class RewardCalculator:
             if i < remainder:
                 rewards[node] += 1
         
-        return rewards, total_reward_pals
+        return rewards, total_reward_pals, block_reward_pals
     
     def calculate_block_reward(self, block_height: int) -> int:
         """

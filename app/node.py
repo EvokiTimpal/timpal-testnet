@@ -120,21 +120,32 @@ class Node:
     
     def get_connected_validators(self) -> set:
         """
-        Get validator addresses that are currently connected via P2P.
+        Get validator addresses that are currently connected via P2P AND synced to chain.
         
         This is used as a fallback for reward distribution when attestations
-        are unavailable. Ensures ONLY ONLINE NODES RECEIVE BLOCK REWARDS.
+        are unavailable. Ensures ONLY ONLINE AND SYNCED NODES RECEIVE BLOCK REWARDS.
+        
+        CRITICAL FIX: Now checks both P2P connection AND chain sync status.
+        Validators more than 100 blocks behind are excluded from rewards.
         
         Returns:
-            set: Addresses of validators with active P2P connections
+            set: Addresses of validators with active P2P connections AND synced blockchain
         """
         from crypto_utils import derive_address
+        import aiohttp
+        import asyncio
         
         connected_validators = set()
         
-        # Add self if we're a validator (we're always online)
+        # Add self if we're a validator (we're always online and synced to ourselves)
         if self.reward_address and self.ledger.is_validator_registered(self.reward_address):
             connected_validators.add(self.reward_address)
+        
+        # Get our current chain height
+        our_height = len(self.ledger.blocks) - 1
+        
+        # Maximum allowed height difference (100 blocks = ~5 minutes at 3s/block)
+        MAX_HEIGHT_DIFFERENCE = 100
         
         # Check all connected peers and map their public keys to validator addresses
         for peer_id, public_key in self.p2p.peer_public_keys.items():
@@ -143,13 +154,73 @@ class Node:
                 address = derive_address(public_key)
                 
                 # Only include if this address is a registered validator
-                if self.ledger.is_validator_registered(address):
+                if not self.ledger.is_validator_registered(address):
+                    continue
+                
+                # CRITICAL: Check if peer is synced (within 100 blocks of our height)
+                # Get peer's HTTP URL from peer_id (websocket URL)
+                peer_http_url = None
+                for peer_url in self.p2p.peers:
+                    if peer_url.replace('ws://', '').replace('wss://', '') in peer_id:
+                        # Convert ws://ip:port to http://ip:http_port
+                        peer_http_url = peer_url.replace('ws://', 'http://').replace('wss://', 'https://').replace(':9000', ':9001').replace(':8001', ':8002')
+                        break
+                
+                if peer_http_url:
+                    # Try to get peer's chain height via HTTP API
+                    try:
+                        # Run async HTTP request in sync context
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            # Already in async context - skip HTTP check for now
+                            # Peer is connected, assume synced (fallback behavior)
+                            connected_validators.add(address)
+                        else:
+                            # Not in async context - can make sync HTTP request
+                            peer_height = loop.run_until_complete(self._get_peer_height(peer_http_url))
+                            
+                            if peer_height is not None:
+                                height_diff = abs(our_height - peer_height)
+                                if height_diff <= MAX_HEIGHT_DIFFERENCE:
+                                    connected_validators.add(address)
+                                else:
+                                    print(f"⚠️  Validator {address[:20]}... excluded from rewards: {height_diff} blocks behind (peer={peer_height}, us={our_height})")
+                            else:
+                                # Couldn't get height - exclude from rewards (safety first)
+                                print(f"⚠️  Validator {address[:20]}... excluded from rewards: could not verify sync status")
+                    except Exception as e:
+                        # HTTP check failed - exclude from rewards (safety first)
+                        print(f"⚠️  Validator {address[:20]}... excluded from rewards: sync check failed ({e})")
+                else:
+                    # No HTTP URL - include based on P2P connection only (fallback)
                     connected_validators.add(address)
+                    
             except Exception:
                 # Skip invalid public keys
                 continue
         
         return connected_validators
+    
+    async def _get_peer_height(self, peer_url: str) -> int:
+        """
+        Get the current blockchain height of a peer via HTTP API.
+        
+        Args:
+            peer_url: HTTP URL of peer (e.g., http://ip:port)
+            
+        Returns:
+            Block height of peer, or None if unavailable
+        """
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{peer_url}/stats", timeout=aiohttp.ClientTimeout(total=2)) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return data.get('height', data.get('current_height'))
+        except Exception:
+            pass
+        return None
     
     async def handle_new_transaction(self, data: dict, peer_id: str):
         try:
@@ -710,12 +781,12 @@ class Node:
                 active_validators = [self.reward_address]
             
             print(f"💰 Reward calculation: {len(active_validators)} active validators")
-            rewards, block_reward = self.reward_calculator.calculate_reward(
+            rewards, total_reward_pals, block_reward_pals = self.reward_calculator.calculate_reward(
                 active_validators, 
                 total_fees, 
                 self.ledger.total_emitted_pals
             )
-            print(f"💰 Rewards calculated: {len(rewards)} recipients, Total reward: {block_reward / 100_000_000:.8f} TMPL")
+            print(f"💰 Rewards calculated: {len(rewards)} recipients, Total reward: {total_reward_pals / 100_000_000:.8f} TMPL")
             
             # CRITICAL FIX (ChatGPT): Clamp timestamp into slot/rank window
             # Previous bug: used min(scheduled_time, time.time()) which created timestamps in the PAST
@@ -764,7 +835,7 @@ class Node:
                 transactions=valid_txs,
                 previous_hash=latest_block.block_hash,
                 proposer=self.reward_address,
-                reward=block_reward,
+                reward=total_reward_pals,
                 reward_allocations=rewards,
                 slot=current_slot,
                 rank=my_rank
@@ -783,7 +854,7 @@ class Node:
             # CRITICAL: Log block creation so we can track chain progression
             print(f"✅ Block {new_block.height} created and added to ledger")
             print(f"   Proposer: {self.reward_address[:20]}...")
-            print(f"   Transactions: {len(valid_txs)}, Reward: {block_reward / 100_000_000:.8f} TMPL")
+            print(f"   Transactions: {len(valid_txs)}, Reward: {total_reward_pals / 100_000_000:.8f} TMPL")
             
             for tx in valid_txs:
                 self.mempool.remove_transaction(tx.tx_hash)

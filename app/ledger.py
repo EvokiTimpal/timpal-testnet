@@ -394,15 +394,29 @@ class Ledger:
                 
                 # CRITICAL: Check for duplicate registration in EXISTING registry (Sybil prevention)
                 # SKIP for genesis block since bootstrap pre-initialization may have registered the validator
+                # SYNC FIX: Allow re-registration if it's the SAME validator (idempotent operation)
+                # This enables nodes to sync past blocks containing their own registration
                 if not is_genesis:
                     for existing_addr, data in self.validator_registry.items():
                         if isinstance(data, dict):
                             if data.get('device_id') == tx.device_id:
-                                print(f"REJECT: Device {tx.device_id[:16]}... already registered to {existing_addr}")
-                                return False
+                                # Check if this is the same validator re-registering (idempotent)
+                                if existing_addr == tx.sender:
+                                    # Same validator re-registering - allow (enables sync)
+                                    print(f"INFO: Validator {existing_addr[:20]}... re-registering (idempotent, allowing)")
+                                else:
+                                    # Different validator using same device - REJECT (Sybil attack)
+                                    print(f"REJECT: Device {tx.device_id[:16]}... already registered to {existing_addr}")
+                                    return False
                             if data.get('public_key') == tx.public_key:
-                                print(f"REJECT: Public key already registered to {existing_addr}")
-                                return False
+                                # Check if this is the same validator re-registering (idempotent)
+                                if existing_addr == tx.sender:
+                                    # Same validator re-registering - allow (enables sync)
+                                    print(f"INFO: Validator {existing_addr[:20]}... re-registering with same pubkey (idempotent, allowing)")
+                                else:
+                                    # Different validator using same public key - REJECT (Sybil attack)
+                                    print(f"REJECT: Public key already registered to {existing_addr}")
+                                    return False
                     
                     # CRITICAL: Check for duplicate registration WITHIN THIS BLOCK (Sybil bypass prevention!)
                     # A malicious proposer could try to register same device multiple times in one block
@@ -647,8 +661,17 @@ class Ledger:
             for validator_address, redistribution_amount in redistribution_rewards.items():
                 self.balances[validator_address] = self.balances.get(validator_address, 0) + redistribution_amount
         
+        # CRITICAL FIX: Only add newly minted coins to total_emitted_pals, NOT transaction fees
+        # Transaction fees are already in circulation (transferred from sender)
+        # block.reward includes both new coins + transaction fees
+        # We must recalculate the block_reward (new coins) based on emission schedule
         if block.reward > 0:
-            self.total_emitted_pals += block.reward
+            remaining_emission = config.MAX_SUPPLY_PALS - self.total_emitted_pals
+            if remaining_emission > 0:
+                block_reward_pals = min(config.EMISSION_PER_BLOCK_PALS, remaining_emission)
+                self.total_emitted_pals += block_reward_pals
+                # NOTE: Transaction fees are NOT added to total_emitted_pals
+                # They are distributed to validators but are already in circulation
         
         # FINALITY CHECKPOINT: Snapshot validator set at checkpoint intervals
         # This ensures all nodes can agree on proposer selection at future heights
