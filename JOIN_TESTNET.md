@@ -34,8 +34,8 @@ cd ~/Desktop
 
 **Then clone the repository:**
 ```bash
-git clone https://github.com/EvokiTimpal/timpal-testnet.git
-cd timpal-testnet
+git clone https://github.com/EvokiTimpal/timpal-genesis.git
+cd timpal-genesis
 ```
 
 (Windows users: use `cd %USERPROFILE%\Desktop` instead)
@@ -160,18 +160,53 @@ python3 run_testnet_node.py --port 3000 --seed ws://143.110.129.211:9000
 
 ## Start the Block Explorer
 
-View the blockchain in your browser with the TIMPAL Block Explorer:
+View the blockchain in your browser with the TIMPAL Block Explorer.
+
+**IMPORTANT:** The explorer needs to connect to your node's HTTP API port!
+
+### Understanding Ports
+
+Your blockchain node creates **TWO ports**:
+
+| Component | Port | Purpose |
+|-----------|------|---------|
+| **P2P Network** | Your `--port` value (e.g., 3000) | Node-to-node blockchain communication |
+| **HTTP API** | Your port + 1 (e.g., 3001) | Explorer connects here for data |
+
+### Starting the Explorer
+
+**If you started your node with `--port 3000`:**
 
 ```bash
+# Tell explorer to use HTTP API on port 3001 (3000 + 1)
+export EXPLORER_API_PORT=3001
 python3 start_explorer.py --port 8080
 ```
+
+**If you started your node with `--port 8001`:**
+
+```bash
+# Tell explorer to use HTTP API on port 8002 (8001 + 1)
+export EXPLORER_API_PORT=8002
+python3 start_explorer.py --port 8080
+```
+
+**Quick Reference:**
+
+| Your Node Port | HTTP API Port | Explorer Command |
+|----------------|---------------|------------------|
+| 3000 | 3001 | `EXPLORER_API_PORT=3001 python3 start_explorer.py --port 8080` |
+| 8001 | 8002 | `EXPLORER_API_PORT=8002 python3 start_explorer.py --port 8080` |
+| 9000 | 9001 | `python3 start_explorer.py --port 8080` (default) |
 
 Then open your browser and visit:
 ```
 http://localhost:8080
 ```
 
-(Port 8080 is used instead of 5000 because macOS blocks port 5000 for AirPlay)
+**Troubleshooting:** If you see "Cannot connect" errors when trying to send TMPL, see **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)**
+
+(Note: Port 8080 is used instead of 5000 because macOS blocks port 5000 for AirPlay)
 
 **What you can see:**
 - 📊 Chain statistics (total blocks, validators, transactions)
@@ -225,7 +260,7 @@ If you see `ModuleNotFoundError: No module named 'config'` when running wallet o
 git pull origin main
 ```
 
-The issue was that older Python environments needed explicit PYTHONPATH setup. This is now handled automatically in all launcher scripts (`wallet_cli.py`, `start_explorer.py`, `run_testnet_node.py`).
+The issue was that older Python environments needed explicit PYTHONPATH setup. This is now handled automatically in all launcher scripts (`wallet_cli_v2.py`, `start_explorer.py`, `run_testnet_node.py`).
 
 **If you still see import errors after updating:**
 - Verify you're using Python 3.8 or higher: `python3 --version`

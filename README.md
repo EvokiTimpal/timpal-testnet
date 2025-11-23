@@ -39,14 +39,14 @@ TIMPAL is a decentralized blockchain with equal rewards for all participants. Li
 
 ```bash
 # 1. Clone repository
-git clone https://github.com/EvokiTimpal/timpal-testnet
-cd timpal-testnet
+git clone https://github.com/EvokiTimpal/timpal-genesis.git
+cd timpal-genesis
 
 # 2. Install dependencies
 pip install -r requirements.txt
 
 # 3. Create wallet (SAVE YOUR RECOVERY PHRASE!)
-python3 wallet_cli.py
+python3 wallet_cli_v2.py
 
 # 4. Start your node
 python node.py
@@ -79,14 +79,15 @@ Before the mainnet launches, you can join the TIMPAL testnet to:
 
 ```bash
 # 1. Clone and install (same as mainnet)
-git clone https://github.com/EvokiTimpal/timpal-testnet
-cd timpal-testnet
+git clone https://github.com/EvokiTimpal/timpal-genesis.git
+cd timpal-genesis
 pip install -r requirements.txt
 
 # 2. Create wallet
-python3 wallet_cli.py
+python3 wallet_cli_v2.py
 
 # 3. Join testnet (connect to official bootstrap node)
+cd ..
 python3 run_testnet_node.py --port 8001 --seed ws://143.110.129.211:9000
 ```
 
@@ -102,24 +103,53 @@ python3 run_testnet_node.py --port 8001 --seed ws://143.110.129.211:9000
 
 The TIMPAL Block Explorer provides a web interface to view blockchain data, transactions, validators, and network statistics.
 
-**Default Port (5000):**
+#### **Understanding Ports: Node vs Explorer**
+
+When you run a blockchain node, it uses **TWO ports**:
+
+| Component | Port | Purpose |
+|-----------|------|---------|
+| **P2P Network** | Your `--port` value (e.g., 8001) | Node-to-node blockchain communication |
+| **HTTP API** | Your port + 1 (e.g., 8002) | Explorer connects here for data |
+
+**Example:**
 ```bash
-python3 app/explorer.py
+# Node on port 8001 creates:
+# - P2P Network: port 8001 (talks to other nodes)
+# - HTTP API: port 8002 (explorer uses this)
+python run_testnet_node.py --port 8001 --bootstrap 143.110.129.211:9000
 ```
 
-**Custom Port:**
+#### **Starting the Explorer**
+
+**If your node is on port 9000 (bootstrap node):**
 ```bash
-# Use any available port
-python3 app/explorer.py --port 8080
-python3 app/explorer.py --port 6000
-python3 app/explorer.py --port 3000
+# HTTP API is on 9001 (default)
+python3 start_explorer.py --port 8080
 ```
+
+**If your node is on a different port (e.g., 8001):**
+```bash
+# Tell explorer to use HTTP API on port 8002 (8001 + 1)
+export EXPLORER_API_PORT=8002
+python3 start_explorer.py --port 8080
+```
+
+**Quick Reference Table:**
+
+| Your Node Port | HTTP API Port | Explorer Command |
+|----------------|---------------|------------------|
+| 9000 | 9001 (default) | `python3 start_explorer.py --port 8080` |
+| 8001 | 8002 | `EXPLORER_API_PORT=8002 python3 start_explorer.py --port 8080` |
+| 9005 | 9006 | `EXPLORER_API_PORT=9006 python3 start_explorer.py --port 8080` |
 
 **The explorer will start and show:**
 ```
 Starting TIMPAL Block Explorer on port <port>...
 Explorer URL: http://0.0.0.0:<port>
 ```
+
+**Troubleshooting:** If transfers fail with "Cannot connect to host" or "Failed to fetch account info", see **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)**
 
 **Access in your browser:**
 - `http://localhost:<port>`

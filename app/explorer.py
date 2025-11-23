@@ -235,6 +235,10 @@ async def root(request: Request):
     total_transactions = tx_stats['total']
     transfer_count = tx_stats['transfer']
     
+    # Get configured API port for display
+    import os
+    node_api_port = os.getenv("EXPLORER_API_PORT", "9001")
+    
     html = f"""
     <!DOCTYPE html>
     <html>
@@ -252,10 +256,14 @@ async def root(request: Request):
         
         <div class="header">
             <div style="display: flex; align-items: center; gap: 20px; margin-bottom: 10px;">
-                <img src="/static/timpal-logo.png" alt="TIMPAL Logo" style="width: 80px; height: 80px; border-radius: 50%; box-shadow: 0 4px 8px rgba(0,0,0,0.2);" />
+                <img src="/static/timpal-logo.png" alt="TIMPAL Logo" style="width: 80px; height: 80px; border-radius: 50%; box-shadow: 0 4px 8px rgba(0,0,0,0.2); background: white; border: 3px solid rgba(255,255,255,0.3);" />
                 <h1 style="margin: 0;">⛓️ TIMPAL Block Explorer</h1>
             </div>
             <p><span class="live-indicator"></span> Fully decentralized blockchain with real-time updates</p>
+            <div style="font-size: 0.85em; opacity: 0.9; margin-top: 10px;">
+                📡 Connected to Node API: <code style="background: rgba(255,255,255,0.2); padding: 2px 8px; border-radius: 3px;">localhost:{node_api_port}</code>
+                {' <span style="color: #ffd700;">⚠️ Using default port - set EXPLORER_API_PORT if your node is on a different port</span>' if node_api_port == '9001' else ''}
+            </div>
         </div>
         
         {get_navigation_html("home")}

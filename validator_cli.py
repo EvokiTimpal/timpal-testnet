@@ -37,8 +37,7 @@ def load_wallet():
         wallet_version = 1
     else:
         print(f"❌ Wallet not found. Please create a wallet first.")
-        print(f"   For v2 wallet (recommended): python wallet_cli_v2.py")
-        print(f"   For v1 wallet (legacy): python wallet_cli.py")
+        print(f"   Run: python3 wallet_cli_v2.py")
         return None
     
     pin = input(f"Enter your wallet PIN/password: ")
