@@ -1571,6 +1571,24 @@ async def get_validators(request: Request):
     }
 
 
+# ============================================================================
+# API ENDPOINT ALIASES (with /api/ prefix for standardization)
+# ============================================================================
+
+@app.get("/api/stats")
+@limiter.limit("30/minute")
+async def api_get_stats(request: Request):
+    """API endpoint: Get blockchain statistics (JSON)"""
+    return await get_stats(request)
+
+
+@app.get("/api/validators")
+@limiter.limit("30/minute")
+async def api_get_validators(request: Request):
+    """API endpoint: Get all validators (JSON)"""
+    return await get_validators(request)
+
+
 @app.get("/search-redirect")
 async def search_redirect(q: str):
     """Redirect search form to search endpoint"""
