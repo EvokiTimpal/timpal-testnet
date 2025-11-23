@@ -1239,6 +1239,10 @@ async def send_transfer_page(request: Request):
 async def submit_transfer(request: Request, sender_address: str = Form(...), password: str = Form(...), pin: str = Form(...), recipient: str = Form(...), amount: float = Form(...)):
     """Handle transfer submission"""
     try:
+        # Strip whitespace from addresses
+        sender_address = sender_address.strip()
+        recipient = recipient.strip()
+        
         # Validate inputs
         if not sender_address.startswith("tmpl"):
             return JSONResponse({"error": "Invalid sender address - must start with 'tmpl'"}, status_code=400)
