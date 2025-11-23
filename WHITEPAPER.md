@@ -4,7 +4,7 @@
 
 # TIMPAL: A Peer-to-Peer Blockchain with Equal Validator Rewards
 
-**Abstract.** A purely peer-to-peer blockchain would allow participants to earn equal rewards regardless of computational power, stake size, or join time. Traditional Proof-of-Work blockchains concentrate rewards among miners with specialized hardware, while Proof-of-Stake systems favor early adopters and large token holders. We propose a solution using deterministic round-robin consensus with device fingerprinting that enforces one validator per physical device, ensuring true decentralization and equal reward distribution. Each active validator receives an identical share of block rewards and transaction fees, creating a truly egalitarian blockchain economy.
+**Abstract.** A purely peer-to-peer blockchain would allow participants to earn equal rewards regardless of computational power, stake size, or join time. Traditional Proof-of-Work blockchains concentrate rewards among miners with specialized hardware, while Proof-of-Stake systems favor early adopters and large token holders. We propose a solution using VRF-based (Verifiable Random Function) validator selection with device fingerprinting that enforces one validator per physical device, ensuring true decentralization and equal reward distribution. Each active validator receives an identical share of block rewards and transaction fees, creating a truly egalitarian blockchain economy.
 
 ---
 
@@ -166,7 +166,7 @@ To ensure the network NEVER stops, TIMPAL uses a three-phase transition:
 |---------|----------------|---------|
 | **Deposit Amount** | Variable (stake more = earn more) | Fixed (100 TMPL only) |
 | **Rewards** | Proportional to stake | Equal for all validators |
-| **Consensus Power** | Weighted by stake | Equal (round-robin) |
+| **Consensus Power** | Weighted by stake | Equal (VRF-based selection) |
 | **Purpose** | Earn more by risking more | Anti-Sybil entry barrier |
 | **Can Stake More?** | Yes (compound earnings) | No (100 TMPL maximum) |
 
@@ -197,15 +197,26 @@ This layered approach provides:
 
 ## 4. Consensus Mechanism
 
-### 4.1 Deterministic Round-Robin
+### 4.1 VRF-Based Validator Selection
 
-Validators take turns proposing blocks in a deterministic, sorted order:
+TIMPAL uses a Verifiable Random Function (VRF) to select block proposers in a cryptographically secure, unpredictable yet deterministic manner:
 
 ```python
-sorted_validators = sort(active_validators)  # Deterministic ordering
-proposer_index = block_height % len(sorted_validators)
-proposer = sorted_validators[proposer_index]
+# Each validator gets a cryptographic score based on:
+# - Epoch seed (derived from finalized blocks)
+# - Validator address
+# - Block height
+vrf_score = hash(epoch_seed + validator_address + block_height)
+
+# Validator with LOWEST score wins the right to propose
+proposer = validator_with_min(vrf_scores)
 ```
+
+**Key Properties:**
+- **Unpredictable**: No one can predict future proposers (prevents targeted attacks)
+- **Deterministic**: All nodes compute the same proposer (consensus guaranteed)
+- **Fair**: Over time, all validators propose roughly equal numbers of blocks
+- **Secure**: Cannot be manipulated without controlling the blockchain state
 
 ### 4.2 Block Production Process
 
@@ -244,10 +255,9 @@ If the network partitions:
 ### 5.1 Peer-to-Peer Discovery
 
 Nodes discover peers through:
-1. **Manual configuration**: Initial seed nodes
+1. **Manual configuration**: Initial seed nodes (testnet bootstrap at 143.110.129.211:9000)
 2. **Peer gossiping**: Nodes share known peer addresses
-3. **GitHub Discussions**: Community-shared node IPs (bootstrap phase)
-4. **DNS seeds**: Volunteer-run DNS services (after network establishes)
+3. **DNS seeds**: Volunteer-run DNS services (after network establishes)
 
 ### 5.2 Message Authentication
 
@@ -466,7 +476,7 @@ Like Bitcoin, **code is law**:
 
 | Aspect | Bitcoin | TIMPAL |
 |--------|---------|--------|
-| **Consensus** | Proof-of-Work | Deterministic Round-Robin |
+| **Consensus** | Proof-of-Work | VRF-Based Validator Selection |
 | **Rewards** | Miner earns all | Equal split among validators |
 | **Energy** | High (mining) | Low (validation only) |
 | **Hardware** | ASICs required | Any computer |
@@ -477,7 +487,7 @@ Like Bitcoin, **code is law**:
 
 | Aspect | Ethereum | TIMPAL |
 |--------|----------|--------|
-| **Consensus** | Proof-of-Stake | Deterministic Round-Robin |
+| **Consensus** | Proof-of-Stake | VRF-Based Validator Selection |
 | **Rewards** | Proportional to stake | Equal for all |
 | **Entry Barrier** | 32 ETH | 100 TMPL* (after grace period) |
 | **Staking Amount** | Variable (32+) | Fixed (cannot stake more) |
@@ -659,7 +669,7 @@ Year 20+ supply = 127M+ TMPL (attack threshold reached)
 
 TIMPAL represents a new approach to blockchain consensus: one that prioritizes equality, accessibility, and true decentralization over computational power or capital requirements. By enforcing one validator per device and distributing rewards equally, we create a system where participation is truly permissionless and rewards are truly fair.
 
-The deterministic round-robin consensus provides immediate finality without energy-intensive mining or capital-intensive staking. Device fingerprinting prevents Sybil attacks while maintaining open participation. The result is a blockchain that anyone can validate, where everyone earns equally, and where decentralization is enforced by design rather than hoped for by incentives.
+The VRF-based validator selection provides immediate finality without energy-intensive mining or capital-intensive staking. Device fingerprinting prevents Sybil attacks while maintaining open participation. The result is a blockchain that anyone can validate, where everyone earns equally, and where decentralization is enforced by design rather than hoped for by incentives.
 
 Unlike systems that concentrate power among early adopters, large stakeholders, or specialized hardware operators, TIMPAL treats all validators equally. This is not just a technical design choice—it's a philosophical commitment to egalitarian principles in blockchain infrastructure.
 

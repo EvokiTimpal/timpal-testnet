@@ -10,7 +10,7 @@
 Symbol:     TMPL
 Max Supply: 250,000,000 TMPL
 Block Time: 3 seconds
-Consensus:  Deterministic Round-Robin
+Consensus:  VRF-Based Validator Selection
 ```
 
 ## What is TIMPAL?
@@ -55,15 +55,6 @@ python node.py
 **You're now a validator earning equal rewards!** 🎉
 
 For detailed instructions, see [QUICKSTART.md](QUICKSTART.md)
-
-### First 10 Participants: Network Bootstrap
-
-Check **GitHub Discussions** to:
-- Share your node IP for others to connect
-- Find other node IPs to add to your `config.py`
-- Coordinate initial network formation
-
-After 10+ nodes are connected, the network becomes self-sustaining!
 
 ### 🧪 Testnet: Join Before Mainnet Launch
 
@@ -186,7 +177,7 @@ Explorer URL: http://0.0.0.0:<port>
 | Block Time | 3 seconds |
 | Finality | 1 block |
 | TX Fee | 0.0005 TMPL (fixed) |
-| Consensus | Deterministic Round-Robin |
+| Consensus | VRF-Based Validator Selection |
 | Cryptography | ECDSA (secp256k1) |
 | Address Format | `tmpl` + 44 chars |
 
@@ -233,7 +224,7 @@ app/
 ├── wallet.py       # BIP39-style wallet with PIN
 ├── ledger.py       # Blockchain state
 ├── rewards.py      # Emission cap enforcement
-├── consensus.py    # Deterministic proposer selection
+├── consensus.py    # VRF-based proposer selection
 ├── p2p.py          # P2P networking
 ├── node.py         # Node implementation
 ├── mempool.py      # Transaction pool
@@ -371,7 +362,7 @@ All **30/30** tests passed in **27.56s** with **zero failures**.
 - ✅ **Secure**
 
 **6. Consensus Mechanism**
-- Deterministic proposer selection (round-robin)
+- VRF-based proposer selection (verifiable random function)
 - Immutable validator set (fixed at genesis)
 - No staking, no voting, no registration functions
 - ✅ **Secure**
