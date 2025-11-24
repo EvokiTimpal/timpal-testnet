@@ -1605,6 +1605,50 @@ async def api_get_validators(request: Request):
     return await get_validators(request)
 
 
+@app.get("/api/blocks/range")
+@limiter.limit("100/minute")
+async def api_get_blocks_range(request: Request, start: int, end: int):
+    """
+    API endpoint: Get sequential range of blocks for sync (JSON)
+    
+    CRITICAL: Returns blocks in SEQUENTIAL ORDER by height (start to end)
+    This is required for blockchain sync to work correctly.
+    
+    Args:
+        start: First block height (inclusive)
+        end: Last block height (inclusive)
+    
+    Returns:
+        JSON with blocks array in sequential order
+    """
+    ledger = get_ledger()
+    
+    # Validate parameters
+    if start < 0 or end < start:
+        raise HTTPException(status_code=400, detail="Invalid range: start must be >= 0 and end >= start")
+    
+    # Enforce max 100 blocks per request (prevent memory issues)
+    if end - start + 1 > 100:
+        raise HTTPException(status_code=400, detail="Range too large: max 100 blocks per request")
+    
+    # Get blocks in SEQUENTIAL ORDER (critical for sync)
+    blocks = []
+    for height in range(start, end + 1):
+        if height < len(ledger.blocks):
+            block = ledger.blocks[height]
+            blocks.append(block.to_dict())
+        else:
+            # Block doesn't exist yet - return what we have so far
+            break
+    
+    return {
+        "blocks": blocks,
+        "count": len(blocks),
+        "start": start,
+        "end": end
+    }
+
+
 @app.get("/search-redirect")
 async def search_redirect(q: str):
     """Redirect search form to search endpoint"""
