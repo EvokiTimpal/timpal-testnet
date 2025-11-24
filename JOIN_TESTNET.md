@@ -20,12 +20,130 @@ That's it — your node will automatically join the P2P network and start earnin
 
 # 🔧 Requirements
 - Python 3.8 or higher  
+- Git (download from https://git-scm.com)
 - Internet connection  
-- Mac, Windows (WSL2), Linux, or Docker  
+- Mac, Windows, Linux, or Docker  
 
 ---
 
-# 🟦 1. Clone the repository
+# 📋 Choose Your Operating System
+
+- **[Windows Users - Click Here](#-windows-installation-guide)** ⬇️
+- **[Mac/Linux Users - Click Here](#-maclinux-installation-guide)** ⬇️
+
+---
+
+# 🪟 Windows Installation Guide
+
+## Step 1: Install Prerequisites
+
+**Install Python 3.8+ (if not already installed):**
+1. Download Python from https://www.python.org/downloads/
+2. **IMPORTANT:** During installation, check ✅ "Add Python to PATH"
+3. Restart your computer after installation
+
+**Install Git (if not already installed):**
+1. Download Git from https://git-scm.com/download/win
+2. Use default installation settings
+3. Restart your computer after installation
+
+**Verify installations (open Command Prompt and run):**
+```cmd
+python --version
+git --version
+```
+
+You should see Python 3.8+ and Git version numbers.
+
+## Step 2: Clone the Repository
+
+**Open Command Prompt (cmd)** and run:
+
+```cmd
+cd %USERPROFILE%\Desktop
+git clone https://github.com/EvokiTimpal/timpal-testnet.git
+cd timpal-testnet
+```
+
+## Step 3: Install Dependencies
+
+```cmd
+pip install -r requirements.txt
+```
+
+If you see an error, try:
+```cmd
+python -m pip install -r requirements.txt
+```
+
+## Step 4: Create Your Validator Wallet
+
+```cmd
+python wallet_cli_v2.py
+```
+
+**Follow the prompts:**
+1. Choose "Create new wallet"
+2. Enter a secure password (min 8 characters)
+3. Enter a secure PIN (min 6 digits)
+4. **WRITE DOWN the 12-word seed phrase on paper!** (CRITICAL - needed for recovery)
+5. Save as `wallet_v2.json`
+
+## Step 5: Start Your Validator Node
+
+**Set your wallet password (replace `your_password_here` with your actual password):**
+```cmd
+set TIMPAL_WALLET_PASSWORD=your_password_here
+```
+
+**Start the node:**
+```cmd
+python run_testnet_node.py --port 3000 --seed ws://143.110.129.211:9000
+```
+
+**IMPORTANT FOR WINDOWS:**
+- The `set` command only works in the current Command Prompt window
+- You must run `set TIMPAL_WALLET_PASSWORD=your_password` **every time** you open a new window
+- Use the same password you chose when creating your wallet
+
+### Alternative: PowerShell Users
+
+If you prefer PowerShell, use these commands instead:
+
+```powershell
+cd $env:USERPROFILE\Desktop
+git clone https://github.com/EvokiTimpal/timpal-testnet.git
+cd timpal-testnet
+pip install -r requirements.txt
+python wallet_cli_v2.py
+```
+
+Then to start the node:
+```powershell
+$env:TIMPAL_WALLET_PASSWORD="your_password_here"
+python run_testnet_node.py --port 3000 --seed ws://143.110.129.211:9000
+```
+
+## Step 6: (Optional) Start the Block Explorer
+
+**In a NEW Command Prompt window:**
+
+```cmd
+cd %USERPROFILE%\Desktop\timpal-testnet
+set EXPLORER_API_PORT=3001
+python start_explorer.py --port 8080
+```
+
+Then open your browser to: http://localhost:8080
+
+**To stop the node or explorer:**  
+Press **Ctrl + C** in the Command Prompt window
+
+---
+
+# 🍎 Mac/Linux Installation Guide
+
+## Step 1: Clone the Repository
 
 **First, navigate to your Desktop:**
 ```bash
@@ -34,15 +152,13 @@ cd ~/Desktop
 
 **Then clone the repository:**
 ```bash
-git clone https://github.com/EvokiTimpal/timpal-genesis.git
-cd timpal-genesis
+git clone https://github.com/EvokiTimpal/timpal-testnet.git
+cd timpal-testnet
 ```
-
-(Windows users: use `cd %USERPROFILE%\Desktop` instead)
 
 ---
 
-# 🟩 2. Install dependencies
+## Step 2: Install Dependencies
 
 ```bash
 pip install -r requirements.txt
@@ -56,7 +172,7 @@ pip3 install -r requirements.txt
 
 ---
 
-# 🟨 3. Create your validator wallet
+## Step 3: Create Your Validator Wallet
 
 A wallet is required to operate a validator.  
 Run this command and **write down** your:
@@ -88,7 +204,7 @@ python3 wallet_cli_v2.py
 
 ---
 
-# 🟧 4. Set your wallet password
+## Step 4: Set Your Wallet Password
 
 Your node uses the PASSWORD to decrypt the wallet file during startup.
 
@@ -99,7 +215,7 @@ You'll need to export it **every time** before starting the node.
 
 ---
 
-# 🟥 5. Start your validator node
+## Step 5: Start Your Validator Node
 
 **First, set your wallet password:**
 ```bash
@@ -297,6 +413,62 @@ alias timpal-wallet='cd ~/Desktop/timpal-testnet && export PYTHONPATH="$PWD/app:
 ```
 
 Then you can just run `timpal-wallet` from anywhere.
+
+---
+
+# 🪟 Windows-Specific Troubleshooting
+
+## "Python is not recognized"
+
+If you see `'python' is not recognized as an internal or external command`:
+1. Reinstall Python from https://www.python.org/downloads/
+2. **CRITICAL:** Check ✅ "Add Python to PATH" during installation
+3. Restart your computer
+4. Try again
+
+## "Git is not recognized"
+
+If you see `'git' is not recognized as an internal or external command`:
+1. Install Git from https://git-scm.com/download/win
+2. Restart your computer
+3. Try again
+
+## Password Not Working
+
+**Command Prompt (cmd):**
+```cmd
+set TIMPAL_WALLET_PASSWORD=your_password
+```
+
+**PowerShell:**
+```powershell
+$env:TIMPAL_WALLET_PASSWORD="your_password"
+```
+
+Remember:
+- NO spaces around the `=` sign in cmd
+- Use quotes `"..."` in PowerShell
+- Must be set in EVERY new window
+
+## Firewall Issues
+
+Windows Firewall may block the node. When you see a popup:
+1. Click "Allow access"
+2. Select both "Private networks" and "Public networks"
+3. Click "Allow access"
+
+## Port Already in Use
+
+If you see `Address already in use` error:
+1. Try a different port: `--port 3001` or `--port 8001`
+2. Or close the program using that port
+
+## Explorer Cannot Connect
+
+Make sure:
+1. Your node is running in another window
+2. You set `EXPLORER_API_PORT` correctly (your node port + 1)
+3. Example: If node uses `--port 3000`, set `EXPLORER_API_PORT=3001`
 
 ---
 
