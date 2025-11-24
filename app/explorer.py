@@ -2239,17 +2239,40 @@ async def network_visualization(request: Request):
     validators = []
     edges = []
     
+    # Get current height for liveness detection (same logic as leaderboard)
+    current_height = ledger.get_block_count() - 1
+    LIVENESS_WINDOW = 100  # Consider validator offline if no blocks proposed in last 100 blocks
+    
     for idx, (address, validator_data) in enumerate(ledger.validator_registry.items()):
         info = ledger.get_validator_info(address)
         if info:
             block_count = sum(1 for block in ledger.blocks if block.proposer == address)
             
+            # LIVENESS DETECTION: Check if validator proposed a block recently
+            # Find the most recent block proposed by this validator
+            last_block_height = -1
+            for block in reversed(ledger.blocks):
+                if block.proposer == address:
+                    last_block_height = block.height
+                    break
+            
+            # Determine real-time online/offline status (same as leaderboard)
+            if current_height < 10:
+                # Bootstrap period - all registered validators shown as active
+                display_status = "active"
+            elif last_block_height >= 0 and (current_height - last_block_height) <= LIVENESS_WINDOW:
+                # Proposed a block recently - ONLINE
+                display_status = "active"
+            else:
+                # No recent blocks - OFFLINE
+                display_status = "offline"
+            
             validators.append({
                 "id": address,
                 "label": f"{address[:10]}...",
-                "title": f"Address: {address}\\nBlocks: {block_count}\\nStatus: {info.get('status', 'unknown')}",
+                "title": f"Address: {address}\\nBlocks: {block_count}\\nStatus: {display_status}",
                 "value": block_count + 10,  # Node size based on blocks proposed
-                "color": "#10b981" if info.get('status') == 'active' else "#6b7280"
+                "color": "#10b981" if display_status == 'active' else "#6b7280"
             })
     
     # Create edges between validators (representing block proposals)
