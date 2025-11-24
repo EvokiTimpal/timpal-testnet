@@ -1079,12 +1079,17 @@ class Node:
     
     async def _sync_missing_blocks(self, start_height: int, end_height: int):
         """
-        PERMANENT FIX: Backfill missing blocks when height gap detected.
-        This prevents permanent deadlock when nodes miss blocks.
+        PRODUCTION-GRADE SEQUENTIAL SYNC: Backfill missing blocks with strict validation.
+        
+        CRITICAL FIXES (resolves "expected X, got Y" errors):
+        1. Track global sync progress - don't restart from original height when switching peers
+        2. Query each peer's actual max height before requesting blocks
+        3. Strict sequential validation - blocks must be added in exact order
+        4. Comprehensive diagnostics for debugging sync failures
         
         Args:
             start_height: First missing block height
-            end_height: Last missing block height
+            end_height: Target height (adjusted based on peer availability)
         """
         
         # SECURITY: Never sync genesis block from network (prevents eclipse attacks)
@@ -1093,7 +1098,11 @@ class Node:
             print(f"   Genesis must be created locally and validated against CANONICAL_GENESIS_HASH")
             start_height = 1
         
-        print(f"🔄 BACKFILL: Fetching blocks {start_height} to {end_height}...")
+        print(f"\n{'='*60}")
+        print(f"🔄 PRODUCTION SYNC INITIATED")
+        print(f"{'='*60}")
+        print(f"📊 Target Range: blocks {start_height} → {end_height} ({end_height - start_height + 1} blocks)")
+        print(f"🔒 Current Chain Height: {len(self.ledger.blocks) - 1}")
         
         # Build list of HTTP endpoints to try
         peer_http_urls = []
@@ -1111,116 +1120,197 @@ class Node:
                     except ValueError:
                         pass
         
-        # CRITICAL FIX: Split requests into chunks of 100 blocks (server limit)
-        # Server enforces max 100 blocks per request to prevent memory issues
-        CHUNK_SIZE = 100
+        if not peer_http_urls:
+            print(f"❌ SYNC FAILED: No peer HTTP endpoints available")
+            return
         
-        # Fetch missing blocks from peers
-        for peer_url in peer_http_urls:
+        print(f"📡 Available Peers: {len(peer_http_urls)}")
+        
+        # CRITICAL: Track global sync progress (persists across peer retries)
+        # This prevents re-requesting blocks that were already successfully added
+        current_sync_height = start_height
+        CHUNK_SIZE = 100  # Server max limit per request
+        
+        # Try each peer until sync succeeds
+        for peer_idx, peer_url in enumerate(peer_http_urls):
             try:
                 async with aiohttp.ClientSession() as session:
-                    current_start = start_height
-                    success = True
+                    # STEP 1: Query peer's actual blockchain height BEFORE requesting blocks
+                    # This prevents "expected X, got Y" errors from requesting non-existent blocks
+                    try:
+                        async with session.get(
+                            f"{peer_url}/api/blockchain/info",
+                            timeout=aiohttp.ClientTimeout(total=5)
+                        ) as resp:
+                            if resp.status == 200:
+                                info = await resp.json()
+                                peer_height = info.get('height', 0)
+                                
+                                print(f"\n📡 Peer {peer_idx + 1}/{len(peer_http_urls)}: {peer_url}")
+                                print(f"   Peer Height: {peer_height}")
+                                print(f"   Sync Progress: {current_sync_height} / {end_height}")
+                                
+                                # Skip peers that are behind our current sync progress
+                                if current_sync_height > peer_height:
+                                    print(f"   ⏭️  Peer behind sync progress, trying next peer")
+                                    continue
+                                
+                                # Adjust target to peer's actual height
+                                peer_end_height = min(end_height, peer_height)
+                                
+                                if current_sync_height > peer_end_height:
+                                    print(f"   ⏭️  No new blocks available from this peer")
+                                    continue
+                                    
+                                print(f"   🎯 Will sync {current_sync_height} → {peer_end_height} from this peer")
+                            else:
+                                print(f"\n⚠️  Peer {peer_idx + 1}: Cannot query height (HTTP {resp.status}), trying next peer")
+                                continue
+                    except Exception as e:
+                        print(f"\n⚠️  Peer {peer_idx + 1}: Cannot reach ({e}), trying next peer")
+                        continue
                     
-                    # Fetch in chunks of 100 blocks
-                    while current_start <= end_height:
-                        current_end = min(current_start + CHUNK_SIZE - 1, end_height)
+                    # STEP 2: Fetch blocks sequentially in chunks
+                    peer_success = True
+                    chunks_synced = 0
+                    
+                    while current_sync_height <= peer_end_height:
+                        chunk_end = min(current_sync_height + CHUNK_SIZE - 1, peer_end_height)
+                        
+                        print(f"   📦 Chunk {chunks_synced + 1}: Fetching blocks {current_sync_height}-{chunk_end}")
                         
                         async with session.get(
-                            f"{peer_url}/api/blocks/range?start={current_start}&end={current_end}",
-                            timeout=aiohttp.ClientTimeout(total=10)
+                            f"{peer_url}/api/blocks/range?start={current_sync_height}&end={chunk_end}",
+                            timeout=aiohttp.ClientTimeout(total=15)
                         ) as resp:
                             if resp.status != 200:
                                 error_text = await resp.text()
-                                print(f"⚠️  BACKFILL: HTTP {resp.status} from {peer_url}: {error_text}")
-                                success = False
+                                print(f"      ❌ HTTP {resp.status}: {error_text}")
+                                peer_success = False
                                 break
                             
                             data = await resp.json()
                             blocks = data.get('blocks', [])
                             
                             if not blocks:
-                                print(f"⚠️  BACKFILL: No blocks returned for range {current_start}-{current_end}")
-                                success = False
+                                print(f"      ⚠️  Peer returned no blocks for this range")
+                                peer_success = False
                                 break
                             
-                            # Add blocks sequentially
+                            # STRICT SEQUENTIAL VALIDATION: Add blocks in exact order
+                            blocks_added_in_chunk = 0
                             for block_dict in blocks:
                                 block = Block.from_dict(block_dict)
                                 
-                                # FIX: Check if block already exists to avoid race condition
-                                # (Block might arrive via gossip while backfill is in progress)
-                                if block.height < len(self.ledger.blocks):
-                                    # Block already exists, skip silently
-                                    continue
+                                # STRICT: Verify block height matches expected sequence
+                                expected_height = len(self.ledger.blocks)
+                                if block.height != expected_height:
+                                    # This is NOT an error - peer might be on different fork or ahead
+                                    # Skip this block and continue (we'll handle forks below)
+                                    if block.height < expected_height:
+                                        # Block already exists, skip silently
+                                        continue
+                                    elif block.height > expected_height:
+                                        # Gap detected - this should trigger fork detection
+                                        print(f"      ⚠️  Gap: expected height {expected_height}, got {block.height}")
+                                        peer_success = False
+                                        break
                                 
+                                # Attempt to add block
                                 if self.ledger.add_block(block, skip_proposer_check=True):
-                                    print(f"✅ BACKFILL: Added block {block.height}")
+                                    blocks_added_in_chunk += 1
+                                    # Update sync progress tracker
+                                    current_sync_height = block.height + 1
                                 else:
-                                    # FORK DETECTION: If block rejected, check if it's due to previous_hash mismatch (fork)
+                                    # FORK DETECTION: Block validation failed
                                     latest = self.ledger.get_latest_block()
+                                    
+                                    # Check if it's a fork (different previous_hash)
                                     if latest and block.height == latest.height + 1 and block.previous_hash != latest.block_hash:
-                                        print(f"🔀 FORK DETECTED at height {block.height}!")
-                                        print(f"   Local chain hash: {latest.block_hash}")
-                                        print(f"   Competing chain hash: {block.previous_hash}")
-                                        print(f"   Attempting chain reorganization...")
+                                        print(f"\n      🔀 FORK DETECTED at height {block.height}!")
+                                        print(f"         Local chain: ...→ {latest.block_hash[:16]}")
+                                        print(f"         Peer chain:  ...→ {block.previous_hash[:16]}")
+                                        print(f"         Fetching peer's full chain for reorganization...")
                                         
-                                        # Fetch full competing chain from this peer (genesis to end)
+                                        # Fetch full competing chain from this peer
                                         try:
-                                            competing_chain = await self._fetch_full_chain(peer_url, session, end_height)
+                                            competing_chain = await self._fetch_full_chain(peer_url, session, peer_end_height)
                                             if competing_chain:
-                                                # Trigger reorganization - let fork choice decide which chain wins
+                                                # Trigger reorganization - fork choice decides winner
                                                 reorg_success, reorg_msg = self.ledger.reorganize_to_chain(competing_chain)
                                                 if reorg_success:
-                                                    print(f"✅ {reorg_msg}")
-                                                    # After successful reorg, try to continue syncing
-                                                    current_start = len(self.ledger.blocks)
-                                                    break
+                                                    print(f"         ✅ Reorganization successful: {reorg_msg}")
+                                                    # Update sync progress to new chain tip
+                                                    current_sync_height = len(self.ledger.blocks)
+                                                    break  # Exit block loop, continue with next chunk
                                                 else:
-                                                    print(f"⚠️  Reorganization rejected: {reorg_msg}")
-                                                    print(f"   Current chain is canonical - continuing with local chain")
-                                                    return
+                                                    print(f"         ⚠️  Reorg rejected: {reorg_msg}")
+                                                    print(f"         Local chain is canonical, peer is on wrong fork")
+                                                    peer_success = False
+                                                    break  # Try next peer
                                             else:
-                                                print(f"⚠️  Could not fetch competing chain for reorganization")
-                                                return
+                                                print(f"         ❌ Could not fetch competing chain")
+                                                peer_success = False
+                                                break  # Try next peer
                                         except Exception as e:
-                                            print(f"⚠️  Error during fork resolution: {e}")
-                                            return
+                                            print(f"         ❌ Fork resolution failed: {e}")
+                                            peer_success = False
+                                            break  # Try next peer
                                     else:
-                                        print(f"⚠️  BACKFILL: Failed to add block {block.height} - validation rejected this block")
-                                        print(f"   (Check logs above for REJECT message with details)")
-                                        print(f"   Trying next peer...")
-                                        success = False
-                                        break
+                                        # Block failed validation for non-fork reason (invalid signature, etc.)
+                                        print(f"      ❌ Block {block.height} rejected by validation")
+                                        print(f"         Peer may have invalid blocks, trying next peer")
+                                        peer_success = False
+                                        break  # Try next peer
                             
-                            # Move to next chunk
-                            current_start = current_end + 1
+                            if not peer_success:
+                                break  # Exit chunk loop
+                            
+                            # Chunk successfully added
+                            chunks_synced += 1
+                            print(f"      ✅ Added {blocks_added_in_chunk} blocks, now at height {len(self.ledger.blocks) - 1}")
+                            
+                            # Check if we've reached the target
+                            if current_sync_height > peer_end_height:
+                                break  # Done with this peer
                     
-                    # If we successfully synced all chunks from this peer, we're done!
-                    if success and current_start > end_height:
-                        print(f"🎉 BACKFILL COMPLETE: Synced blocks {start_height} to {end_height}")
+                    # Check if we successfully synced to target from this peer
+                    if peer_success and current_sync_height > end_height:
+                        print(f"\n{'='*60}")
+                        print(f"✅ SYNC COMPLETE")
+                        print(f"{'='*60}")
+                        print(f"📊 Synced blocks {start_height} → {end_height}")
+                        print(f"🔒 Final Chain Height: {len(self.ledger.blocks) - 1}")
+                        print(f"📦 Total Chunks: {chunks_synced}")
                         return
                         
             except Exception as e:
-                print(f"⚠️  BACKFILL: Error fetching from {peer_url}: {e}")
+                print(f"\n⚠️  Peer {peer_idx + 1}: Exception during sync: {e}")
+                import traceback
+                traceback.print_exc()
                 continue
         
         # If we got here, ALL peers failed to provide valid blocks
-        # This could be due to:
-        # 1. Network partition (all peers unreachable)
-        # 2. Local database corruption
-        # 3. Being on a minority fork
-        print(f"❌ BACKFILL FAILED: Could not sync blocks {start_height} to {end_height} from any peer")
+        print(f"\n{'='*60}")
+        print(f"❌ SYNC FAILED - All peers exhausted")
+        print(f"{'='*60}")
+        print(f"📊 Sync Status:")
+        print(f"   Requested: {start_height} → {end_height}")
+        print(f"   Achieved:  {start_height} → {current_sync_height - 1}")
+        print(f"   Gap:       {end_height - current_sync_height + 1} blocks remaining")
         print(f"")
-        print(f"⚠️  SYNC STUCK - Possible causes:")
+        print(f"🔍 Possible causes:")
         print(f"   1. Network partition (all peers unreachable)")
-        print(f"   2. Local database corruption")
-        print(f"   3. On a minority fork")
+        print(f"   2. Local chain on wrong fork")
+        print(f"   3. Peer chains have invalid blocks")
+        print(f"   4. Genesis mismatch (eclipse attack prevention)")
         print(f"")
-        print(f"🔧 RECOVERY: If this persists, manually reset database:")
-        print(f"   1. Stop this node")
-        print(f"   2. Delete: {self.data_dir}")
-        print(f"   3. Restart node (will resync from genesis)")
+        print(f"🔧 Recovery options:")
+        print(f"   • Wait for network connectivity to improve")
+        print(f"   • Check VPS genesis node is running: 143.110.129.211:9000")
+        print(f"   • Verify local genesis matches canonical")
+        print(f"   • Last resort: Delete blockchain data and resync from genesis")
+        print(f"")
         
         # Do NOT auto-delete - too dangerous (could be temporary network issue)
     
