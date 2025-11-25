@@ -20,6 +20,7 @@ from typing import Dict, Set, Optional, List, Tuple
 from dataclasses import dataclass
 import time
 import hashlib
+import json
 
 
 @dataclass
@@ -439,3 +440,190 @@ class AttestationManager:
             "min_participation_rate": min(participation_rates),
             "max_participation_rate": max(participation_rates)
         }
+    
+    def export_snapshot(self, block_height: int = 0) -> Dict:
+        """
+        Export complete AttestationManager state for persistence and restoration.
+        
+        This is used during block commits to capture the attestation state at a
+        specific height. The snapshot enables deterministic replay during reorg
+        by restoring the exact attestation state that existed before the fork point.
+        
+        CRITICAL FOR REORG SAFETY:
+        - Attestations affect proposer liveness filtering
+        - Committee membership depends on epoch boundaries
+        - Incorrect state restoration = invalid proposer selection
+        
+        Args:
+            block_height: Block height at which snapshot was taken (metadata only)
+            
+        Returns:
+            Dict containing complete serializable state
+        """
+        snapshot_data = {
+            'attestations': {
+                epoch: dict(validators) 
+                for epoch, validators in self.attestations.items()
+            },
+            'epoch_validator_sets': {
+                epoch: list(validators) 
+                for epoch, validators in self.epoch_validator_sets.items()
+            },
+            'finalized_epochs': list(self.finalized_epochs),
+            'epoch_committees': {
+                epoch: list(committee) 
+                for epoch, committee in self.epoch_committees.items()
+            }
+        }
+        
+        config = {
+            'epoch_length': self.epoch_length,
+            'attestation_window': self.attestation_window,
+            'committee_size': self.committee_size
+        }
+        
+        snapshot_hash = hashlib.sha256(
+            json.dumps(snapshot_data, sort_keys=True, separators=(',', ':')).encode()
+        ).hexdigest()
+        
+        return {
+            'snapshot_height': block_height,
+            'snapshot_hash': snapshot_hash,
+            'state': snapshot_data,
+            'config': config,
+            'version': 1
+        }
+    
+    def import_snapshot(self, snapshot: Dict, verify_hash: bool = True) -> bool:
+        """
+        Restore AttestationManager state from a snapshot.
+        
+        This is called during reorg to restore the exact attestation state
+        that existed at a previous block height before applying the new chain.
+        
+        SECURITY NOTE:
+        - Validates snapshot hash integrity
+        - Replaces ALL mutable state atomically
+        - Config params are NOT restored (assumed consistent)
+        
+        Args:
+            snapshot: Snapshot dict from export_snapshot()
+            verify_hash: Whether to verify snapshot hash integrity
+            
+        Returns:
+            True if restoration succeeded, False if validation failed
+        """
+        if snapshot.get('version') != 1:
+            print(f"⚠️ Unknown snapshot version: {snapshot.get('version')}")
+            return False
+        
+        state = snapshot.get('state', {})
+        
+        if verify_hash:
+            expected_hash = snapshot.get('snapshot_hash')
+            actual_hash = hashlib.sha256(
+                json.dumps(state, sort_keys=True, separators=(',', ':')).encode()
+            ).hexdigest()
+            if expected_hash != actual_hash:
+                print(f"❌ Snapshot hash mismatch! Expected {expected_hash[:16]}..., got {actual_hash[:16]}...")
+                return False
+        
+        self.attestations = {
+            int(epoch): dict(validators) 
+            for epoch, validators in state.get('attestations', {}).items()
+        }
+        
+        self.epoch_validator_sets = {
+            int(epoch): set(validators) 
+            for epoch, validators in state.get('epoch_validator_sets', {}).items()
+        }
+        
+        self.finalized_epochs = set(state.get('finalized_epochs', []))
+        
+        self.epoch_committees = {
+            int(epoch): set(committee) 
+            for epoch, committee in state.get('epoch_committees', {}).items()
+        }
+        
+        snapshot_height = snapshot.get('snapshot_height', 'unknown')
+        print(f"✅ AttestationManager state restored from height {snapshot_height}")
+        return True
+    
+    def get_state_hash(self) -> str:
+        """
+        Calculate a hash of the current attestation state.
+        
+        Used to detect state divergence between nodes and verify
+        that snapshot restore produced correct state.
+        
+        Returns:
+            SHA256 hash of current state
+        """
+        snapshot_data = {
+            'attestations': {
+                str(epoch): dict(validators) 
+                for epoch, validators in self.attestations.items()
+            },
+            'epoch_validator_sets': {
+                str(epoch): list(sorted(validators))
+                for epoch, validators in self.epoch_validator_sets.items()
+            },
+            'finalized_epochs': sorted(self.finalized_epochs),
+            'epoch_committees': {
+                str(epoch): list(sorted(committee)) 
+                for epoch, committee in self.epoch_committees.items()
+            }
+        }
+        return hashlib.sha256(
+            json.dumps(snapshot_data, sort_keys=True, separators=(',', ':')).encode()
+        ).hexdigest()
+    
+    def rollback_to_height(self, target_height: int) -> int:
+        """
+        Remove all attestation state after target_height.
+        
+        This is a lighter alternative to full snapshot restore when we just
+        need to undo attestations recorded after a certain block.
+        
+        Args:
+            target_height: Block height to roll back to
+            
+        Returns:
+            Number of attestations removed
+        """
+        removed_count = 0
+        target_epoch = self.get_epoch_number(target_height)
+        
+        epochs_to_clear = [
+            epoch for epoch in self.attestations.keys() 
+            if epoch > target_epoch
+        ]
+        for epoch in epochs_to_clear:
+            removed_count += len(self.attestations[epoch])
+            del self.attestations[epoch]
+        
+        if target_epoch in self.attestations:
+            validators_to_remove = [
+                addr for addr, height in self.attestations[target_epoch].items()
+                if height > target_height
+            ]
+            for addr in validators_to_remove:
+                del self.attestations[target_epoch][addr]
+                removed_count += 1
+        
+        self.finalized_epochs = {
+            epoch for epoch in self.finalized_epochs 
+            if epoch <= target_epoch
+        }
+        
+        committees_to_remove = [
+            epoch for epoch in self.epoch_committees.keys() 
+            if epoch > target_epoch
+        ]
+        for epoch in committees_to_remove:
+            del self.epoch_committees[epoch]
+        
+        if removed_count > 0:
+            print(f"🔙 AttestationManager rolled back to height {target_height}: removed {removed_count} attestations")
+        
+        return removed_count
