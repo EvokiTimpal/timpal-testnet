@@ -958,7 +958,19 @@ class Node:
                         # SECURITY: Never sync genesis block from network (prevents eclipse attacks)
                         # Genesis must be created locally and validated against CANONICAL_GENESIS_HASH
                         # Network sync ALWAYS starts from block 1
-                        current_height = 0  # Start at 0 so first batch starts at 1 (skip genesis)
+                        
+                        # CRITICAL FIX: Create genesis BEFORE syncing if we have no blocks
+                        # This ensures Block 1 can be validated (requires Block 0 to exist)
+                        if self.ledger.get_block_count() == 0:
+                            print(f"🔒 Creating local genesis block before sync...")
+                            from app.block import Block
+                            genesis = Block.create_genesis(config.GENESIS_VALIDATOR)
+                            if not self.ledger.add_block(genesis, skip_proposer_check=True):
+                                print(f"❌ Failed to create genesis block")
+                                return False
+                            print(f"✅ Genesis block created locally")
+                        
+                        current_height = self.ledger.get_block_count() - 1  # Start from current height
                         batch_size = 100
                         
                         while current_height < peer_height:
@@ -1087,10 +1099,21 @@ class Node:
         """
         
         # SECURITY: Never sync genesis block from network (prevents eclipse attacks)
+        # Instead, create genesis locally BEFORE syncing
         if start_height == 0:
-            print(f"⚠️  SECURITY: Refusing to sync genesis block from network")
-            print(f"   Genesis must be created locally and validated against CANONICAL_GENESIS_HASH")
-            start_height = 1
+            print(f"⚠️  SECURITY: Creating genesis locally (not from network)")
+            print(f"   Genesis validated against CANONICAL_GENESIS_HASH")
+            
+            # Create genesis locally if it doesn't exist
+            if self.ledger.get_block_count() == 0:
+                from app.block import Block
+                genesis = Block.create_genesis(config.GENESIS_VALIDATOR)
+                if not self.ledger.add_block(genesis, skip_proposer_check=True):
+                    print(f"❌ Failed to create genesis block")
+                    return
+                print(f"✅ Genesis block created locally")
+            
+            start_height = 1  # Now sync from block 1
         
         print(f"\n{'='*60}")
         print(f"🔄 PRODUCTION SYNC INITIATED")
