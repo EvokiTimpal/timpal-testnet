@@ -1412,22 +1412,27 @@ class Ledger:
     
     def _get_liveness_filtered_validators(self, current_height: int) -> Set[str]:
         """
-        Two-stage liveness filter that unions recent proposers and newly activated validators
-        to enable proper rotation while maintaining liveness.
+        Three-stage liveness filter that unions recent proposers, newly activated validators,
+        and validators with recent attestations to enable proper rotation while maintaining liveness.
         
         FIXES CHICKEN-AND-EGG PROBLEM: Newly activated validators can enter rotation
-        even before proposing their first block via extended grace period.
+        even before proposing their first block via dynamic grace period.
         
         DETERMINISTIC: All nodes compute the same result from the same blockchain state.
-        MAINNET PARITY: Maintains liveness detection while enabling fair rotation.
+        MAINNET PARITY: Scales from 2 validators (testnet) to 100K+ (mainnet).
         
         Stages:
-        1. Recent proposers (validators who proposed blocks in last 30 blocks)
-        2. Recently activated (validators activated within last 30 blocks - extended grace period)
+        1. Recent proposers (validators who proposed blocks recently)
+        2. Recently activated (dynamic grace window based on validator count)
+        3. Validators with recent epoch attestations (proves liveness without proposing)
         
-        REMOVED: Heartbeat/attestation transaction checks - those flood the mempool and
-        block user money transfers. P2P presence is tracked separately but isn't used
-        for deterministic consensus selection.
+        DYNAMIC GRACE WINDOW: max(MIN_BLOCKS, 2 × active_validator_count)
+        - 2 validators: max(100, 4) = 100 blocks (~5 min)
+        - 100 validators: max(100, 200) = 200 blocks (~10 min)
+        - 100,000 validators: max(100, 200,000) = 200,000 blocks (~7 days)
+        
+        This ensures every validator gets at least 2 full proposer-priority rotations
+        before being considered offline.
         
         Args:
             current_height: Current blockchain height
@@ -1437,14 +1442,28 @@ class Ledger:
         """
         liveness_validators = set()
         
+        # Count active validators for dynamic grace window calculation
+        active_validator_count = 0
+        for validator_addr, validator in self.validator_registry.items():
+            if validator_addr == "genesis":
+                continue
+            if isinstance(validator, dict) and validator.get('status') in ('active', 'genesis'):
+                active_validator_count += 1
+        
         # STAGE 1: Validators who proposed blocks recently (highest confidence of liveness)
-        recent_proposers = self._get_recently_active_validators(current_height, lookback_blocks=30)
+        # Lookback scales with validator count: more validators = longer lookback
+        proposer_lookback = max(30, active_validator_count)
+        recent_proposers = self._get_recently_active_validators(current_height, lookback_blocks=proposer_lookback)
         liveness_validators.update(recent_proposers)
         
-        # STAGE 2: Recently activated validators (extended grace period to enter rotation)
-        # EXTENDED from 10 to 30 blocks to give new validators more time to join rotation
-        # This prevents the chain from stalling when grace period expires
-        activation_grace_window = 30  # 90 seconds at 3s block time
+        # STAGE 2: Recently activated validators (dynamic grace period)
+        # DYNAMIC GRACE WINDOW: Scales with validator count
+        # Formula: max(MIN_BLOCKS, 2 × active_validator_count)
+        # This ensures every new validator gets at least 2 full priority rotations
+        # to be selected by VRF before being considered offline
+        MIN_GRACE_BLOCKS = 100  # Minimum 5 minutes at 3s block time
+        ROTATION_MULTIPLIER = 2  # Allow 2 full rotations through all validators
+        activation_grace_window = max(MIN_GRACE_BLOCKS, ROTATION_MULTIPLIER * active_validator_count)
         
         # CRITICAL FIX: Sort validator registry items by address for deterministic iteration
         # Dict.items() order is NOT guaranteed across different Python processes!
@@ -1464,15 +1483,33 @@ class Ledger:
             
             activation_height = validator.get('activation_height', 0)
             
-            # Include:
+            # Include validators within dynamic grace window:
             # - Normal activations within window
             # - Genesis (activation_height == 0) while still early enough in chain
             if (activation_height > 0 and current_height - activation_height < activation_grace_window) or \
                (activation_height == 0 and current_height < activation_grace_window):
                 liveness_validators.add(validator_addr)
         
+        # STAGE 3: Validators with recent epoch attestations (proves liveness without proposing)
+        # This allows validators who haven't proposed yet to stay in rotation by attesting
+        # Particularly important for large validator sets where proposer slots are rare
+        try:
+            if hasattr(self, 'attestation_manager') and self.attestation_manager:
+                current_epoch = current_height // config.EPOCH_LENGTH
+                # Check last 2 epochs for attestations
+                for epoch in range(max(0, current_epoch - 1), current_epoch + 1):
+                    attestations = self.attestation_manager.get_attestations_for_epoch(epoch)
+                    for validator_addr in attestations.keys():
+                        if validator_addr in self.validator_registry:
+                            validator = self.validator_registry[validator_addr]
+                            if isinstance(validator, dict) and validator.get('status') in ('active', 'genesis'):
+                                liveness_validators.add(validator_addr)
+        except Exception as e:
+            # Attestation check is optional - don't fail if it errors
+            pass
+        
         # CRITICAL FIX: TIMPAL POLICY - ONLY ONLINE NODES RECEIVE BLOCK REWARDS
-        # If no validators pass Stage 1 or 2, use P2P connections (Stage 3)
+        # If no validators pass Stage 1, 2, or 3, use P2P connections (Stage 4)
         if not liveness_validators:
             if self._online_validators_callback is not None:
                 try:
