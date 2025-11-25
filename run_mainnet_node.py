@@ -73,13 +73,14 @@ class MainnetNode:
         
         ledger_data_dir = os.path.join(self.data_dir, "ledger")
         
+        # SECURITY: Device check enforces 1 node per device (Sybil prevention)
         self.node = Node(
             device_id=self.wallet.address,
             reward_address=self.wallet.address,
             p2p_port=port,
             private_key=self.wallet.private_key,
             public_key=self.wallet.public_key,
-            skip_device_check=True,
+            skip_device_check=False,
             data_dir=ledger_data_dir,
             use_production_storage=True,
             testnet_mode=False

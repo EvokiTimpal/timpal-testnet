@@ -162,8 +162,9 @@ class TestnetNode:
             print(f"🌐 [NETWORK] Skipping genesis pre-initialization (will sync from seeds)")
         
         # Create node with loaded validator keys
+        # SECURITY: Device check enforces 1 node per device (Sybil prevention)
         self.node = Node(
-            skip_device_check=True,
+            skip_device_check=False,
             reward_address=reward_address,
             private_key=private_key,
             public_key=public_key,
