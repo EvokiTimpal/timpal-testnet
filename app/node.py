@@ -120,86 +120,32 @@ class Node:
     
     def get_connected_validators(self) -> set:
         """
-        Get validator addresses that are currently connected via P2P AND synced to chain.
+        Get validator addresses that are currently connected AND synced.
         
-        This is used as a fallback for reward distribution when attestations
-        are unavailable. Ensures ONLY ONLINE AND SYNCED NODES RECEIVE BLOCK REWARDS.
+        This is used as a FALLBACK for reward distribution when epoch attestations
+        are unavailable. Since we cannot reliably verify peer sync status during
+        async block creation, we use a CONSERVATIVE approach:
         
-        CRITICAL FIX: Now checks both P2P connection AND chain sync status.
-        Validators more than 100 blocks behind are excluded from rewards.
+        CRITICAL SECURITY: Only the proposer (self) is included in the fallback.
+        This prevents syncing nodes or stale connections from unfairly receiving rewards.
+        
+        Once attestations are working, they take priority over this fallback.
         
         Returns:
-            set: Addresses of validators with active P2P connections AND synced blockchain
+            set: Addresses of verified online validators (conservative: only self)
         """
-        from crypto_utils import derive_address
-        import aiohttp
-        import asyncio
-        
         connected_validators = set()
         
-        # Add self if we're a validator (we're always online and synced to ourselves)
+        # CONSERVATIVE FALLBACK: Only include self (the proposer)
+        # We KNOW we're online and synced because we're creating blocks
+        # 
+        # Rationale:
+        # - P2P connections don't guarantee sync status (peer could be syncing)
+        # - Async context prevents HTTP height verification
+        # - Epoch attestations are the proper liveness mechanism
+        # - This fallback should rarely trigger (attestations should work)
         if self.reward_address and self.ledger.is_validator_registered(self.reward_address):
             connected_validators.add(self.reward_address)
-        
-        # Get our current chain height
-        our_height = len(self.ledger.blocks) - 1
-        
-        # Maximum allowed height difference (3 blocks = ~9 seconds at 3s/block)
-        # This ensures only actively synced validators receive rewards
-        # User requirement: Offline validators should not continue earning for 100 blocks (unfair)
-        MAX_HEIGHT_DIFFERENCE = getattr(config, 'VALIDATOR_SYNC_TOLERANCE_BLOCKS', 3)
-        
-        # Check all connected peers and map their public keys to validator addresses
-        for peer_id, public_key in self.p2p.peer_public_keys.items():
-            try:
-                # Convert public key to address
-                address = derive_address(public_key)
-                
-                # Only include if this address is a registered validator
-                if not self.ledger.is_validator_registered(address):
-                    continue
-                
-                # CRITICAL: Check if peer is synced (within 100 blocks of our height)
-                # Get peer's HTTP URL from peer_id (websocket URL)
-                peer_http_url = None
-                for peer_url in self.p2p.peers:
-                    if peer_url.replace('ws://', '').replace('wss://', '') in peer_id:
-                        # Convert ws://ip:port to http://ip:http_port
-                        peer_http_url = peer_url.replace('ws://', 'http://').replace('wss://', 'https://').replace(':9000', ':9001').replace(':8001', ':8002')
-                        break
-                
-                if peer_http_url:
-                    # Try to get peer's chain height via HTTP API
-                    try:
-                        # Run async HTTP request in sync context
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            # Already in async context - skip HTTP check for now
-                            # Peer is connected, assume synced (fallback behavior)
-                            connected_validators.add(address)
-                        else:
-                            # Not in async context - can make sync HTTP request
-                            peer_height = loop.run_until_complete(self._get_peer_height(peer_http_url))
-                            
-                            if peer_height is not None:
-                                height_diff = abs(our_height - peer_height)
-                                if height_diff <= MAX_HEIGHT_DIFFERENCE:
-                                    connected_validators.add(address)
-                                else:
-                                    print(f"⚠️  Validator {address[:20]}... excluded from rewards: {height_diff} blocks behind (peer={peer_height}, us={our_height})")
-                            else:
-                                # Couldn't get height - exclude from rewards (safety first)
-                                print(f"⚠️  Validator {address[:20]}... excluded from rewards: could not verify sync status")
-                    except Exception as e:
-                        # HTTP check failed - exclude from rewards (safety first)
-                        print(f"⚠️  Validator {address[:20]}... excluded from rewards: sync check failed ({e})")
-                else:
-                    # No HTTP URL - include based on P2P connection only (fallback)
-                    connected_validators.add(address)
-                    
-            except Exception:
-                # Skip invalid public keys
-                continue
         
         return connected_validators
     
