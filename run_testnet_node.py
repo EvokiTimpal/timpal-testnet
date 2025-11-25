@@ -8,17 +8,43 @@ This connects to the testnet (separate from mainnet).
 ⚠️  IMPORTANT: Port 9000 is reserved for the bootstrap node only!
     All other validators MUST use a different port + --seed flag.
 
+📡 UNDERSTANDING PORTS:
+    When you run a node, it creates TWO ports:
+    
+    1. P2P Network Port (your --port value)
+       → Example: --port 8001
+       → Used for node-to-node blockchain communication
+       
+    2. HTTP API Port (your port + 1)
+       → Example: port 8002 (automatically created)
+       → Used by Block Explorer for transactions and queries
+    
+    The Block Explorer needs to connect to the HTTP API port!
+    See TROUBLESHOOTING.md for explorer setup instructions.
+
 USAGE EXAMPLES:
 
     # Bootstrap node (only the genesis operator runs this)
     python3 run_testnet_node.py --port 9000
+    # → Creates P2P on 9000, HTTP API on 9001
 
     # Normal validator (everyone else - REQUIRED --seed flag)
     python3 run_testnet_node.py --port 8001 --seed ws://143.110.129.211:9000
+    # → Creates P2P on 8001, HTTP API on 8002
+    
     python3 run_testnet_node.py --port 8002 --seed ws://143.110.129.211:9000
+    # → Creates P2P on 8002, HTTP API on 8003
+    
     python3 run_testnet_node.py --port 9005 --seed ws://143.110.129.211:9000
+    # → Creates P2P on 9005, HTTP API on 9006
 
 ⚠️  If you forget --seed, you will create a private chain instead of joining the testnet!
+
+🔧 CONNECTING BLOCK EXPLORER:
+    If your node is on port 8001, tell the explorer to use port 8002:
+    
+    export EXPLORER_API_PORT=8002
+    python3 start_explorer.py --port 8080
 """
 
 import sys
@@ -499,10 +525,26 @@ class TestnetNode:
                     'error': str(e)
                 }, status=500)
         
+        async def get_blockchain_info(request):
+            """Get blockchain info for peer sync validation"""
+            try:
+                latest_block = self.node.ledger.get_latest_block()
+                
+                return web.json_response({
+                    'height': latest_block.height if latest_block else 0,
+                    'blocks': len(self.node.ledger.blocks)
+                })
+                
+            except Exception as e:
+                return web.json_response({
+                    'error': str(e)
+                }, status=500)
+        
         app = web.Application()
         app.router.add_post('/send', send_transaction)  # User-friendly endpoint
         app.router.add_post('/submit_transaction', submit_transaction)  # Pre-signed transactions
         app.router.add_get('/api/blocks/range', get_blocks_range)
+        app.router.add_get('/api/blockchain/info', get_blockchain_info)
         app.router.add_get('/api/health', get_health)
         app.router.add_get('/api/account/{address}', get_account)
         

@@ -1605,6 +1605,24 @@ async def api_get_validators(request: Request):
     return await get_validators(request)
 
 
+@app.get("/api/blockchain/info")
+@limiter.limit("100/minute")
+async def api_get_blockchain_info(request: Request):
+    """
+    API endpoint: Get blockchain info for sync (JSON)
+    
+    Returns:
+        JSON with current blockchain height and block count
+    """
+    ledger = get_ledger()
+    latest_block = ledger.get_latest_block()
+    
+    return {
+        "height": latest_block.height if latest_block else 0,
+        "blocks": len(ledger.blocks)
+    }
+
+
 @app.get("/api/blocks/range")
 @limiter.limit("100/minute")
 async def api_get_blocks_range(request: Request, start: int, end: int):
