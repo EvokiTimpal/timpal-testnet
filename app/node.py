@@ -120,32 +120,36 @@ class Node:
     
     def get_connected_validators(self) -> set:
         """
-        Get validator addresses that are currently connected AND synced.
+        Get validator addresses that are currently online and connected.
+        
+        TIMPAL PHILOSOPHY: Every node that is online and helping the network
+        receives rewards per block, regardless of who proposed the block.
         
         This is used as a FALLBACK for reward distribution when epoch attestations
-        are unavailable. Since we cannot reliably verify peer sync status during
-        async block creation, we use a CONSERVATIVE approach:
-        
-        CRITICAL SECURITY: Only the proposer (self) is included in the fallback.
-        This prevents syncing nodes or stale connections from unfairly receiving rewards.
-        
-        Once attestations are working, they take priority over this fallback.
+        are unavailable. We include ALL recently-seen validators via P2P announcements.
         
         Returns:
-            set: Addresses of verified online validators (conservative: only self)
+            set: Addresses of validators seen online recently via P2P
         """
+        import time
         connected_validators = set()
         
-        # CONSERVATIVE FALLBACK: Only include self (the proposer)
-        # We KNOW we're online and synced because we're creating blocks
-        # 
-        # Rationale:
-        # - P2P connections don't guarantee sync status (peer could be syncing)
-        # - Async context prevents HTTP height verification
-        # - Epoch attestations are the proper liveness mechanism
-        # - This fallback should rarely trigger (attestations should work)
+        # TIMPAL POLICY: All online validators receive rewards
+        # Include self (the proposer) - we know we're online
         if self.reward_address and self.ledger.is_validator_registered(self.reward_address):
             connected_validators.add(self.reward_address)
+        
+        # Include validators seen recently via P2P announce_node messages
+        # Validators broadcast their address every 2 seconds; consider online if seen in last 10s
+        ONLINE_TIMEOUT = 10  # seconds
+        current_time = time.time()
+        
+        if hasattr(self, 'consensus') and self.consensus and hasattr(self.consensus, 'last_seen'):
+            for validator_addr, last_seen_time in self.consensus.last_seen.items():
+                if current_time - last_seen_time < ONLINE_TIMEOUT:
+                    # Validator was seen recently via P2P - include in rewards
+                    if self.ledger.is_validator_registered(validator_addr):
+                        connected_validators.add(validator_addr)
         
         return connected_validators
     
@@ -1183,9 +1187,18 @@ class Node:
                             blocks = data.get('blocks', [])
                             
                             if not blocks:
-                                print(f"      ⚠️  Peer returned no blocks for this range")
-                                peer_success = False
-                                break
+                                # Check if we already have these blocks
+                                current_chain_height = len(self.ledger.blocks) - 1
+                                if current_chain_height >= chunk_end:
+                                    # We already have all blocks in this range, advance past it
+                                    print(f"      ✓ Already have blocks up to {current_chain_height}, advancing")
+                                    current_sync_height = current_chain_height + 1
+                                    chunks_synced += 1
+                                    continue
+                                else:
+                                    print(f"      ⚠️  Peer returned no blocks for this range")
+                                    peer_success = False
+                                    break
                             
                             # STRICT SEQUENTIAL VALIDATION: Add blocks in exact order
                             blocks_added_in_chunk = 0
@@ -1256,9 +1269,15 @@ class Node:
                             if not peer_success:
                                 break  # Exit chunk loop
                             
+                            # Ensure we advance past this chunk even if all blocks already existed
+                            current_chain_height = len(self.ledger.blocks) - 1
+                            if current_sync_height <= chunk_end and current_chain_height >= chunk_end:
+                                # We already have these blocks, advance past the chunk
+                                current_sync_height = chunk_end + 1
+                            
                             # Chunk successfully added
                             chunks_synced += 1
-                            print(f"      ✅ Added {blocks_added_in_chunk} blocks, now at height {len(self.ledger.blocks) - 1}")
+                            print(f"      ✅ Added {blocks_added_in_chunk} blocks, now at height {current_chain_height}")
                             
                             # Check if we've reached the target
                             if current_sync_height > peer_end_height:
