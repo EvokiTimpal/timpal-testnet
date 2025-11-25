@@ -1573,17 +1573,18 @@ async def get_validators(request: Request):
                 "device_id_preview": info.get('device_id', 'N/A')[:32] + '...' if info.get('device_id') and len(info.get('device_id', '')) > 32 else info.get('device_id', 'N/A')
             })
     
-    # Sort by registration time (oldest first)
-    validators.sort(key=lambda v: v.get('registered_at', 0))
+    # FILTER: Only show ACTIVE/ONLINE validators (user request)
+    # Offline validators should not appear in the list or network graph
+    active_validators = [v for v in validators if v['status'] == 'active']
     
-    # Count active validators
-    active_count = sum(1 for v in validators if v['status'] == 'active')
+    # Sort by blocks proposed (most active first)
+    active_validators.sort(key=lambda v: v.get('blocks_proposed', 0), reverse=True)
     
     return {
-        "validators": validators,
-        "total_count": len(validators),
-        "active_count": active_count,
-        "inactive_count": len(validators) - active_count
+        "validators": active_validators,
+        "total_count": len(active_validators),
+        "active_count": len(active_validators),
+        "inactive_count": 0  # Not showing offline validators
     }
 
 
@@ -2285,20 +2286,24 @@ async def network_visualization(request: Request):
                 # No recent blocks - OFFLINE
                 display_status = "offline"
             
-            validators.append({
-                "id": address,
-                "label": f"{address[:10]}...",
-                "title": f"Address: {address}\\nBlocks: {block_count}\\nStatus: {display_status}",
-                "value": block_count + 10,  # Node size based on blocks proposed
-                "color": "#10b981" if display_status == 'active' else "#6b7280"
-            })
+            # FILTER: Only show ACTIVE validators in network graph
+            if display_status == "active":
+                validators.append({
+                    "id": address,
+                    "label": f"{address[:10]}...",
+                    "title": f"Address: {address}\\nBlocks: {block_count}\\nStatus: {display_status}",
+                    "value": block_count + 10,  # Node size based on blocks proposed
+                    "color": "#10b981"  # All shown validators are active (green)
+                })
     
     # Create edges between validators (representing block proposals)
     # Connect each validator to the next proposer
+    # Only include edges between ACTIVE validators
+    active_addresses = {v["id"] for v in validators}
     for i in range(len(ledger.blocks) - 1):
         from_addr = ledger.blocks[i].proposer
         to_addr = ledger.blocks[i + 1].proposer
-        if from_addr != to_addr:
+        if from_addr != to_addr and from_addr in active_addresses and to_addr in active_addresses:
             edges.append({"from": from_addr, "to": to_addr})
     
     html = f"""
