@@ -963,7 +963,6 @@ class Node:
                         # This ensures Block 1 can be validated (requires Block 0 to exist)
                         if self.ledger.get_block_count() == 0:
                             print(f"🔒 Creating local genesis block before sync...")
-                            from app.block import Block
                             genesis = Block.create_genesis(config.GENESIS_VALIDATOR)
                             if not self.ledger.add_block(genesis, skip_proposer_check=True):
                                 print(f"❌ Failed to create genesis block")
@@ -1106,7 +1105,6 @@ class Node:
             
             # Create genesis locally if it doesn't exist
             if self.ledger.get_block_count() == 0:
-                from app.block import Block
                 genesis = Block.create_genesis(config.GENESIS_VALIDATOR)
                 if not self.ledger.add_block(genesis, skip_proposer_check=True):
                     print(f"❌ Failed to create genesis block")
