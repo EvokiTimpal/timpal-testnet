@@ -1241,6 +1241,32 @@ class Ledger:
             
             combined_liveness = list(set(recent_proposers) | set(grace_period_validators))
             
+            # CRITICAL: Compute epoch_seed FIRST so it can be stored in ValidatorStateFrame
+            # This ensures P2P validation can access epoch_seed from parent frame (never evicted)
+            epoch_number = self.attestation_manager.get_epoch_number(block.height)
+            
+            # Determine the seed source block hash deterministically
+            epoch_start = self.attestation_manager.get_epoch_start_block(epoch_number)
+            if epoch_start > 0 and epoch_start - 1 < len(self.blocks):
+                seed_source_hash = self.blocks[epoch_start - 1].block_hash
+            elif block.height > 0 and block.height - 1 < len(self.blocks):
+                seed_source_hash = self.blocks[block.height - 1].block_hash
+            elif self.blocks:
+                seed_source_hash = self.blocks[0].block_hash
+            else:
+                seed_source_hash = "genesis_epoch_seed_source"
+            
+            # Generate epoch_seed for this block (stored in ValidatorStateFrame)
+            epoch_seed = self.vrf_manager.generate_epoch_seed(
+                epoch_number=epoch_number,
+                finalized_block_hash=seed_source_hash,
+                attestation_data=""
+            )
+            
+            if not epoch_seed or len(epoch_seed) == 0:
+                raise ValueError(f"Failed to generate epoch_seed for epoch {epoch_number}")
+            
+            # Create validator frame WITH epoch_seed (critical for P2P validation)
             validator_frame = HistoricalStateBuilder.create_validator_frame(
                 block_height=block.height,
                 block_hash=block.block_hash,
@@ -1251,35 +1277,22 @@ class Ledger:
                 grace_period_validators=grace_period_validators,
                 combined_liveness_set=combined_liveness,
                 lookback_blocks=30,
-                grace_window_blocks=30
+                grace_window_blocks=30,
+                epoch_seed=epoch_seed,
+                epoch_number=epoch_number
             )
             
             epoch_snapshot = None
             if is_epoch_boundary or block.height == 0:
-                epoch_number = self.attestation_manager.get_epoch_number(block.height)
                 all_validators = set(self.get_active_validators())
                 
-                # CRITICAL: Ensure epoch_seed is GENERATED, not just retrieved from cache
-                # This guarantees epoch_seed is never empty in stored epoch snapshots
-                epoch_seed_source_hash = ""
-                if block.height > 0 and block.height - 1 < len(self.blocks):
-                    epoch_seed_source_hash = self.blocks[block.height - 1].block_hash
-                else:
-                    epoch_seed_source_hash = self.blocks[0].block_hash if self.blocks else ""
-                
-                # Generate epoch_seed (this caches it too)
-                snapshot_epoch_seed = self.vrf_manager.generate_epoch_seed(
-                    epoch_number=epoch_number,
-                    finalized_block_hash=epoch_seed_source_hash,
-                    attestation_data=""
-                )
-                
+                # Use already-computed epoch_seed and seed_source_hash
                 epoch_snapshot = HistoricalStateBuilder.create_epoch_snapshot(
                     epoch_number=epoch_number,
                     epoch_length=config.EPOCH_LENGTH,
                     attestation_manager=self.attestation_manager,
-                    epoch_seed=snapshot_epoch_seed,
-                    epoch_seed_source_hash=epoch_seed_source_hash,
+                    epoch_seed=epoch_seed,
+                    epoch_seed_source_hash=seed_source_hash,
                     all_validators=all_validators,
                     epoch_seed_source_height=max(0, block.height - 1)
                 )
@@ -1293,33 +1306,7 @@ class Ledger:
                     'created_from_fallback': True
                 }
             
-            # Store epoch seed in AM snapshot for deterministic replay
-            # CRITICAL: ALWAYS generate epoch_seed - never allow empty strings
-            epoch_number = self.attestation_manager.get_epoch_number(block.height)
-            
-            # Determine the seed source block hash deterministically
-            epoch_start = self.attestation_manager.get_epoch_start_block(epoch_number)
-            if epoch_start > 0 and epoch_start - 1 < len(self.blocks):
-                seed_source_hash = self.blocks[epoch_start - 1].block_hash
-            elif block.height > 0 and block.height - 1 < len(self.blocks):
-                seed_source_hash = self.blocks[block.height - 1].block_hash
-            elif self.blocks:
-                seed_source_hash = self.blocks[0].block_hash
-            else:
-                # Fallback for genesis - use empty but deterministic string
-                seed_source_hash = "genesis_epoch_seed_source"
-            
-            # ALWAYS generate epoch_seed - this ensures it's never empty
-            epoch_seed = self.vrf_manager.generate_epoch_seed(
-                epoch_number=epoch_number,
-                finalized_block_hash=seed_source_hash,
-                attestation_data=""
-            )
-            
-            # STRICT: Abort if epoch_seed is still somehow empty
-            if not epoch_seed or len(epoch_seed) == 0:
-                raise ValueError(f"Failed to generate epoch_seed for epoch {epoch_number} - this is a critical error")
-            
+            # Use already-computed epoch_seed (stored in ValidatorStateFrame too)
             am_snapshot['epoch_seed'] = epoch_seed
             am_snapshot['epoch_number'] = epoch_number
             
@@ -1443,18 +1430,25 @@ class Ledger:
         liveness_validators = set()
         
         # Count active validators for dynamic grace window calculation
+        # CRITICAL: Count from REGISTRY (deterministic), not from any filtered set
         active_validator_count = 0
-        for validator_addr, validator in self.validator_registry.items():
+        registered_validators = []
+        for validator_addr, validator in sorted(self.validator_registry.items()):
             if validator_addr == "genesis":
                 continue
             if isinstance(validator, dict) and validator.get('status') in ('active', 'genesis'):
                 active_validator_count += 1
+                registered_validators.append(validator_addr[:20] + '...')
         
         # STAGE 1: Validators who proposed blocks recently (highest confidence of liveness)
         # Lookback scales with validator count: more validators = longer lookback
         proposer_lookback = max(30, active_validator_count)
         recent_proposers = self._get_recently_active_validators(current_height, lookback_blocks=proposer_lookback)
         liveness_validators.update(recent_proposers)
+        
+        # DEBUG: Log what Stage 1 found (helps diagnose consensus issues)
+        if len(self.blocks) > 10:  # Only log after bootstrap
+            print(f"   Registered validators: {active_validator_count}, Online validators (P2P): {len(recent_proposers)}")
         
         # STAGE 2: Recently activated validators (dynamic grace period)
         # DYNAMIC GRACE WINDOW: Scales with validator count

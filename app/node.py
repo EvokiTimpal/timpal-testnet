@@ -241,24 +241,15 @@ class Node:
                 is_bootstrap_block = block.height <= 10 or len(active_validators_check) == 0
                 
                 if not is_bootstrap_block:
-                    # After bootstrap: enforce strict proposer validation
+                    # After bootstrap: enforce proposer is registered validator
                     current_validators = self.ledger.get_validator_set()
                     
                     if proposer_address not in current_validators:
                         print(f"❌ REJECT Block {block.height}: Proposer {proposer_address[:20]}... not in validator set")
                         return
                     
-                    # SLOT-BASED VALIDATION: Check proposer against block's slot, not height
-                    # This allows height to remain sequential while slots can skip forward
-                    block_slot = block.slot if hasattr(block, 'slot') and block.slot is not None else block.height
-                    ranked_proposers_for_slot = self.ledger.get_ranked_proposers_for_slot(block_slot, num_ranks=3)
-                    
-                    if not ranked_proposers_for_slot or proposer_address not in ranked_proposers_for_slot:
-                        expected_list = [p[:20]+'...' for p in (ranked_proposers_for_slot or [])]
-                        print(f"❌ REJECT Block {block.height} (slot {block_slot}): Invalid proposer {proposer_address[:20]}...")
-                        print(f"   Expected one of: {expected_list}")
-                        return
-                    
+                    # SIGNATURE VALIDATION: Always verify proposer signature (prevents forgery)
+                    # This is the CRITICAL security check - proposer must prove ownership
                     validator_public_key = self.ledger.get_validator_public_key(proposer_address)
                     if not validator_public_key:
                         print(f"❌ REJECT Block {block.height}: No public key for proposer {proposer_address[:20]}...")
@@ -266,6 +257,59 @@ class Node:
                     
                     if not block.verify_proposer_signature(validator_public_key):
                         print(f"❌ REJECT Block {block.height}: Invalid proposer signature")
+                        return
+                    
+                    # VRF VALIDATION: Use PARENT block's historical frame for deterministic validation
+                    # The proposer for block N is determined by state at block N-1 (parent).
+                    # Solution: Use parent's stored liveness set + epoch seed to compute expected proposer.
+                    # This is deterministic because all nodes have the same parent block.
+                    block_slot = block.slot if hasattr(block, 'slot') and block.slot is not None else block.height
+                    parent_height = block.height - 1
+                    
+                    # Get parent block's historical state for VRF computation
+                    from app.historical_state import HistoricalStateBuilder
+                    
+                    # Get parent block's validator frame (contains epoch_seed + liveness data)
+                    # CRITICAL: epoch_seed is stored in ValidatorStateFrame which is NEVER evicted
+                    parent_frame = self.ledger.historical_state_log.get_frame(parent_height)
+                    
+                    # Try to compute expected proposer from parent's historical state
+                    expected_proposers = None
+                    liveness_set = None
+                    epoch_seed = None
+                    
+                    # Get liveness set AND epoch_seed from parent frame
+                    # CRITICAL: epoch_seed is stored in ValidatorStateFrame (never evicted)
+                    # This is more reliable than AM snapshot which can be evicted from cache
+                    if parent_frame:
+                        if parent_frame.liveness_filter_state:
+                            liveness_set = parent_frame.liveness_filter_state.combined_liveness_set
+                        epoch_seed = parent_frame.epoch_seed
+                    
+                    if epoch_seed and liveness_set:
+                        # Compute deterministic VRF proposer queue from parent state
+                        # Pass sorted list for deterministic ordering across all nodes
+                        sorted_committee = tuple(sorted(liveness_set))
+                        expected_proposers = HistoricalStateBuilder.compute_proposer_queue_for_height(
+                            committee=set(sorted_committee),
+                            epoch_seed=epoch_seed,
+                            block_height=block.height
+                        )
+                    
+                    if expected_proposers:
+                        # We have deterministic expected proposers from parent state
+                        # Allow all ranked proposers (not just top 3) for full fallback chain
+                        if proposer_address not in expected_proposers:
+                            expected_list = [p[:20]+'...' for p in expected_proposers[:3]]
+                            print(f"❌ REJECT Block {block.height} (slot {block_slot}): Invalid proposer {proposer_address[:20]}...")
+                            print(f"   Expected one of: {expected_list}")
+                            return
+                    else:
+                        # No parent historical state - must sync via HTTP first
+                        # P2P path requires historical state for deterministic VRF validation
+                        # This prevents consensus divergence from non-deterministic liveness filters
+                        print(f"⚠️ No historical state for parent block {parent_height} - triggering sync")
+                        asyncio.create_task(self._sync_missing_blocks(parent_height, block.height))
                         return
                 
                 computed_merkle_root = block.calculate_merkle_root()

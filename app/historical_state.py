@@ -140,6 +140,11 @@ class ValidatorStateFrame:
     LIVENESS STATE (per Architect requirement):
     - liveness_filter_state: Captures _get_liveness_filtered_validators() output
     - This enables deterministic VRF replay even when liveness status changes
+    
+    VRF STATE (CRITICAL for P2P validation):
+    - epoch_seed: Deterministic seed for VRF proposer selection
+    - epoch_number: Which epoch this block belongs to
+    - These fields are NEVER evicted from cache, enabling P2P validation
     """
     block_height: int
     block_hash: str
@@ -148,6 +153,9 @@ class ValidatorStateFrame:
     ordered_validators: List[ValidatorEntry]
     
     liveness_filter_state: Optional[LivenessFilterState] = None
+    
+    epoch_seed: str = ""
+    epoch_number: int = 0
     
     is_full_frame: bool = True
     parent_frame_height: Optional[int] = None
@@ -193,6 +201,8 @@ class ValidatorStateFrame:
             'timestamp': self.timestamp,
             'ordered_validators': [v.to_dict() for v in self.ordered_validators],
             'liveness_filter_state': self.liveness_filter_state.to_dict() if self.liveness_filter_state else None,
+            'epoch_seed': self.epoch_seed,
+            'epoch_number': self.epoch_number,
             'is_full_frame': self.is_full_frame,
             'parent_frame_height': self.parent_frame_height,
             'added_validators': [v.to_dict() for v in self.added_validators],
@@ -210,6 +220,8 @@ class ValidatorStateFrame:
             timestamp=data['timestamp'],
             ordered_validators=[ValidatorEntry.from_dict(v) for v in data['ordered_validators']],
             liveness_filter_state=LivenessFilterState.from_dict(liveness_data) if liveness_data else None,
+            epoch_seed=data.get('epoch_seed', ''),
+            epoch_number=data.get('epoch_number', 0),
             is_full_frame=data.get('is_full_frame', True),
             parent_frame_height=data.get('parent_frame_height'),
             added_validators=[ValidatorEntry.from_dict(v) for v in data.get('added_validators', [])],
@@ -507,7 +519,9 @@ class HistoricalStateBuilder:
         grace_period_validators: Optional[List[str]] = None,
         combined_liveness_set: Optional[List[str]] = None,
         lookback_blocks: int = 30,
-        grace_window_blocks: int = 30
+        grace_window_blocks: int = 30,
+        epoch_seed: str = "",
+        epoch_number: int = 0
     ) -> ValidatorStateFrame:
         """
         Create a ValidatorStateFrame from current ledger state.
@@ -523,6 +537,8 @@ class HistoricalStateBuilder:
             combined_liveness_set: Union of all liveness-qualified validators
             lookback_blocks: Number of blocks for recent proposer check
             grace_window_blocks: Number of blocks for activation grace period
+            epoch_seed: Deterministic VRF seed for proposer selection (CRITICAL)
+            epoch_number: Which epoch this block belongs to
         
         Returns:
             ValidatorStateFrame capturing validator state at this height
@@ -593,6 +609,8 @@ class HistoricalStateBuilder:
             timestamp=time.time(),
             ordered_validators=ordered_validators,
             liveness_filter_state=liveness_state,
+            epoch_seed=epoch_seed,
+            epoch_number=epoch_number,
             is_full_frame=is_full_frame,
             parent_frame_height=parent_frame.block_height if parent_frame else None,
             added_validators=added,
