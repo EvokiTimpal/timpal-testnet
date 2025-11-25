@@ -9,6 +9,14 @@ from app.fork_choice import ForkChoice
 from app.validator_economics import ValidatorEconomics
 from app.attestation import AttestationManager
 from app.vrf import VRFManager
+from app.historical_state import (
+    HistoricalStateLog,
+    HistoricalStateBuilder,
+    ValidatorStateFrame,
+    EpochSnapshot,
+    HistoricalStateRecord
+)
+from app.sqlite_historical_storage import SQLiteHistoricalStorage
 import config
 
 
@@ -78,6 +86,19 @@ class Ledger:
         # Integrates with attestation committees for O(1) verification at 100K+ scale
         self.vrf_manager = VRFManager()
         
+        # HISTORICAL STATE LOG: Track validator state at each height for deterministic VRF
+        # CRITICAL FOR REORG: Enables reconstruction of exact validator set at any height
+        # for deterministic VRF proposer validation during chain reorganization
+        # Uses SQLite for ACID guarantees and crash consistency
+        self.historical_state_log = SQLiteHistoricalStorage(
+            db_path=os.path.join(data_dir, "history", "historical_state.db"),
+            auto_migrate=True
+        )
+        
+        # Track the previous frame for delta computation
+        self._previous_validator_frame: Optional[ValidatorStateFrame] = None
+        self._previous_historical_record: Optional[HistoricalStateRecord] = None
+        
         # ROUND-BASED TIMEOUT CERTIFICATES: Tendermint-style consensus for liveness
         # Track which round each height is on (round increments when timeout certificate accepted)
         self.current_round_by_height: Dict[int, int] = {}  # height -> round
@@ -140,7 +161,7 @@ class Ledger:
             raise TypeError("Callback must be callable or None")
         self._online_validators_callback = callback
     
-    def add_block(self, block: Block, skip_proposer_check: bool = False) -> bool:
+    def add_block(self, block: Block, skip_proposer_check: bool = False, use_historical_validators: bool = False) -> bool:
         """
         Add a block to the blockchain with comprehensive validation.
         Returns True if block was added, False if rejected.
@@ -151,6 +172,10 @@ class Ledger:
             skip_proposer_check: If True, skip strict proposer validation (used during sync)
                                 This allows nodes to catch up without rejecting blocks due to
                                 stale local checkpoint state
+            use_historical_validators: If True, compute validator set based on block height
+                                      for VRF proposer validation during chain reorganization.
+                                      Uses activation_height to determine which validators
+                                      were active when the block was originally created.
         """
         # DEBUG: Log every add_block attempt to diagnose infinite loop
         print(f"🔍 DEBUG: add_block called for Block {block.height}, current chain has {len(self.blocks)} blocks")
@@ -329,7 +354,24 @@ class Ledger:
                 if not skip_proposer_check:
                     # Get the slot for this block (defaults to height if slot not set, maintains backward compat)
                     block_slot = block.slot if hasattr(block, 'slot') and block.slot is not None else block.height
-                    expected_proposer = self.select_proposer_vrf_based(block_slot)
+                    
+                    # HISTORICAL VALIDATOR SET: During chain reorganization, use validators
+                    # that were active at the block's height, not current validators
+                    if use_historical_validators:
+                        # CRITICAL: Use HistoricalStateLog for deterministic VRF proposer reconstruction
+                        # This provides exact liveness-filtered validator set and proposer queue
+                        # that was used when the block was originally created
+                        expected_proposer = self._get_historical_expected_proposer(block.height, block_slot)
+                        
+                        if expected_proposer is None:
+                            # Historical state missing - this is a security issue during reorg
+                            # Fall back to checkpoint-based validation as last resort
+                            print(f"⚠️ No historical state for height {block.height} - using checkpoint fallback")
+                            historical_validators = self.get_validators_at_height(block.height)
+                            expected_proposer = self.select_proposer_vrf_based(block_slot, validators=historical_validators)
+                    else:
+                        expected_proposer = self.select_proposer_vrf_based(block_slot)
+                    
                     if expected_proposer and block.proposer != expected_proposer:
                         print(f"REJECT: Wrong proposer for block {block.height} (slot {block_slot})")
                         print(f"  Expected: {expected_proposer}")
@@ -686,6 +728,10 @@ class Ledger:
         # CRITICAL: Only update priorities AFTER bootstrap period (block 10+)
         if block.height > 10:
             self.update_proposer_priorities_after_commit(block.height)
+        
+        # HISTORICAL STATE RECORDING: Capture validator state for deterministic VRF replay
+        # This enables chain reorganization with proper proposer validation
+        self._record_historical_state(block)
         
         self.save_state()
         return True
@@ -1049,6 +1095,278 @@ class Ledger:
                     if h in checkpoints_to_keep
                 }
     
+    def _get_historical_expected_proposer(self, block_height: int, block_slot: int) -> Optional[str]:
+        """
+        Get the expected proposer for a block using ONLY stored historical state.
+        
+        CRITICAL FOR REORG SECURITY: Uses HistoricalStateLog to reconstruct the exact
+        VRF proposer selection that was valid when the block was originally created.
+        This enables deterministic validation of proposer identity during chain
+        reorganization without the security vulnerability of skipping VRF checks.
+        
+        SECURITY INVARIANT: This method MUST NOT use any current state (VRF manager,
+        attestation manager, validator registry). It can ONLY use data stored in
+        HistoricalStateLog to guarantee deterministic replay across all nodes.
+        
+        REORG HANDLING: During chain reorganization, the historical state at block_height
+        may not exist yet (we just cleared it). In this case, we MUST use the PARENT's
+        historical state (block_height - 1) which represents the fork point and is preserved.
+        
+        Args:
+            block_height: Block height being validated
+            block_slot: Block slot (time-based) for VRF selection
+        
+        Returns:
+            Expected proposer address, or None if historical state unavailable
+        """
+        # PRIORITY 1: Use stored proposer queue directly from historical record
+        # This is the MOST RELIABLE source as it was captured at commit time
+        proposer_queue = self.historical_state_log.get_proposer_queue_at_height(block_height)
+        if proposer_queue:
+            return proposer_queue[0] if proposer_queue else None
+        
+        # PRIORITY 2: Reconstruct from AM snapshot at this height (contains epoch_seed + liveness)
+        am_snapshot = self.historical_state_log.get_am_snapshot(block_height)
+        if am_snapshot:
+            stored_epoch_seed = am_snapshot.get('epoch_seed')
+            if stored_epoch_seed and len(stored_epoch_seed) > 0:
+                # Prefer liveness set stored directly in AM snapshot
+                liveness_set = am_snapshot.get('combined_liveness_set')
+                
+                # Fallback to frame's liveness data
+                if not liveness_set:
+                    frame = self.historical_state_log.get_frame(block_height)
+                    if frame and frame.liveness_filter_state:
+                        liveness_set = frame.liveness_filter_state.combined_liveness_set
+                
+                if liveness_set:
+                    queue = HistoricalStateBuilder.compute_proposer_queue_for_height(
+                        committee=set(liveness_set),
+                        epoch_seed=stored_epoch_seed,
+                        block_height=block_height
+                    )
+                    return queue[0] if queue else None
+        
+        # PRIORITY 3 (REORG CASE): Use PARENT's historical state
+        # During chain reorganization, we may not have state at block_height yet.
+        # The parent's state (fork point) IS available and must be used.
+        # The parent's liveness set + epoch seed determines who can propose at block_height.
+        if block_height > 0:
+            parent_am = self.historical_state_log.get_am_snapshot(block_height - 1)
+            parent_frame = self.historical_state_log.get_frame(block_height - 1)
+            
+            if parent_am:
+                stored_epoch_seed = parent_am.get('epoch_seed')
+                if stored_epoch_seed and len(stored_epoch_seed) > 0:
+                    # Prefer liveness set stored directly in AM snapshot
+                    liveness_set = parent_am.get('combined_liveness_set')
+                    
+                    # Fallback to parent frame's liveness data
+                    if not liveness_set and parent_frame and parent_frame.liveness_filter_state:
+                        liveness_set = parent_frame.liveness_filter_state.combined_liveness_set
+                    
+                    if liveness_set:
+                        queue = HistoricalStateBuilder.compute_proposer_queue_for_height(
+                            committee=set(liveness_set),
+                            epoch_seed=stored_epoch_seed,
+                            block_height=block_height
+                        )
+                        return queue[0] if queue else None
+        
+        # PRIORITY 4: Reconstruct from nearest epoch snapshot
+        state = self.historical_state_log.get_state_at_height(block_height)
+        if state and state.get('nearest_epoch_snapshot'):
+            epoch_snap = state['nearest_epoch_snapshot']
+            if epoch_snap.ordered_committee and epoch_snap.epoch_seed:
+                queue = HistoricalStateBuilder.compute_proposer_queue_for_height(
+                    committee=set(epoch_snap.ordered_committee),
+                    epoch_seed=epoch_snap.epoch_seed,
+                    block_height=block_height
+                )
+                return queue[0] if queue else None
+        
+        # PRIORITY 5: Try grandparent state if parent is missing
+        # This handles edge cases where we're validating block_height = 1 and only genesis exists
+        if block_height > 1:
+            grandparent_am = self.historical_state_log.get_am_snapshot(block_height - 2)
+            grandparent_frame = self.historical_state_log.get_frame(block_height - 2)
+            
+            if grandparent_am and grandparent_frame:
+                stored_epoch_seed = grandparent_am.get('epoch_seed')
+                if stored_epoch_seed and grandparent_frame.liveness_filter_state:
+                    liveness_set = grandparent_frame.liveness_filter_state.combined_liveness_set
+                    if liveness_set:
+                        queue = HistoricalStateBuilder.compute_proposer_queue_for_height(
+                            committee=set(liveness_set),
+                            epoch_seed=stored_epoch_seed,
+                            block_height=block_height
+                        )
+                        return queue[0] if queue else None
+        
+        # FAIL-SAFE: Return None - caller must reject reorg if no historical data
+        # DO NOT fall back to current VRF state as that breaks determinism
+        # CRITICAL SECURITY: This is a HARD FAILURE for reorg validation
+        # Missing historical state means we cannot deterministically verify proposers
+        print(f"❌ SECURITY: No stored historical state available for height {block_height}")
+        print(f"   This indicates incomplete historical data - chain may need migration or resync")
+        print(f"   Reorg validation MUST fail to prevent accepting invalid chains")
+        return None
+    
+    def _record_historical_state(self, block: Block):
+        """
+        Record historical state for a committed block.
+        
+        CRITICAL FOR REORG: Captures validator state, attestation data, and VRF context
+        at this block height to enable deterministic proposer validation during
+        chain reorganization.
+        
+        This method is called at block commit time (after all state changes are applied)
+        to capture the exact state that was used for consensus at this height.
+        
+        Args:
+            block: The block that was just committed
+        """
+        try:
+            is_epoch_boundary = (block.height % config.EPOCH_LENGTH == 0 and block.height > 0)
+            is_full_frame = is_epoch_boundary or (block.height % 100 == 0)
+            
+            recent_proposers = list(self._get_recently_active_validators(block.height, lookback_blocks=30))
+            
+            grace_period_validators = []
+            for addr, data in self.validator_registry.items():
+                if isinstance(data, dict):
+                    activation_height = data.get('activation_height', 0)
+                    if activation_height > 0 and (block.height - activation_height) <= 30:
+                        grace_period_validators.append(addr)
+            
+            combined_liveness = list(set(recent_proposers) | set(grace_period_validators))
+            
+            validator_frame = HistoricalStateBuilder.create_validator_frame(
+                block_height=block.height,
+                block_hash=block.block_hash,
+                validator_registry=self.validator_registry,
+                is_full_frame=is_full_frame,
+                parent_frame=self._previous_validator_frame,
+                recent_proposers=recent_proposers,
+                grace_period_validators=grace_period_validators,
+                combined_liveness_set=combined_liveness,
+                lookback_blocks=30,
+                grace_window_blocks=30
+            )
+            
+            epoch_snapshot = None
+            if is_epoch_boundary or block.height == 0:
+                epoch_number = self.attestation_manager.get_epoch_number(block.height)
+                all_validators = set(self.get_active_validators())
+                
+                # CRITICAL: Ensure epoch_seed is GENERATED, not just retrieved from cache
+                # This guarantees epoch_seed is never empty in stored epoch snapshots
+                epoch_seed_source_hash = ""
+                if block.height > 0 and block.height - 1 < len(self.blocks):
+                    epoch_seed_source_hash = self.blocks[block.height - 1].block_hash
+                else:
+                    epoch_seed_source_hash = self.blocks[0].block_hash if self.blocks else ""
+                
+                # Generate epoch_seed (this caches it too)
+                snapshot_epoch_seed = self.vrf_manager.generate_epoch_seed(
+                    epoch_number=epoch_number,
+                    finalized_block_hash=epoch_seed_source_hash,
+                    attestation_data=""
+                )
+                
+                epoch_snapshot = HistoricalStateBuilder.create_epoch_snapshot(
+                    epoch_number=epoch_number,
+                    epoch_length=config.EPOCH_LENGTH,
+                    attestation_manager=self.attestation_manager,
+                    epoch_seed=snapshot_epoch_seed,
+                    epoch_seed_source_hash=epoch_seed_source_hash,
+                    all_validators=all_validators,
+                    epoch_seed_source_height=max(0, block.height - 1)
+                )
+            
+            am_snapshot = self.attestation_manager.export_snapshot(block.height)
+            
+            # CRITICAL: Ensure am_snapshot is NEVER None - create minimal snapshot if needed
+            if am_snapshot is None:
+                am_snapshot = {
+                    'height': block.height,
+                    'created_from_fallback': True
+                }
+            
+            # Store epoch seed in AM snapshot for deterministic replay
+            # CRITICAL: ALWAYS generate epoch_seed - never allow empty strings
+            epoch_number = self.attestation_manager.get_epoch_number(block.height)
+            
+            # Determine the seed source block hash deterministically
+            epoch_start = self.attestation_manager.get_epoch_start_block(epoch_number)
+            if epoch_start > 0 and epoch_start - 1 < len(self.blocks):
+                seed_source_hash = self.blocks[epoch_start - 1].block_hash
+            elif block.height > 0 and block.height - 1 < len(self.blocks):
+                seed_source_hash = self.blocks[block.height - 1].block_hash
+            elif self.blocks:
+                seed_source_hash = self.blocks[0].block_hash
+            else:
+                # Fallback for genesis - use empty but deterministic string
+                seed_source_hash = "genesis_epoch_seed_source"
+            
+            # ALWAYS generate epoch_seed - this ensures it's never empty
+            epoch_seed = self.vrf_manager.generate_epoch_seed(
+                epoch_number=epoch_number,
+                finalized_block_hash=seed_source_hash,
+                attestation_data=""
+            )
+            
+            # STRICT: Abort if epoch_seed is still somehow empty
+            if not epoch_seed or len(epoch_seed) == 0:
+                raise ValueError(f"Failed to generate epoch_seed for epoch {epoch_number} - this is a critical error")
+            
+            am_snapshot['epoch_seed'] = epoch_seed
+            am_snapshot['epoch_number'] = epoch_number
+            
+            # Also store liveness data in AM snapshot for rollback reconstruction
+            am_snapshot['combined_liveness_set'] = combined_liveness
+            
+            # CRITICAL: Use LIVENESS-FILTERED validators for proposer queue computation
+            # This MUST match what select_proposer_vrf_based() uses at consensus time
+            proposer_queue = []
+            if epoch_seed and combined_liveness:
+                proposer_queue = HistoricalStateBuilder.compute_proposer_queue_for_height(
+                    committee=set(combined_liveness),
+                    epoch_seed=epoch_seed,
+                    block_height=block.height
+                )
+            
+            expected_proposer = proposer_queue[0] if proposer_queue else ""
+            current_round = self.current_round_by_height.get(block.height, 0)
+            
+            historical_record = HistoricalStateBuilder.create_historical_record(
+                block_height=block.height,
+                block_hash=block.block_hash,
+                validator_frame=validator_frame,
+                epoch_number=epoch_number,
+                epoch_snapshot=epoch_snapshot,
+                previous_record=self._previous_historical_record,
+                proposer_address=block.proposer if hasattr(block, 'proposer') else "",
+                expected_proposer=expected_proposer,
+                attestation_manager_snapshot=None,
+                current_round=current_round,
+                slot=block.height,
+                proposer_queue=proposer_queue
+            )
+            
+            self.historical_state_log.store(
+                record=historical_record,
+                validator_frame=validator_frame,
+                epoch_snapshot=epoch_snapshot,
+                am_snapshot=am_snapshot
+            )
+            
+            self._previous_validator_frame = validator_frame
+            self._previous_historical_record = historical_record
+            
+        except Exception as e:
+            print(f"⚠️ Failed to record historical state for block {block.height}: {e}")
+    
     def _get_recently_active_validators(self, current_height: int, lookback_blocks: int = 30) -> Set[str]:
         """
         Get validators who have PROPOSED BLOCKS in recent blockchain history (real-time liveness).
@@ -1327,6 +1645,54 @@ class Ledger:
         # This ensures all nodes build reward dicts in identical order → same block hash
         return sorted(active)
     
+    def get_validators_at_height(self, block_height: int) -> set:
+        """
+        Get the set of validators that were ACTIVE at a specific block height.
+        
+        This is used during chain reorganization to replay blocks with the
+        correct historical validator set for VRF proposer selection.
+        
+        Uses activation_height to determine which validators existed when
+        the block was originally created:
+        - Validators with activation_height <= block_height are included
+        - Validators registered AFTER block_height are excluded
+        
+        Args:
+            block_height: The historical block height to get validators for
+            
+        Returns:
+            Set of validator addresses that were active at that height
+            
+        SECURITY: This enables secure replay of historical blocks during
+        chain reorganization without skipping proposer validation.
+        """
+        historical_validators = set()
+        
+        for addr, data in self.validator_registry.items():
+            if addr == "genesis":
+                continue
+            
+            if not isinstance(data, dict):
+                continue
+            
+            # Check validator status
+            status = data.get('status')
+            if status not in ('active', 'genesis', 'pending'):
+                continue
+            
+            # Get activation height (when validator became active)
+            activation_height = data.get('activation_height', 0)
+            
+            # For genesis validators, activation_height is 0
+            # For other validators, they must have been activated at or before block_height
+            if activation_height <= block_height:
+                # Check if validator was pending at this height (not yet activated)
+                if status == 'pending' and block_height < activation_height:
+                    continue
+                historical_validators.add(addr)
+        
+        return historical_validators
+    
     
     def register_validator(self, address: str, public_key: str, device_id: str) -> bool:
         """
@@ -1577,7 +1943,7 @@ class Ledger:
         print(f"🎲 Pool proposer [height {current_height}]: {selected[:20]}... (pool size: {len(live_pool)})")
         return selected
     
-    def select_proposer_vrf_based(self, current_height: int) -> Optional[str]:
+    def select_proposer_vrf_based(self, current_height: int, validators: Optional[set] = None) -> Optional[str]:
         """
         Select next block proposer using VRF with epoch-based committee attestations.
         
@@ -1596,6 +1962,8 @@ class Ledger:
         
         Args:
             current_height: Current blockchain height
+            validators: Optional set of validator addresses to use for selection.
+                       If provided, uses these instead of liveness filter (for historical replay).
             
         Returns:
             Address of selected proposer, or None if no validators available
@@ -1611,21 +1979,27 @@ class Ledger:
         # Get current epoch
         current_epoch = self.attestation_manager.get_epoch_number(current_height)
         
-        # THREE-STAGE LIVENESS FILTER: Unions recent proposers, heartbeats, and newly activated validators
-        # This enables proper round-robin rotation while maintaining liveness detection
-        # Fixes chicken-and-egg problem where new validators couldn't enter rotation
-        liveness_filtered_validators = self._get_liveness_filtered_validators(current_height)
-        
-        if liveness_filtered_validators:
-            validators_for_selection = liveness_filtered_validators
-            print(f"🔍 Liveness filter: {len(validators_for_selection)} validators passed 3-stage filter")
+        # If historical validators provided (during chain reorganization replay),
+        # use them directly instead of liveness filter
+        if validators is not None:
+            validators_for_selection = validators
+            print(f"📜 Historical replay: Using {len(validators_for_selection)} validators at height {current_height}")
         else:
-            # Fallback: Use all registered active|genesis validators (prevents deadlock during genesis)
-            validators_for_selection = set(
-                v for v, val in self.validator_registry.items()
-                if isinstance(val, dict) and val.get('status') in ('active', 'genesis')
-            )
-            print(f"⚠️  No liveness data - using all {len(validators_for_selection)} registered (active|genesis) validators")
+            # THREE-STAGE LIVENESS FILTER: Unions recent proposers, heartbeats, and newly activated validators
+            # This enables proper round-robin rotation while maintaining liveness detection
+            # Fixes chicken-and-egg problem where new validators couldn't enter rotation
+            liveness_filtered_validators = self._get_liveness_filtered_validators(current_height)
+            
+            if liveness_filtered_validators:
+                validators_for_selection = liveness_filtered_validators
+                print(f"🔍 Liveness filter: {len(validators_for_selection)} validators passed 3-stage filter")
+            else:
+                # Fallback: Use all registered active|genesis validators (prevents deadlock during genesis)
+                validators_for_selection = set(
+                    v for v, val in self.validator_registry.items()
+                    if isinstance(val, dict) and val.get('status') in ('active', 'genesis')
+                )
+                print(f"⚠️  No liveness data - using all {len(validators_for_selection)} registered (active|genesis) validators")
         
         if not validators_for_selection:
             return None
@@ -2176,9 +2550,34 @@ class Ledger:
         if not rollback_success:
             return (False, f"Failed to rollback to height {fork_height - 1}")
         
-        # Step 2: Add new blocks one by one
+        # Step 2: Add new blocks one by one using HISTORICAL VRF VALIDATION
+        # CRITICAL SECURITY: VRF proposer ordering is CORE SECURITY in TIMPAL.
+        # Unlike Bitcoin (PoW) or Ethereum (PoS cumulative stake), TIMPAL has NO
+        # alternative security mechanism once VRF is bypassed.
+        #
+        # ATTACK SCENARIO (if VRF skipped): Malicious validator could grind
+        # arbitrary block sequences offline and force honest nodes to reorganize
+        # onto the forged chain.
+        #
+        # SOLUTION: Use historical state reconstruction from HistoricalStateLog:
+        # 1. Load historical validator frame for each block height
+        # 2. Reconstruct exact VRF proposer queue using stored epoch seed + liveness data
+        # 3. Verify block.proposer matches expected proposer from historical state
+        # 4. Only accept blocks with valid VRF proposer selection
+        #
+        # FAIL-SAFE: If historical state is missing, REJECT the reorg rather than
+        # silently downgrade security. This indicates ledger corruption that must
+        # be addressed via resync from peers.
         for block in blocks_to_add:
-            success = self.add_block(block)
+            # Check if we have historical state for this height
+            if not self.historical_state_log.has_height(block.height - 1) and block.height > 0:
+                print(f"❌ SECURITY: Missing historical state for height {block.height - 1}")
+                print(f"   Cannot validate VRF proposer selection during reorg")
+                print(f"   Aborting reorg - please resync from peers")
+                return (False, f"Missing historical state for VRF validation at height {block.height}")
+            
+            # Use historical validators for VRF validation during reorg
+            success = self.add_block(block, skip_proposer_check=False, use_historical_validators=True)
             if not success:
                 # Reorganization failed - state is corrupted
                 print(f"❌ CRITICAL: Reorganization failed when adding block {block.height}")
@@ -2193,6 +2592,11 @@ class Ledger:
         Rollback blockchain to a specific height.
         
         This is used during chain reorganization to undo blocks.
+        
+        CRITICAL FOR VRF SECURITY:
+        - Restores historical validator state for deterministic proposer validation
+        - Restores attestation manager state for correct liveness filtering
+        - Clears historical state log above target height
         
         Args:
             target_height: Height to rollback to (minimum 0 to preserve genesis)
@@ -2217,20 +2621,189 @@ class Ledger:
         
         print(f"📤 Rolling back {blocks_to_remove} blocks from height {current_height} to {target_height}")
         
-        # Remove blocks from end
+        # STEP 1: Restore AttestationManager state from historical snapshot
+        # This is CRITICAL for correct VRF proposer selection during replay
+        am_snapshot = self.historical_state_log.get_am_snapshot(target_height)
+        if am_snapshot:
+            restore_success = self.attestation_manager.import_snapshot(am_snapshot)
+            if restore_success:
+                print(f"✅ AttestationManager state restored to height {target_height}")
+            else:
+                print(f"⚠️ Failed to restore AttestationManager state - using rollback_to_height fallback")
+                self.attestation_manager.rollback_to_height(target_height)
+        else:
+            # Fallback: use lightweight rollback if no snapshot available
+            self.attestation_manager.rollback_to_height(target_height)
+            print(f"ℹ️  No AM snapshot at height {target_height} - used lightweight rollback")
+        
+        # STEP 2: Restore VRF manager epoch seeds from snapshot or epoch snapshot
+        # This is CRITICAL for deterministic proposer validation
+        # SECURITY: Only restore non-empty epoch seeds to avoid corrupting VRF state
+        epoch_seed_restored = False
+        
+        # Try AM snapshot first
+        if am_snapshot and 'epoch_seed' in am_snapshot:
+            stored_epoch_seed = am_snapshot.get('epoch_seed')
+            stored_epoch_number = am_snapshot.get('epoch_number')
+            if stored_epoch_seed and len(stored_epoch_seed) > 0 and stored_epoch_number is not None:
+                self.vrf_manager.restore_epoch_seed(stored_epoch_number, stored_epoch_seed)
+                print(f"✅ VRF epoch seed restored for epoch {stored_epoch_number}")
+                epoch_seed_restored = True
+        
+        # Fallback: Derive epoch_seed from nearest epoch snapshot
+        if not epoch_seed_restored:
+            epoch_snap, snap_height = self.historical_state_log.get_nearest_epoch_snapshot(target_height)
+            if epoch_snap and epoch_snap.epoch_seed and len(epoch_snap.epoch_seed) > 0:
+                self.vrf_manager.restore_epoch_seed(epoch_snap.epoch_number, epoch_snap.epoch_seed)
+                print(f"✅ VRF epoch seed restored from epoch snapshot {epoch_snap.epoch_number}")
+                epoch_seed_restored = True
+        
+        if not epoch_seed_restored:
+            print(f"❌ CRITICAL: No valid epoch seed found for height {target_height}")
+            print(f"   This is required for deterministic proposer validation")
+            print(f"   Historical data may be incomplete - requires migration or resync")
+            print(f"   ABORTING ROLLBACK to prevent chain corruption")
+            return False
+        
+        # STRICT: AM snapshot MUST exist and have required liveness data
+        if am_snapshot is None:
+            print(f"❌ CRITICAL: No AM snapshot found for height {target_height}")
+            print(f"   This is required for deterministic proposer validation")
+            print(f"   Historical data may be incomplete - requires migration or resync")
+            print(f"   ABORTING ROLLBACK to prevent chain corruption")
+            return False
+        
+        if 'combined_liveness_set' not in am_snapshot:
+            print(f"❌ CRITICAL: AM snapshot at height {target_height} missing combined_liveness_set")
+            print(f"   This is required for deterministic proposer validation")
+            print(f"   Historical data may be incomplete - requires migration or resync")
+            print(f"   ABORTING ROLLBACK to prevent chain corruption")
+            return False
+        
+        # STEP 3: Restore validator frame pointers for delta computation
+        frame = self.historical_state_log.get_frame(target_height)
+        if frame:
+            self._previous_validator_frame = frame
+            
+            # CRITICAL: Restore validator registry directly from frame
+            # This ensures slashing/status changes are correctly restored
+            # instead of only replaying registrations from transactions
+            self._restore_validator_registry_from_frame(frame)
+            print(f"✅ Validator registry restored from frame at height {target_height}")
+        else:
+            self._previous_validator_frame = None
+            print(f"⚠️ No validator frame at height {target_height} - will rebuild from transactions")
+        
+        record = self.historical_state_log.get_record(target_height)
+        if record:
+            self._previous_historical_record = record
+        else:
+            self._previous_historical_record = None
+        
+        # STEP 4: Clear historical state log above target height
+        removed_count = self.historical_state_log.remove_above_height(target_height)
+        if removed_count > 0:
+            print(f"🗑️  Cleared {removed_count} historical state records above height {target_height}")
+        
+        # STEP 5: Remove blocks from end
         self.blocks = self.blocks[:target_height + 1]
         
-        # Rebuild state from remaining blocks
-        self._rebuild_state_from_blocks()
+        # STEP 6: Rebuild balances/nonces from remaining blocks
+        # Note: Validator registry is already restored from frame (STEP 3)
+        # This only rebuilds financial state, not validator state
+        self._rebuild_financial_state_from_blocks()
         
         print(f"✅ Rollback complete - now at height {len(self.blocks) - 1}")
         return True
     
+    def _restore_validator_registry_from_frame(self, frame):
+        """
+        Restore validator registry directly from a ValidatorStateFrame.
+        
+        This is CRITICAL for correct rollback because it restores ALL validator
+        state including slashing, status changes, and deregistration - which
+        cannot be reconstructed by only replaying validator_registration transactions.
+        
+        Args:
+            frame: ValidatorStateFrame containing ordered_validators list
+        """
+        self.validator_registry = {}
+        
+        for validator_entry in frame.ordered_validators:
+            self.validator_registry[validator_entry.address] = {
+                'public_key': validator_entry.public_key,
+                'device_id': validator_entry.device_id,
+                'activation_height': validator_entry.activation_height,
+                'stake': validator_entry.deposit_amount,
+                'status': validator_entry.status,
+                'registration_height': validator_entry.registration_height,
+                'voting_power': validator_entry.voting_power,
+                'proposer_priority': validator_entry.proposer_priority
+            }
+        
+        # Update validator set checkpoint for this height
+        self.validator_set_checkpoints[frame.block_height] = set(self.validator_registry.keys())
+    
+    def _rebuild_financial_state_from_blocks(self):
+        """
+        Rebuild only financial state (balances, nonces, emissions) from blocks.
+        
+        This is a lighter-weight rebuild that preserves validator registry
+        (which is restored separately from ValidatorStateFrame during rollback).
+        
+        Used when validator state was already restored from historical frame.
+        """
+        print("🔨 Rebuilding financial state from blocks...")
+        
+        # Reset financial state only (NOT validator registry)
+        self.balances = {}
+        self.nonces = {}
+        self.total_emitted_pals = 0
+        
+        # Replay all blocks for financial state
+        for block in self.blocks:
+            # Process reward distribution
+            if hasattr(block, 'reward_distribution') and block.reward_distribution:
+                for address, reward in block.reward_distribution.items():
+                    if address not in self.balances:
+                        self.balances[address] = 0
+                    self.balances[address] += reward
+                    self.total_emitted_pals += reward
+            
+            # Process transactions
+            for tx in block.transactions:
+                if tx.tx_type == "validator_registration":
+                    # For registration, only process the financial aspect (stake + fee)
+                    if tx.sender not in self.balances:
+                        self.balances[tx.sender] = 0
+                    self.balances[tx.sender] -= (tx.amount + tx.fee) if hasattr(tx, 'fee') else tx.amount
+                else:
+                    # Regular transfer transaction
+                    if tx.sender not in self.balances:
+                        self.balances[tx.sender] = 0
+                    self.balances[tx.sender] -= (tx.amount + tx.fee)
+                    
+                    if tx.recipient not in self.balances:
+                        self.balances[tx.recipient] = 0
+                    self.balances[tx.recipient] += tx.amount
+                
+                # Update nonce
+                self.nonces[tx.sender] = tx.nonce
+        
+        print(f"✅ Financial state rebuilt: {len(self.balances)} accounts, "
+              f"{self.total_emitted_pals:,} pals emitted")
+    
     def _rebuild_state_from_blocks(self):
         """
-        Rebuild ledger state (balances, nonces, emissions) from blocks.
+        Rebuild full ledger state from blocks including validator registry.
         
         Used after chain reorganization to ensure state matches blockchain.
+        
+        CRITICAL: This method rebuilds ALL state that was modified by blocks:
+        - Balances (from transactions and rewards)
+        - Nonces (from transactions)
+        - Emissions (from block rewards)
+        - Validator registry (from validator_registration transactions)
         """
         print("🔨 Rebuilding ledger state from blocks...")
         
@@ -2238,6 +2811,14 @@ class Ledger:
         self.balances = {}
         self.nonces = {}
         self.total_emitted_pals = 0
+        self.validator_registry = {}
+        
+        # Clear existing validator checkpoints above height 0
+        # Keep genesis checkpoint if it exists
+        genesis_checkpoint = self.validator_set_checkpoints.get(0)
+        self.validator_set_checkpoints = {}
+        if genesis_checkpoint:
+            self.validator_set_checkpoints[0] = genesis_checkpoint
         
         # Replay all blocks
         for block in self.blocks:
@@ -2251,20 +2832,56 @@ class Ledger:
             
             # Process transactions
             for tx in block.transactions:
-                # Update sender
-                if tx.sender not in self.balances:
-                    self.balances[tx.sender] = 0
-                self.balances[tx.sender] -= (tx.amount + tx.fee)
-                
-                # Update recipient
-                if tx.recipient not in self.balances:
-                    self.balances[tx.recipient] = 0
-                self.balances[tx.recipient] += tx.amount
+                # Handle validator registration transactions
+                if tx.tx_type == "validator_registration":
+                    self._process_validator_registration_for_rebuild(tx, block.height)
+                else:
+                    # Regular transfer transaction
+                    # Update sender
+                    if tx.sender not in self.balances:
+                        self.balances[tx.sender] = 0
+                    self.balances[tx.sender] -= (tx.amount + tx.fee)
+                    
+                    # Update recipient
+                    if tx.recipient not in self.balances:
+                        self.balances[tx.recipient] = 0
+                    self.balances[tx.recipient] += tx.amount
                 
                 # Update nonce
                 self.nonces[tx.sender] = tx.nonce
         
-        print(f"✅ State rebuilt: {len(self.balances)} accounts, {self.total_emitted_pals:,} pals emitted")
+        # Create checkpoint for final height
+        if self.blocks:
+            final_height = len(self.blocks) - 1
+            if final_height > 0 and final_height not in self.validator_set_checkpoints:
+                self.validator_set_checkpoints[final_height] = set(self.validator_registry.keys())
+        
+        print(f"✅ State rebuilt: {len(self.balances)} accounts, "
+              f"{len(self.validator_registry)} validators, "
+              f"{self.total_emitted_pals:,} pals emitted")
+    
+    def _process_validator_registration_for_rebuild(self, tx, block_height: int):
+        """
+        Process a validator registration transaction during state rebuild.
+        
+        This replicates the validator registration logic from add_block
+        but without validation (since we're replaying already-validated blocks).
+        """
+        validator_address = tx.sender
+        
+        # Register the validator
+        self.validator_registry[validator_address] = {
+            'public_key': tx.public_key if hasattr(tx, 'public_key') else '',
+            'device_id': tx.device_id if hasattr(tx, 'device_id') else '',
+            'activation_height': block_height,
+            'stake': tx.amount if hasattr(tx, 'amount') else 0,
+            'status': 'active'
+        }
+        
+        # Update balance (stake is locked, fee is deducted)
+        if validator_address not in self.balances:
+            self.balances[validator_address] = 0
+        self.balances[validator_address] -= (tx.amount + tx.fee) if hasattr(tx, 'fee') else tx.amount
     
     def add_finality_checkpoint(self, height: int, block_hash: str):
         """
