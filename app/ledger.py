@@ -1552,15 +1552,23 @@ class Ledger:
         
         return validators_with_heartbeats
     
-    def get_validators_with_recent_attestations(self, lookback_blocks: int = 100) -> Set[str]:
+    def get_validators_with_recent_attestations(self, lookback_epochs: int = None) -> Set[str]:
         """
         Get validators who have submitted epoch attestations in recent epochs.
         
         SCALABLE LIVENESS CHECK: Query AttestationManager directly instead of scanning
         all block transactions. Supports 100K+ validators efficiently.
         
+        MAINNET SCALING: lookback_epochs scales with validator count to ensure ALL
+        validators who attested recently are included. Formula:
+            lookback_epochs = ceil(active_validators / committee_size) + safety_margin
+        
+        With 100K validators and committee_size=1000:
+            lookback_epochs = ceil(100000/1000) + 10 = 110 epochs
+            = 110 * 100 blocks = 11000 blocks (~9 hours at 3s/block)
+        
         Args:
-            lookback_blocks: Number of recent blocks to check (default: 100 = 1 epoch)
+            lookback_epochs: Number of epochs to check (default: auto-scaled)
         
         Returns:
             Set of validator addresses who have recent epoch attestations
@@ -1573,45 +1581,57 @@ class Ledger:
             # Bootstrap period - no attestations required yet
             return set(self.validator_registry.keys())
         
-        # Get current and previous epochs
+        # Count active validators for dynamic lookback calculation
+        active_validator_count = 0
+        for addr, data in self.validator_registry.items():
+            if addr == "genesis":
+                continue
+            if isinstance(data, dict) and data.get('status') in ('active', 'genesis'):
+                active_validator_count += 1
+        
+        # MAINNET SCALING: Calculate lookback_epochs to cover ALL validators
+        # Each epoch, committee_size validators attest
+        # To cover all validators, need ceil(active_validators / committee_size) epochs
+        # Add safety margin of 10 epochs for network delays
+        committee_size = self.attestation_manager.committee_size
+        if lookback_epochs is None:
+            # Auto-scale: enough epochs to cover all validators + safety margin
+            SAFETY_MARGIN_EPOCHS = 10
+            lookback_epochs = max(2, (active_validator_count + committee_size - 1) // committee_size + SAFETY_MARGIN_EPOCHS)
+        
+        # Get current epoch
         current_epoch = self.attestation_manager.get_epoch_number(current_height)
         
-        # Collect validators from current and previous epoch attestations
+        # Collect validators from all epochs in lookback window
         validators_with_attestations = set()
         
-        # Check current epoch
-        current_attestations = self.attestation_manager.get_attestations_for_epoch(current_epoch)
-        validators_with_attestations.update(current_attestations.keys())
+        # Check current epoch and all previous epochs within lookback window
+        for epoch_offset in range(lookback_epochs):
+            epoch = current_epoch - epoch_offset
+            if epoch < 0:
+                break
+            epoch_attestations = self.attestation_manager.get_attestations_for_epoch(epoch)
+            validators_with_attestations.update(epoch_attestations.keys())
         
-        # Also check previous epoch (validators who attested recently but not this epoch yet)
-        if current_epoch > 0:
-            prev_attestations = self.attestation_manager.get_attestations_for_epoch(current_epoch - 1)
-            validators_with_attestations.update(prev_attestations.keys())
-        
-        # CRITICAL FIX: When no attestations, use P2P connections for online detection
-        # This enforces TIMPAL policy: ONLY ONLINE NODES RECEIVE BLOCK REWARDS
+        # DETERMINISTIC FALLBACK: When no attestations found, use ALL registered validators
+        # This is CONSENSUS-SAFE because all nodes see the same registry state
+        # DO NOT use P2P callbacks - they are non-deterministic across nodes!
         if not validators_with_attestations:
             # Throttle warning: Only log once per hour to reduce spam
             current_time = time.time()
             if current_time - self._last_attestation_warning > 3600:  # 3600 seconds = 1 hour
-                print(f"⚠️  WARNING: No epoch attestations found, using P2P connections for liveness")
+                print(f"⚠️  WARNING: No epoch attestations found, using all registered validators (deterministic fallback)")
                 self._last_attestation_warning = current_time
             
-            # Fallback: Use P2P connections to determine which validators are online
-            if self._online_validators_callback is not None:
-                try:
-                    online_validators = self._online_validators_callback()
-                    if online_validators:
-                        if current_time - self._last_attestation_warning < 60:  # Log details on first warning
-                            print(f"   Registered validators: {len(self.validator_registry)}, Online validators (P2P): {len(online_validators)}")
-                        return online_validators
-                except Exception as e:
-                    print(f"⚠️  ERROR: Failed to get online validators from callback: {e}")
-            
-            # No callback or callback failed - return empty list (no rewards)
-            if current_time - self._last_attestation_warning < 60:
-                print(f"   No P2P callback available - NO REWARDS will be distributed")
-            return []
+            # DETERMINISTIC FALLBACK: Return all active registered validators
+            # This ensures all nodes compute the SAME set (from registry, not P2P)
+            all_active = set()
+            for addr, data in self.validator_registry.items():
+                if addr == "genesis":
+                    continue
+                if isinstance(data, dict) and data.get('status') in ('active', 'genesis'):
+                    all_active.add(addr)
+            return sorted(list(all_active))
         
         # CRITICAL FIX: Return sorted list, not set (sets have non-deterministic order)
         # This ensures reward_allocations dict is built in same order on all nodes
@@ -1623,25 +1643,18 @@ class Ledger:
         Only validators who are:
         1) Registered & 'active' (or 'genesis' during bootstrap),
         2) Satisfy deposit rules (post-grace),
-        3) Are online by our scalable liveness (recent attestations) OR, if empty, P2P callback.
-
+        3) Are online by our scalable liveness (recent attestations).
+        
+        DETERMINISTIC: Uses only on-chain data (no P2P state).
         Returns a list of validator addresses (deterministic across nodes).
         """
         active = []
         current_height = len(self.blocks) - 1
 
         # Primary scalable liveness (epoch attestations)
-        validators_with_attestations = self.get_validators_with_recent_attestations(lookback_blocks=100)
-
-        # Optional deterministic fallback: P2P callback (ONLY if no attestations set)
-        p2p_online = set()
-        if not validators_with_attestations and self._online_validators_callback:
-            try:
-                cb = self._online_validators_callback()
-                if isinstance(cb, (set, list, tuple)):
-                    p2p_online = set(cb)
-            except Exception:
-                p2p_online = set()
+        # MAINNET SCALING: auto-scales lookback to cover all validators
+        # Returns all registered validators as fallback (deterministic)
+        validators_with_attestations = self.get_validators_with_recent_attestations()
 
         for addr, data in self.validator_registry.items():
             if addr == "genesis":
@@ -1660,21 +1673,99 @@ class Ledger:
             if not self.validator_economics.is_validator_active(addr, current_height):
                 continue
 
-            # After bootstrap, require liveness:
+            # After bootstrap, require liveness (DETERMINISTIC - no P2P)
+            # validators_with_attestations already includes fallback to all registered
             if current_height > 10:
-                if validators_with_attestations:
-                    if addr not in validators_with_attestations:
-                        continue
-                else:
-                    # No attestations – allow P2P fallback if available
-                    if p2p_online and addr not in p2p_online:
-                        continue
+                if addr not in validators_with_attestations:
+                    continue
 
             active.append(addr)
 
         # CRITICAL FIX: Return sorted list for deterministic reward_allocations ordering
         # This ensures all nodes build reward dicts in identical order → same block hash
         return sorted(active)
+
+    def get_online_validators_deterministic(self, current_height: int) -> list:
+        """
+        DETERMINISTIC online validator detection using ONLY on-chain data.
+        
+        TIMPAL PHILOSOPHY: All online validators receive equal block rewards.
+        
+        This function determines "online" using ONLY blockchain data (no P2P state),
+        ensuring all nodes compute the SAME set of online validators → same reward_allocations
+        → same block hash → NO FORKS.
+        
+        On-chain liveness sources (all deterministic):
+        1. RECENT PROPOSERS: Validators who proposed blocks in last N blocks
+        2. NEWLY REGISTERED: Validators within grace period after registration  
+        3. ATTESTATION HOLDERS: Validators with recent epoch attestations
+        
+        Args:
+            current_height: Current blockchain height
+            
+        Returns:
+            Sorted list of online validator addresses (deterministic order)
+        """
+        online_validators = set()
+        
+        # Count active validators for dynamic window calculation
+        active_validator_count = 0
+        for addr, data in self.validator_registry.items():
+            if addr == "genesis":
+                continue
+            if isinstance(data, dict) and data.get('status') in ('active', 'genesis'):
+                active_validator_count += 1
+        
+        # SOURCE 1: Recent block proposers (highest confidence of liveness)
+        # Lookback scales with validator count to ensure all validators get fair chance
+        proposer_lookback = max(30, active_validator_count * 2)
+        recent_proposers = self._get_recently_active_validators(current_height, lookback_blocks=proposer_lookback)
+        online_validators.update(recent_proposers)
+        
+        # SOURCE 2: Newly registered validators (grace period)
+        # Dynamic grace: max(100 blocks, 2 × validator count)
+        # Ensures new validators get at least 2 full proposer rotations
+        MIN_GRACE_BLOCKS = 100
+        grace_window = max(MIN_GRACE_BLOCKS, 2 * active_validator_count)
+        
+        for addr, data in self.validator_registry.items():
+            if addr == "genesis":
+                continue
+            if not isinstance(data, dict):
+                continue
+            if data.get('status') not in ('active', 'genesis'):
+                continue
+                
+            activation_height = data.get('activation_height', 0)
+            
+            # Include if within grace window
+            if activation_height > 0 and current_height - activation_height < grace_window:
+                online_validators.add(addr)
+            # Genesis validators: include if chain is still early
+            elif activation_height == 0 and current_height < grace_window:
+                online_validators.add(addr)
+        
+        # SOURCE 3: Attestation holders (epoch-based liveness proof)
+        # MAINNET SCALING: lookback_epochs auto-scales to cover ALL validators
+        # With 100K validators and committee_size=1000: covers 110+ epochs
+        validators_with_attestations = self.get_validators_with_recent_attestations()  # Auto-scaled
+        online_validators.update(validators_with_attestations)
+        
+        # Filter to only registered, active validators that pass economics
+        result = []
+        for addr in online_validators:
+            if addr not in self.validator_registry:
+                continue
+            data = self.validator_registry[addr]
+            if isinstance(data, dict):
+                if data.get('status') not in ('active', 'genesis'):
+                    continue
+            if not self.validator_economics.is_validator_active(addr, current_height):
+                continue
+            result.append(addr)
+        
+        # CRITICAL: Sorted for deterministic ordering across all nodes
+        return sorted(result)
     
     def get_validators_at_height(self, block_height: int) -> set:
         """

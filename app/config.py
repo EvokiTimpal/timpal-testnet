@@ -26,7 +26,7 @@ ATTESTATION_WINDOW = 100  # Full epoch to submit attestation (reduces congestion
 ATTESTATION_COMMITTEE_SIZE = 1000  # Only 1000 validators attest per epoch (rotated)
 MIN_COMMITTEE_PARTICIPATION = 0.67  # 67% of committee must attest
 PROPOSER_CACHE_SIZE = 200  # Cache proposer schedule for 200 blocks ahead
-EPOCH_HISTORY_RETENTION = 10  # Keep only 10 epochs of history (50 minutes)
+EPOCH_HISTORY_RETENTION = 150  # Keep 150 epochs (~12.5 hours) to cover 100K+ validators
 
 # Validator deposit grace period (3-6 months for network bootstrap)
 # During this period, NO deposit required to allow network growth

@@ -117,10 +117,17 @@ class Node:
             print(f"⚠️ Cannot register as validator: Missing wallet credentials")
             print(f"   Create a wallet first: python app/wallet.py")
         
-        # CRITICAL FIX: Set callback for online validator detection
-        # This allows Ledger to check which validators are actually connected via P2P
-        # Used for reward distribution when attestations are unavailable
-        self.ledger.set_online_validators_callback(self.get_connected_validators)
+        # DISABLED: P2P callback for online validator detection
+        # REASON: P2P state is NON-DETERMINISTIC across nodes, causing forks!
+        # Each node has different P2P connections, so get_connected_validators()
+        # returns different results, leading to different reward_allocations → different block hashes.
+        # 
+        # SOLUTION: Rewards go 100% to proposer (deterministic). When we want to
+        # distribute rewards to online validators, we must use ON-CHAIN attestations,
+        # not P2P state.
+        # 
+        # DO NOT RE-ENABLE THIS WITHOUT FIXING THE DETERMINISM ISSUE:
+        # self.ledger.set_online_validators_callback(self.get_connected_validators)
     
     def get_connected_validators(self) -> set:
         """
@@ -785,25 +792,30 @@ class Node:
                         # Update nonce only for regular transactions (not heartbeats/registrations)
                         temp_nonces[tx.sender] = temp_nonces.get(tx.sender, 0) + 1
             
-            # CRITICAL FIX: Use active validators (DETERMINISTIC heartbeat check)
-            # Only validators with recent heartbeat transactions (last 5 blocks) earn rewards
-            # This is deterministic - all nodes see the same blocks/transactions
-            active_validators = self.ledger.get_active_validators()
+            # TIMPAL PHILOSOPHY: ALL ONLINE VALIDATORS RECEIVE EQUAL BLOCK REWARDS
+            # 
+            # DETERMINISTIC LIVENESS: Uses ONLY on-chain data (no P2P state):
+            # 1. Recent block proposers (last N blocks)
+            # 2. Newly registered validators (grace period)
+            # 3. Attestation holders (epoch-based liveness proof)
+            #
+            # This ensures ALL NODES compute the SAME set of online validators
+            # → same reward_allocations → same block hash → NO FORKS
+            active_validators = self.ledger.get_online_validators_deterministic(next_height)
             
-            # BOOTSTRAP FIX: During early blocks, no validators may be active yet
-            # (genesis validators are status="genesis", new validators have 2-block delay)
-            # In this case, credit all rewards to the proposer to prevent lost coins
+            # SAFETY: If no validators detected (bootstrap), credit proposer to avoid lost coins
             if not active_validators:
-                print(f"🔧 BOOTSTRAP FIX: No active validators, crediting rewards to proposer {self.reward_address[:20]}...")
+                print(f"🔧 BOOTSTRAP: No on-chain liveness yet, crediting proposer")
                 active_validators = [self.reward_address]
             
-            print(f"💰 Reward calculation: {len(active_validators)} active validators")
+            print(f"💰 Equal rewards to {len(active_validators)} online validators (deterministic)")
             rewards, total_reward_pals, block_reward_pals = self.reward_calculator.calculate_reward(
                 active_validators, 
                 total_fees, 
                 self.ledger.total_emitted_pals
             )
-            print(f"💰 Rewards calculated: {len(rewards)} recipients, Total reward: {total_reward_pals / 100_000_000:.8f} TMPL")
+            per_validator = total_reward_pals // len(active_validators) if active_validators else 0
+            print(f"💰 Block reward: {total_reward_pals / 100_000_000:.8f} TMPL ({per_validator / 100_000_000:.8f} each)")
             
             # CRITICAL FIX (ChatGPT): Clamp timestamp into slot/rank window
             # Previous bug: used min(scheduled_time, time.time()) which created timestamps in the PAST

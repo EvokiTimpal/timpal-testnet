@@ -50,7 +50,7 @@ ATTESTATION_WINDOW = 10  # Full epoch to submit attestation (30 seconds) - testn
 ATTESTATION_COMMITTEE_SIZE = 1000  # Rotating committee: only 1000 validators attest per epoch
 MIN_COMMITTEE_PARTICIPATION = 0.67  # 67% of committee (670 validators) must attest
 PROPOSER_CACHE_SIZE = 200  # Cache proposer schedule for 200 blocks ahead (20 epochs in testnet)
-EPOCH_HISTORY_RETENTION = 10  # Keep only 10 epochs of history (~5 minutes in testnet, reduces memory)
+EPOCH_HISTORY_RETENTION = 150  # Keep 150 epochs (~7.5 min testnet) - scales with validator count
 
 # DYNAMIC TESTING: Grace period can be adjusted
 # Options: 100 blocks (5 min), 1000 blocks (50 min), 100_000 blocks (3.5 days), 550_000 blocks (~19 days)
