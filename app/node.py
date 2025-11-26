@@ -1122,7 +1122,12 @@ class Node:
         # Build list of HTTP endpoints to try
         peer_http_urls = []
         
-        # Add all seed nodes
+        # PRIORITY 1: Use explicit HTTP_SEEDS from config (most reliable)
+        if hasattr(config, 'HTTP_SEEDS') and config.HTTP_SEEDS:
+            peer_http_urls.extend(config.HTTP_SEEDS)
+            print(f"📡 Using {len(config.HTTP_SEEDS)} HTTP seed(s) from config")
+        
+        # PRIORITY 2: Convert WS seed nodes to HTTP (fallback)
         for seed in self.p2p.seed_nodes:
             if seed.startswith('ws://'):
                 host_port = seed.replace('ws://', '').replace('/', '')
@@ -1131,12 +1136,14 @@ class Node:
                     try:
                         http_port = int(port_str) + 1
                         http_url = f"http://{host}:{http_port}"
-                        peer_http_urls.append(http_url)
+                        if http_url not in peer_http_urls:  # Avoid duplicates
+                            peer_http_urls.append(http_url)
                     except ValueError:
                         pass
         
         if not peer_http_urls:
             print(f"❌ SYNC FAILED: No peer HTTP endpoints available")
+            print(f"   Configure HTTP_SEEDS in config or pass --seed to node")
             return
         
         print(f"📡 Available Peers: {len(peer_http_urls)}")

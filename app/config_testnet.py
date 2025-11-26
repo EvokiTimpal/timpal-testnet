@@ -76,7 +76,11 @@ GENESIS_VALIDATORS = {
 }
 
 DEFAULT_P2P_PORT = 8765
-SEED_NODES = []
+SEED_NODES = ["ws://143.110.129.211:9000"]
+
+# HTTP API endpoints for block sync (HTTP port = P2P port + 1)
+# These are used for reliable initial sync before joining P2P network
+HTTP_SEEDS = ["http://143.110.129.211:9001"]
 
 MAX_REORG_DEPTH = 80
 FINALITY_CHECKPOINT_INTERVAL = 100

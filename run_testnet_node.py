@@ -578,16 +578,55 @@ class TestnetNode:
         
         print(f"\n🚀 Starting node...")
         
+        # Start HTTP API server first (needed for other nodes to sync from us)
+        asyncio.create_task(self.run_http_api())
+        
+        # CRITICAL: If we have seed nodes, do initial HTTP sync BEFORE anything else
+        # This prevents creating a separate chain when we should join the existing network
+        if self.seed_nodes:
+            print(f"\n🔄 INITIAL SYNC: Syncing from network before joining...")
+            
+            # Build HTTP URLs from seed nodes
+            http_urls = []
+            for seed in self.seed_nodes:
+                if seed.startswith('ws://'):
+                    host_port = seed.replace('ws://', '').replace('/', '')
+                    if ':' in host_port:
+                        host, port_str = host_port.rsplit(':', 1)
+                        try:
+                            http_port = int(port_str) + 1
+                            http_urls.append(f"http://{host}:{http_port}")
+                        except ValueError:
+                            pass
+            
+            # Also use HTTP_SEEDS from config
+            if hasattr(config, 'HTTP_SEEDS') and config.HTTP_SEEDS:
+                for url in config.HTTP_SEEDS:
+                    if url not in http_urls:
+                        http_urls.append(url)
+            
+            if http_urls:
+                # Do initial HTTP batch sync
+                sync_success = await self.node.http_batch_sync(http_urls)
+                if sync_success:
+                    current_height = self.node.ledger.get_block_count() - 1
+                    print(f"✅ INITIAL SYNC COMPLETE: Synced to height {current_height}")
+                    self.node.synced = True
+                else:
+                    print(f"⚠️  Initial sync incomplete, will continue syncing via P2P")
+            else:
+                print(f"⚠️  No HTTP endpoints available for initial sync")
+        else:
+            print(f"🔥 BOOTSTRAP MODE: No seed nodes, creating new chain")
+        
         # Run node as background task so status loop can start
         asyncio.create_task(self.node.start())
         
         # Start status loop task
         asyncio.create_task(self.status_loop())
         
-        # Start HTTP API server
-        asyncio.create_task(self.run_http_api())
-        
         # Start block production loop (TESTNET ONLY)
+        # This now runs AFTER initial sync is complete
         asyncio.create_task(self.node.mine_blocks())
         
         print(f"✅ Node is running!")
