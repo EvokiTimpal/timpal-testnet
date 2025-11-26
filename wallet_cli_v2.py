@@ -6,6 +6,8 @@ Interactive command-line interface for creating and managing TIMPAL wallets with
 
 import os
 import sys
+import requests
+import time
 from pathlib import Path
 from getpass import getpass
 
@@ -19,6 +21,10 @@ sys.modules["config"] = config_testnet
 
 from app.seed_wallet import SeedWallet
 from app.wallet import Wallet
+from app.transaction import Transaction
+
+# Default node API endpoint (VPS)
+DEFAULT_NODE_API = "http://143.110.129.211:9001"
 
 
 def print_banner():
@@ -272,6 +278,219 @@ def view_wallet_info():
         print(f"\n❌ Error loading wallet: {e}")
 
 
+def check_balance(address: str = None, node_api: str = DEFAULT_NODE_API):
+    """Check wallet balance from the network"""
+    wallet_file = "wallet_v2.json"
+    
+    # If no address provided, load from wallet
+    if address is None:
+        if not os.path.exists(wallet_file):
+            print(f"\n❌ No wallet found. Create or restore a wallet first.\n")
+            return
+        
+        password = getpass("\nEnter your wallet password: ")
+        
+        use_passphrase = input("Did you use a passphrase? (yes/no): ").strip().lower()
+        passphrase = ""
+        if use_passphrase == "yes":
+            passphrase = getpass("Enter passphrase: ")
+        
+        wallet = SeedWallet(wallet_file)
+        try:
+            wallet.load_wallet(password, passphrase=passphrase)
+            account = wallet.get_account(0)
+            address = account['address']
+        except Exception as e:
+            print(f"\n❌ Error loading wallet: {e}")
+            return
+    
+    print(f"\n🔍 Checking balance for: {address}")
+    print(f"   Node: {node_api}")
+    
+    try:
+        resp = requests.get(f"{node_api}/api/account/{address}", timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            balance_tmpl = data.get('balance_tmpl', '0 TMPL')
+            balance_pals = data.get('balance', 0)
+            tx_count = data.get('transaction_count', 0)
+            
+            print("\n" + "="*70)
+            print("💰 WALLET BALANCE")
+            print("="*70)
+            print(f"\n📍 Address: {address}")
+            print(f"💵 Balance: {balance_tmpl}")
+            print(f"📊 Transactions: {tx_count}")
+            print("\n" + "="*70 + "\n")
+        elif resp.status_code == 404:
+            print("\n" + "="*70)
+            print("💰 WALLET BALANCE")
+            print("="*70)
+            print(f"\n📍 Address: {address}")
+            print(f"💵 Balance: 0.00000000 TMPL")
+            print(f"📊 Transactions: 0")
+            print("\n   (Address not yet on blockchain)")
+            print("\n" + "="*70 + "\n")
+        else:
+            print(f"\n❌ Error: Node returned status {resp.status_code}")
+    except requests.exceptions.ConnectionError:
+        print(f"\n❌ Cannot connect to node at {node_api}")
+        print("   Make sure the node is running and accessible.")
+    except Exception as e:
+        print(f"\n❌ Error checking balance: {e}")
+
+
+def send_tmpl(node_api: str = DEFAULT_NODE_API):
+    """Send TMPL to another address"""
+    wallet_file = "wallet_v2.json"
+    
+    if not os.path.exists(wallet_file):
+        print(f"\n❌ No wallet found. Create or restore a wallet first.\n")
+        return
+    
+    # Load wallet
+    password = getpass("\nEnter your wallet password: ")
+    
+    use_passphrase = input("Did you use a passphrase? (yes/no): ").strip().lower()
+    passphrase = ""
+    if use_passphrase == "yes":
+        passphrase = getpass("Enter passphrase: ")
+    
+    wallet = SeedWallet(wallet_file)
+    try:
+        wallet.load_wallet(password, passphrase=passphrase)
+        account = wallet.get_account(0)
+        sender_address = account['address']
+        private_key = account['private_key']
+        public_key = account['public_key']
+    except Exception as e:
+        print(f"\n❌ Error loading wallet: {e}")
+        return
+    
+    # Check current balance
+    print(f"\n📍 Your address: {sender_address}")
+    try:
+        resp = requests.get(f"{node_api}/api/account/{sender_address}", timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            balance_pals = data.get('balance', 0)
+            nonce = data.get('nonce', 0)
+            print(f"💵 Current balance: {data.get('balance_tmpl', '0 TMPL')}")
+        else:
+            balance_pals = 0
+            nonce = 0
+            print(f"💵 Current balance: 0.00000000 TMPL")
+    except Exception as e:
+        print(f"\n❌ Cannot connect to node: {e}")
+        return
+    
+    if balance_pals == 0:
+        print("\n❌ You have no TMPL to send.")
+        return
+    
+    # Get recipient
+    print("\n📤 SEND TMPL")
+    print("-" * 70)
+    recipient = input("Recipient address (tmpl...): ").strip()
+    
+    if not recipient.startswith("tmpl") or len(recipient) != 48:
+        print(f"\n❌ Invalid address format. Must be 'tmpl' + 44 hex characters.")
+        return
+    
+    if recipient == sender_address:
+        print(f"\n❌ Cannot send to yourself.")
+        return
+    
+    # Get amount
+    amount_str = input("Amount to send (in TMPL): ").strip()
+    try:
+        amount_tmpl = float(amount_str)
+        if amount_tmpl <= 0:
+            print("\n❌ Amount must be positive.")
+            return
+    except ValueError:
+        print("\n❌ Invalid amount.")
+        return
+    
+    # Convert to pals (1 TMPL = 100,000,000 pals)
+    PALS_PER_TMPL = 100_000_000
+    amount_pals = int(amount_tmpl * PALS_PER_TMPL)
+    
+    # Fee (0.0005 TMPL = 50,000 pals) - ALWAYS
+    fee_pals = 50_000
+    fee_tmpl = fee_pals / PALS_PER_TMPL
+    
+    total_pals = amount_pals + fee_pals
+    
+    if total_pals > balance_pals:
+        print(f"\n❌ Insufficient balance.")
+        print(f"   Need: {total_pals / PALS_PER_TMPL:.8f} TMPL (amount + fee)")
+        print(f"   Have: {balance_pals / PALS_PER_TMPL:.8f} TMPL")
+        return
+    
+    # Confirm
+    print("\n" + "="*70)
+    print("📝 TRANSACTION SUMMARY")
+    print("="*70)
+    print(f"   From:   {sender_address}")
+    print(f"   To:     {recipient}")
+    print(f"   Amount: {amount_tmpl:.8f} TMPL")
+    print(f"   Fee:    {fee_tmpl:.8f} TMPL")
+    print(f"   Total:  {total_pals / PALS_PER_TMPL:.8f} TMPL")
+    print("="*70)
+    
+    confirm = input("\nConfirm transaction? (yes/no): ").strip().lower()
+    if confirm != "yes":
+        print("\n✅ Transaction cancelled.")
+        return
+    
+    # Enter PIN for authorization
+    pin = input("Enter your 6-digit PIN to authorize: ").strip()
+    
+    # Verify PIN
+    if not wallet.validate_pin(pin):
+        print("\n❌ Invalid PIN. Transaction cancelled.")
+        return
+    
+    # Create and sign transaction
+    print("\n⏳ Creating and signing transaction...")
+    
+    tx = Transaction(
+        sender=sender_address,
+        recipient=recipient,
+        amount=amount_pals,
+        fee=fee_pals,
+        timestamp=time.time(),
+        nonce=nonce + 1,
+        public_key=public_key
+    )
+    tx.sign(private_key)
+    
+    # Broadcast
+    print("📡 Broadcasting to network...")
+    try:
+        resp = requests.post(
+            f"{node_api}/submit_transaction",
+            json=tx.to_dict(),
+            timeout=15
+        )
+        
+        if resp.status_code == 200:
+            result = resp.json()
+            print("\n" + "="*70)
+            print("✅ TRANSACTION BROADCAST SUCCESSFUL!")
+            print("="*70)
+            print(f"\n   TX Hash: {tx.tx_hash}")
+            print(f"   Status:  Pending confirmation")
+            print("\n   Your transaction will be included in the next block.")
+            print("\n" + "="*70 + "\n")
+        else:
+            error = resp.json().get('error', 'Unknown error')
+            print(f"\n❌ Transaction failed: {error}")
+    except Exception as e:
+        print(f"\n❌ Error broadcasting: {e}")
+
+
 def check_wallet_type():
     """Check what type of wallet exists"""
     has_v2 = os.path.exists("wallet_v2.json")
@@ -315,31 +534,37 @@ def main():
     else:
         print("\nWhat would you like to do?")
         print("  [1] View wallet info")
-        print("  [2] Create new wallet (overwrites existing)")
-        print("  [3] Restore wallet from seed phrase (overwrites existing)")
-        print("  [4] Exit")
+        print("  [2] Check balance")
+        print("  [3] Send TMPL")
+        print("  [4] Create new wallet (overwrites existing)")
+        print("  [5] Restore wallet from seed phrase (overwrites existing)")
+        print("  [6] Exit")
         
-        choice = input("\nEnter your choice (1-4): ").strip()
+        choice = input("\nEnter your choice (1-6): ").strip()
         
         if choice == "1":
             view_wallet_info()
         elif choice == "2":
+            check_balance()
+        elif choice == "3":
+            send_tmpl()
+        elif choice == "4":
             confirm = input("\n⚠️  This will overwrite your existing wallet. Continue? (yes/no): ").strip().lower()
             if confirm == "yes":
                 create_new_wallet()
             else:
                 print("\n✅ Cancelled. Your existing wallet is safe.")
-        elif choice == "3":
+        elif choice == "5":
             confirm = input("\n⚠️  This will overwrite your existing wallet. Continue? (yes/no): ").strip().lower()
             if confirm == "yes":
                 restore_wallet()
             else:
                 print("\n✅ Cancelled. Your existing wallet is safe.")
-        elif choice == "4":
+        elif choice == "6":
             print("\n👋 Goodbye!")
             sys.exit(0)
         else:
-            print("\n❌ Invalid choice. Please enter 1, 2, 3, or 4.")
+            print("\n❌ Invalid choice. Please enter 1-6.")
             sys.exit(1)
 
 
