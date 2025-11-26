@@ -969,7 +969,7 @@ class Node:
                                 if not self.ledger.add_block(genesis, skip_proposer_check=True):
                                     print(f"❌ Failed to create genesis block")
                                     return False
-                                print(f"✅ Genesis block created locally (hash: {genesis.hash[:16]}...)")
+                                print(f"✅ Genesis block created locally (hash: {genesis.block_hash[:16]}...)")
                             else:
                                 # Non-genesis node: sync block 0 from network
                                 print(f"📥 NON-GENESIS: Syncing block 0 from network...")
@@ -984,15 +984,15 @@ class Node:
                                             
                                             # Validate against canonical hash
                                             if hasattr(config, 'CANONICAL_GENESIS_HASH') and config.CANONICAL_GENESIS_HASH:
-                                                if genesis.hash != config.CANONICAL_GENESIS_HASH:
-                                                    print(f"❌ SECURITY: Peer genesis {genesis.hash[:16]}... doesn't match canonical {config.CANONICAL_GENESIS_HASH[:16]}...")
+                                                if genesis.block_hash != config.CANONICAL_GENESIS_HASH:
+                                                    print(f"❌ SECURITY: Peer genesis {genesis.block_hash[:16]}... doesn't match canonical {config.CANONICAL_GENESIS_HASH[:16]}...")
                                                     continue  # Try next peer
                                                 print(f"✅ Genesis validated against CANONICAL_GENESIS_HASH")
                                             
                                             if not self.ledger.add_block(genesis, skip_proposer_check=True):
                                                 print(f"❌ Failed to add genesis block from network")
                                                 return False
-                                            print(f"✅ Genesis block synced from network (hash: {genesis.hash[:16]}...)")
+                                            print(f"✅ Genesis block synced from network (hash: {genesis.block_hash[:16]}...)")
                                         else:
                                             print(f"⚠️  Failed to fetch block 0 from {peer_url}")
                                             continue
@@ -1138,7 +1138,7 @@ class Node:
                     if not self.ledger.add_block(genesis, skip_proposer_check=True):
                         print(f"❌ Failed to create genesis block")
                         return
-                    print(f"✅ Genesis block created locally (hash: {genesis.hash[:16]}...)")
+                    print(f"✅ Genesis block created locally (hash: {genesis.block_hash[:16]}...)")
                 else:
                     # Non-genesis node: sync block 0 from network (handled below with other blocks)
                     print(f"📥 NON-GENESIS: Will sync block 0 from network...")

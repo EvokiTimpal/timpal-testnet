@@ -570,7 +570,7 @@ class TestnetNode:
         if self.seed_nodes and hasattr(config, 'CANONICAL_GENESIS_HASH') and config.CANONICAL_GENESIS_HASH:
             genesis_block = self.node.ledger.get_block_by_height(0)
             if genesis_block:
-                local_genesis_hash = genesis_block.hash
+                local_genesis_hash = genesis_block.block_hash
                 canonical_hash = config.CANONICAL_GENESIS_HASH
                 
                 if local_genesis_hash != canonical_hash:
