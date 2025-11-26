@@ -40,7 +40,7 @@ GENESIS_TIMESTAMP = 1764158400  # November 26, 2025 12:00:00 UTC
 # Seed phrase: "occur twice shock opinion detail round ridge tape modify stay bargain suffer"
 # Address: tmpl7a255cb7912eed25bac00c5a2e6b5604518d2b0b2c8e
 # Updated for testnet v3 launch (November 26, 2025)
-CANONICAL_GENESIS_HASH = "209eea55fee8801e5c0238fde1800fc250b013e28ac4eb762976fda21c43065c"
+CANONICAL_GENESIS_HASH = "d8a4596989028b9f001bf002056f0a7ea5f3cb0f2f59839e1f2006634a2cc3c6"
 
 # EPOCH-BASED CONSENSUS (for 100,000+ validator scalability)
 # TESTNET ADJUSTMENT: Shorter epochs (10 blocks = 30s) for faster testing
