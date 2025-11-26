@@ -974,13 +974,19 @@ class Node:
                                 # Non-genesis node: sync block 0 from network
                                 print(f"📥 NON-GENESIS: Syncing block 0 from network...")
                                 try:
+                                    # Use the correct API endpoint: /api/blocks/range
                                     async with session.get(
-                                        f"{peer_url}/api/block/0",
+                                        f"{peer_url}/api/blocks/range?start=0&end=0",
                                         timeout=aiohttp.ClientTimeout(total=10)
                                     ) as block_resp:
                                         if block_resp.status == 200:
-                                            block_data = await block_resp.json()
-                                            genesis = Block.from_dict(block_data)
+                                            data = await block_resp.json()
+                                            blocks = data.get('blocks', [])
+                                            if not blocks:
+                                                print(f"⚠️  No genesis block in response from {peer_url}")
+                                                continue
+                                            
+                                            genesis = Block.from_dict(blocks[0])
                                             
                                             # Validate against canonical hash
                                             if hasattr(config, 'CANONICAL_GENESIS_HASH') and config.CANONICAL_GENESIS_HASH:
@@ -994,7 +1000,7 @@ class Node:
                                                 return False
                                             print(f"✅ Genesis block synced from network (hash: {genesis.block_hash[:16]}...)")
                                         else:
-                                            print(f"⚠️  Failed to fetch block 0 from {peer_url}")
+                                            print(f"⚠️  Failed to fetch block 0 from {peer_url} (status {block_resp.status})")
                                             continue
                                 except Exception as e:
                                     print(f"⚠️  Error fetching genesis: {e}")
