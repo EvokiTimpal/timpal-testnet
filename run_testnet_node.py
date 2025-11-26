@@ -568,7 +568,7 @@ class TestnetNode:
         # CRITICAL: Check for genesis mismatch BEFORE doing anything else
         # If local genesis doesn't match canonical, purge and restart fresh
         if self.seed_nodes and hasattr(config, 'CANONICAL_GENESIS_HASH') and config.CANONICAL_GENESIS_HASH:
-            genesis_block = self.node.ledger.get_block(0)
+            genesis_block = self.node.ledger.get_block_by_height(0)
             if genesis_block:
                 local_genesis_hash = genesis_block.hash
                 canonical_hash = config.CANONICAL_GENESIS_HASH
