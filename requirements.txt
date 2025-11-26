@@ -23,5 +23,8 @@ pytest-asyncio
 bip-utils>=2.9.3
 argon2-cffi>=23.1.0
 
+# Wallet CLI dependencies
+requests
+
 # NOTE: TIMPAL Genesis uses pure-Python JSON storage
 # No LevelDB, no plyvel, no lmdb, no binary wheels needed!
