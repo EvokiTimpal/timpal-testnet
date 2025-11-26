@@ -223,6 +223,19 @@ class Node:
             block = Block.from_dict(data["block"])
             latest = self.ledger.get_latest_block()
             
+            # SECURITY: Reject blocks claiming impossible heights (rogue node protection)
+            # Calculate maximum possible height based on time elapsed since genesis
+            import time
+            current_time = time.time()
+            time_since_genesis = current_time - config.GENESIS_TIMESTAMP
+            max_possible_height = int(time_since_genesis / config.BLOCK_TIME) + 10  # +10 for tolerance
+            
+            if block.height > max_possible_height:
+                print(f"🚫 ROGUE NODE DETECTED: Peer {peer_id[:12]}... claims block {block.height}")
+                print(f"   Maximum possible height: {max_possible_height} (based on genesis timestamp)")
+                print(f"   Ignoring fake block from rogue peer")
+                return
+            
             # PERMANENT FIX: Handle height gaps to prevent deadlock
             # If we receive a future block, trigger sync to backfill missing blocks
             if latest and block.height > latest.height + 1:
