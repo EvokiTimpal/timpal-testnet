@@ -637,25 +637,37 @@ class Ledger:
                 # ACTIVATION DELAY: Validator activates 2 blocks later (prevents race conditions)
                 activation_height = block.height + 2
                 
-                self.validator_registry[tx.sender] = {
-                    'public_key': tx.public_key,
-                    'device_id': tx.device_id,
-                    'status': 'pending',  # Starts pending, activates at activation_height
-                    'registered_at': tx.timestamp,
-                    'registration_height': block.height,
-                    'activation_height': activation_height,
-                    'deposit_amount': 0,  # Set by economics system separately
-                    'voting_power': 1,  # Equal voting power
-                    'proposer_priority': 0  # Tendermint priority tracking
-                }
-                
-                # Do NOT add to validator set immediately - will activate in 2 blocks
+                # GENESIS FIX: Don't overwrite already-active genesis validators
+                # The genesis proposer is registered as 'active' above (lines 612-625)
+                # Processing the genesis registration tx should NOT reset status to 'pending'
+                existing_entry = self.validator_registry.get(tx.sender)
+                if existing_entry and isinstance(existing_entry, dict) and existing_entry.get('status') == 'active':
+                    # Already active (genesis validator) - just update public key if needed
+                    if existing_entry.get('public_key') == 'pending_recovery':
+                        existing_entry['public_key'] = tx.public_key
+                    print(f"✅ Genesis validator already active: {tx.sender}")
+                    print(f"   Total validators: {len(self.get_active_validators())}")
+                else:
+                    # Normal registration - starts pending, activates in 2 blocks
+                    self.validator_registry[tx.sender] = {
+                        'public_key': tx.public_key,
+                        'device_id': tx.device_id,
+                        'status': 'pending',  # Starts pending, activates at activation_height
+                        'registered_at': tx.timestamp,
+                        'registration_height': block.height,
+                        'activation_height': activation_height,
+                        'deposit_amount': 0,  # Set by economics system separately
+                        'voting_power': 1,  # Equal voting power
+                        'proposer_priority': 0  # Tendermint priority tracking
+                    }
+                    
+                    # Do NOT add to validator set immediately - will activate in 2 blocks
+                    
+                    print(f"✅ Validator registered on-chain: {tx.sender}")
+                    print(f"   Will activate at block {activation_height}")
                 
                 # Update nonce
                 self.nonces[tx.sender] = expected_nonce + 1
-                
-                print(f"✅ Validator registered on-chain: {tx.sender}")
-                print(f"   Total validators: {len(self.get_active_validators())}")
             
             elif tx.tx_type == "validator_heartbeat":
                 # Apply validator heartbeat - update heartbeat tracking
