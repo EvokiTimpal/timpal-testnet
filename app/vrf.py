@@ -44,6 +44,31 @@ class VRFManager:
         # Structure: {epoch: {block_height: {validator_address: vrf_output}}}
         self.vrf_outputs: dict[int, dict[int, dict[str, str]]] = {}
     
+    def get_epoch_seed(self, epoch_number: int) -> Optional[str]:
+        """
+        Get the cached epoch seed for an epoch.
+        
+        Args:
+            epoch_number: Epoch number
+        
+        Returns:
+            Epoch seed if cached, None otherwise
+        """
+        return self.epoch_seeds.get(epoch_number)
+    
+    def restore_epoch_seed(self, epoch_number: int, epoch_seed: str) -> None:
+        """
+        Restore an epoch seed from historical state.
+        
+        Used during chain rollback to restore VRF context for deterministic
+        proposer validation during chain reorganization.
+        
+        Args:
+            epoch_number: Epoch number
+            epoch_seed: The epoch seed to restore
+        """
+        self.epoch_seeds[epoch_number] = epoch_seed
+    
     def generate_epoch_seed(self, epoch_number: int, finalized_block_hash: str, attestation_data: str = "") -> str:
         """
         Generate deterministic seed for an epoch from finalized blockchain state.
