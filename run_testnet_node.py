@@ -68,10 +68,11 @@ from seed_wallet import SeedWallet
 class TestnetNode:
     """TIMPAL Testnet Validator Node"""
     
-    def __init__(self, port: int = 8765, data_dir: str = None, seed_nodes: list = None):
+    def __init__(self, port: int = 8765, data_dir: str = None, seed_nodes: list = None, is_genesis_node: bool = False):
         self.port = port
         self.data_dir = data_dir or f"testnet_data_node_{port}"
         self.seed_nodes = seed_nodes or []
+        self.is_genesis_node = is_genesis_node
         
         os.makedirs(self.data_dir, exist_ok=True)
         
@@ -171,7 +172,8 @@ class TestnetNode:
             p2p_port=port,
             data_dir=ledger_data_dir,
             use_production_storage=True,
-            testnet_mode=True
+            testnet_mode=True,
+            is_genesis_node=is_genesis_node  # Only genesis node creates block 0 locally
         )
         
         self.node.p2p.seed_nodes = seed_nodes or []
@@ -562,6 +564,49 @@ class TestnetNode:
         print("\n" + "="*80)
         print("TIMPAL TESTNET NODE")
         print("="*80)
+        
+        # CRITICAL: Check for genesis mismatch BEFORE doing anything else
+        # If local genesis doesn't match canonical, purge and restart fresh
+        if self.seed_nodes and hasattr(config, 'CANONICAL_GENESIS_HASH') and config.CANONICAL_GENESIS_HASH:
+            genesis_block = self.node.ledger.get_block(0)
+            if genesis_block:
+                local_genesis_hash = genesis_block.hash
+                canonical_hash = config.CANONICAL_GENESIS_HASH
+                
+                if local_genesis_hash != canonical_hash:
+                    print("\n" + "!"*80)
+                    print("🚨 GENESIS MISMATCH DETECTED - AUTO-RECOVERY")
+                    print("!"*80)
+                    print(f"   Local genesis:     {local_genesis_hash[:16]}...")
+                    print(f"   Canonical genesis: {canonical_hash[:16]}...")
+                    print(f"\n   This node was created with wrong genesis.")
+                    print(f"   Purging local chain and resyncing from network...")
+                    
+                    # Purge the ledger subdirectory (where actual blockchain data lives)
+                    import shutil
+                    data_path = Path(self.data_dir)
+                    ledger_path = data_path / "ledger"
+                    
+                    if ledger_path.exists():
+                        shutil.rmtree(ledger_path)
+                        print(f"   ✅ Ledger directory purged: {ledger_path}")
+                    
+                    # Also clean any top-level db files just in case
+                    for f in data_path.glob("*.db"):
+                        f.unlink()
+                    for f in data_path.glob("*.json"):
+                        if "wallet" not in f.name.lower():  # Preserve wallet
+                            f.unlink()
+                    
+                    print(f"   🔄 Reinitializing ledger...")
+                    
+                    # Reinitialize the ledger in correct subdirectory
+                    ledger_dir = os.path.join(self.data_dir, "ledger")
+                    self.node.ledger = Ledger(ledger_dir, use_production_storage=True)
+                    
+                    print(f"   ✅ Fresh ledger ready - will sync from network")
+                    print("!"*80 + "\n")
+        
         print(f"\n⚙️  Configuration:")
         print(f"   Network: {config_testnet.CHAIN_ID}")
         print(f"   Symbol: {config_testnet.SYMBOL}")
@@ -646,17 +691,20 @@ def main():
         description="Run a TIMPAL testnet validator node",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-⚠️  CRITICAL: Port 9000 is reserved for the bootstrap node only!
+⚠️  CRITICAL: Port 9000 + --genesis is reserved for the VPS bootstrap node only!
 
 Examples:
-  Bootstrap node (genesis operator only):
-    python run_testnet_node.py --port 9000
+  VPS Bootstrap node (genesis operator only - creates genesis block):
+    python run_testnet_node.py --port 9000 --genesis
   
-  Normal validator (all other participants):
+  Normal validator (all other participants - syncs genesis from network):
     python run_testnet_node.py --port 8001 --seed ws://143.110.129.211:9000
     python run_testnet_node.py --port 8002 --seed ws://143.110.129.211:9000
   
-⚠️  All validators MUST include --seed or they will create a private chain!
+⚠️  IMPORTANT:
+   - Only VPS uses --genesis (creates block 0 locally)
+   - All other nodes MUST use --seed (syncs block 0 from network)
+   - Using --genesis on non-VPS nodes will create a fork!
 """
     )
     
@@ -686,6 +734,12 @@ Examples:
         "--reset",
         action="store_true",
         help="🚨 TESTNET ONLY: Delete all blockchain data and start fresh from block 0. Requires confirmation."
+    )
+    
+    parser.add_argument(
+        "--genesis",
+        action="store_true",
+        help="🔥 GENESIS NODE ONLY: This node creates the genesis block locally. Only use for the VPS bootstrap node!"
     )
     
     args = parser.parse_args()
@@ -796,10 +850,21 @@ Examples:
     
     seed_nodes = args.seeds or []
     
+    # CRITICAL: is_genesis_node controls whether node creates genesis locally
+    # Only VPS bootstrap node should use --genesis flag
+    if args.genesis:
+        print("\n🔥 GENESIS NODE MODE: This node will create the genesis block locally")
+        if seed_nodes:
+            print("⚠️  WARNING: Genesis nodes should NOT have seed nodes!")
+            print("   Genesis node IS the seed for other nodes to connect to.")
+    else:
+        print("\n🌐 NETWORK NODE MODE: This node will sync genesis from network")
+    
     node = TestnetNode(
         port=args.port,
         data_dir=args.data_dir,
-        seed_nodes=seed_nodes
+        seed_nodes=seed_nodes,
+        is_genesis_node=args.genesis
     )
     
     try:

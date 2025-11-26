@@ -16,7 +16,7 @@ import config
 
 
 class Node:
-    def __init__(self, device_id: Optional[str] = None, genesis_address: Optional[str] = None, reward_address: Optional[str] = None, p2p_port: int = 8765, private_key: Optional[str] = None, public_key: Optional[str] = None, skip_device_check: bool = False, data_dir: str = "blockchain_data", use_production_storage: bool = True, testnet_mode: bool = False):
+    def __init__(self, device_id: Optional[str] = None, genesis_address: Optional[str] = None, reward_address: Optional[str] = None, p2p_port: int = 8765, private_key: Optional[str] = None, public_key: Optional[str] = None, skip_device_check: bool = False, data_dir: str = "blockchain_data", use_production_storage: bool = True, testnet_mode: bool = False, is_genesis_node: bool = False):
         if not skip_device_check:
             self.device_fingerprint = enforce_single_node()
             self.device_id = self.device_fingerprint.get_device_id()
@@ -48,6 +48,10 @@ class Node:
         
         # STAGE 3: Sync gating - prevent proposing until fully synced
         self.synced = False
+        
+        # GENESIS NODE FLAG: Only the genesis node can create the genesis block locally
+        # All other nodes MUST sync block 0 from the network
+        self.is_genesis_node = is_genesis_node
         
         # BOOTSTRAP MODE DETECTION: Check dynamically during runtime
         # This will be checked in mine_blocks() using actual p2p.seed_nodes
@@ -955,19 +959,46 @@ class Node:
                         
                         print(f"📡 Peer {peer_url} has {peer_height} blocks, starting HTTP batch sync...")
                         
-                        # SECURITY: Never sync genesis block from network (prevents eclipse attacks)
-                        # Genesis must be created locally and validated against CANONICAL_GENESIS_HASH
-                        # Network sync ALWAYS starts from block 1
-                        
-                        # CRITICAL FIX: Create genesis BEFORE syncing if we have no blocks
-                        # This ensures Block 1 can be validated (requires Block 0 to exist)
+                        # CRITICAL: Only genesis node creates genesis locally
+                        # All other nodes MUST sync block 0 from network to ensure same chain
                         if self.ledger.get_block_count() == 0:
-                            print(f"🔒 Creating local genesis block before sync...")
-                            genesis = Block.create_genesis(config.GENESIS_VALIDATOR)
-                            if not self.ledger.add_block(genesis, skip_proposer_check=True):
-                                print(f"❌ Failed to create genesis block")
-                                return False
-                            print(f"✅ Genesis block created locally")
+                            if self.is_genesis_node:
+                                # Genesis node: create block 0 locally
+                                print(f"🔥 GENESIS NODE: Creating genesis block locally...")
+                                genesis = Block.create_genesis(config.GENESIS_VALIDATOR)
+                                if not self.ledger.add_block(genesis, skip_proposer_check=True):
+                                    print(f"❌ Failed to create genesis block")
+                                    return False
+                                print(f"✅ Genesis block created locally (hash: {genesis.hash[:16]}...)")
+                            else:
+                                # Non-genesis node: sync block 0 from network
+                                print(f"📥 NON-GENESIS: Syncing block 0 from network...")
+                                try:
+                                    async with session.get(
+                                        f"{peer_url}/api/block/0",
+                                        timeout=aiohttp.ClientTimeout(total=10)
+                                    ) as block_resp:
+                                        if block_resp.status == 200:
+                                            block_data = await block_resp.json()
+                                            genesis = Block.from_dict(block_data)
+                                            
+                                            # Validate against canonical hash
+                                            if hasattr(config, 'CANONICAL_GENESIS_HASH') and config.CANONICAL_GENESIS_HASH:
+                                                if genesis.hash != config.CANONICAL_GENESIS_HASH:
+                                                    print(f"❌ SECURITY: Peer genesis {genesis.hash[:16]}... doesn't match canonical {config.CANONICAL_GENESIS_HASH[:16]}...")
+                                                    continue  # Try next peer
+                                                print(f"✅ Genesis validated against CANONICAL_GENESIS_HASH")
+                                            
+                                            if not self.ledger.add_block(genesis, skip_proposer_check=True):
+                                                print(f"❌ Failed to add genesis block from network")
+                                                return False
+                                            print(f"✅ Genesis block synced from network (hash: {genesis.hash[:16]}...)")
+                                        else:
+                                            print(f"⚠️  Failed to fetch block 0 from {peer_url}")
+                                            continue
+                                except Exception as e:
+                                    print(f"⚠️  Error fetching genesis: {e}")
+                                    continue
                         
                         current_height = self.ledger.get_block_count() - 1  # Start from current height
                         batch_size = 100
@@ -1097,21 +1128,24 @@ class Node:
             end_height: Target height (adjusted based on peer availability)
         """
         
-        # SECURITY: Never sync genesis block from network (prevents eclipse attacks)
-        # Instead, create genesis locally BEFORE syncing
+        # CRITICAL: Handle genesis block based on node type
         if start_height == 0:
-            print(f"⚠️  SECURITY: Creating genesis locally (not from network)")
-            print(f"   Genesis validated against CANONICAL_GENESIS_HASH")
-            
-            # Create genesis locally if it doesn't exist
             if self.ledger.get_block_count() == 0:
-                genesis = Block.create_genesis(config.GENESIS_VALIDATOR)
-                if not self.ledger.add_block(genesis, skip_proposer_check=True):
-                    print(f"❌ Failed to create genesis block")
-                    return
-                print(f"✅ Genesis block created locally")
-            
-            start_height = 1  # Now sync from block 1
+                if self.is_genesis_node:
+                    # Genesis node: create block 0 locally
+                    print(f"🔥 GENESIS NODE: Creating genesis block locally...")
+                    genesis = Block.create_genesis(config.GENESIS_VALIDATOR)
+                    if not self.ledger.add_block(genesis, skip_proposer_check=True):
+                        print(f"❌ Failed to create genesis block")
+                        return
+                    print(f"✅ Genesis block created locally (hash: {genesis.hash[:16]}...)")
+                else:
+                    # Non-genesis node: sync block 0 from network (handled below with other blocks)
+                    print(f"📥 NON-GENESIS: Will sync block 0 from network...")
+                    # Don't skip block 0 - include it in the sync range
+            else:
+                # Genesis already exists, start from block 1
+                start_height = 1
         
         print(f"\n{'='*60}")
         print(f"🔄 PRODUCTION SYNC INITIATED")
