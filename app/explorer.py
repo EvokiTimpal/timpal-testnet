@@ -55,6 +55,25 @@ _ledger_cache_time = 0
 CACHE_TTL = 5
 
 
+def mask_fingerprint(device_id: str) -> str:
+    """
+    Mask device fingerprint for privacy protection.
+    
+    Shows only first 6 and last 6 characters with ellipsis in between.
+    Example: "abc123...xyz789"
+    
+    Args:
+        device_id: Full 64-character hex fingerprint
+        
+    Returns:
+        Masked fingerprint string
+    """
+    if not device_id or device_id == 'N/A' or len(device_id) < 12:
+        return device_id or 'N/A'
+    
+    return f"{device_id[:6]}...{device_id[-6:]}"
+
+
 def get_ledger() -> Ledger:
     """Get ledger instance with 5-second caching for performance"""
     global _ledger_cache, _ledger_cache_time
@@ -1014,7 +1033,7 @@ async def get_transaction(request: Request, tx_hash: str):
                     </tr>
                     {f'''<tr>
                         <td><strong>Device ID</strong></td>
-                        <td style="word-break: break-all; font-family: monospace; font-size: 0.8em; background: var(--bg-color); padding: 10px; border-radius: 5px;">{tx_data.get('device_id', 'N/A')}</td>
+                        <td style="word-break: break-all; font-family: monospace; font-size: 0.8em; background: var(--bg-color); padding: 10px; border-radius: 5px;">{mask_fingerprint(tx_data.get('device_id', 'N/A'))}</td>
                     </tr>''' if tx_data.get('device_id') else ''}
                 </tbody>
             </table>
@@ -1034,7 +1053,7 @@ async def get_transaction(request: Request, tx_hash: str):
     'signature': tx_data.get('signature'),
     'public_key': tx_data.get('public_key'),
     'tx_type': tx_data.get('tx_type'),
-    'device_id': tx_data.get('device_id'),
+    'device_id': mask_fingerprint(tx_data.get('device_id', 'N/A')) if tx_data.get('device_id') else None,
     'block_height': block_found.height,
     'block_hash': block_found.block_hash,
     'confirmations': confirmations
@@ -1570,7 +1589,7 @@ async def get_validators(request: Request):
                 "blocks_proposed": block_count,
                 "status": display_status,
                 "registered_at": info.get('registered_at', 0),
-                "device_id_preview": info.get('device_id', 'N/A')[:32] + '...' if info.get('device_id') and len(info.get('device_id', '')) > 32 else info.get('device_id', 'N/A')
+                "device_id_preview": mask_fingerprint(info.get('device_id', 'N/A'))
             })
     
     # FILTER: Only show ACTIVE/ONLINE validators (user request)
@@ -1803,7 +1822,7 @@ async def validators_dashboard(request: Request):
                 "total_rewards_tmpl": format_pals(total_rewards),
                 "status": display_status,
                 "registered_at": info.get('registered_at', 0),
-                "device_id_preview": info.get('device_id', 'N/A')[:32] + '...' if info.get('device_id') and len(info.get('device_id', '')) > 32 else info.get('device_id', 'N/A')
+                "device_id_preview": mask_fingerprint(info.get('device_id', 'N/A'))
             })
     
     # Sort by blocks proposed (leaderboard)

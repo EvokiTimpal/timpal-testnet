@@ -104,19 +104,77 @@ class DeviceFingerprint:
         
         return identifiers
     
+    def _hash_component(self, key: str, value: str) -> str:
+        """
+        Hash a single hardware component for privacy protection.
+        
+        PRIVACY BY DEFAULT: Raw identifiers never appear in memory
+        outside this hash function.
+        
+        Args:
+            key: Component name (e.g., 'machine_id', 'mac')
+            value: Raw hardware identifier value
+            
+        Returns:
+            SHA-256 hash of the key:value pair
+        """
+        component_str = f"{key}:{value}"
+        return hashlib.sha256(component_str.encode()).hexdigest()
+    
     def _compute_device_hash(self, identifiers: list) -> str:
-        """Create deterministic hash from hardware identifiers"""
-        combined = "|".join([f"{k}:{v}" for k, v in identifiers])
-        hash_obj = hashlib.sha256(combined.encode())
-        return hash_obj.hexdigest()
+        """
+        Create deterministic hash from hardware identifiers using TWO-STAGE HASHING.
+        
+        UPGRADED PRIVACY DESIGN:
+        1. Hash each component individually (h1, h2, h3, ...)
+        2. Combine the hashes
+        3. Hash the combination for final fingerprint
+        
+        BENEFITS:
+        - No raw identifiers ever appear in combined form
+        - Prevents inference attacks if user reveals partial info
+        - Two-stage hashing strengthens collision resistance
+        
+        Args:
+            identifiers: List of (key, value) tuples from hardware
+            
+        Returns:
+            Final 64-char hex fingerprint
+        """
+        hashed_components = []
+        for key, value in identifiers:
+            component_hash = self._hash_component(key, value)
+            hashed_components.append(component_hash)
+        
+        combined_hashes = "|".join(hashed_components)
+        
+        final_hash = hashlib.sha256(combined_hashes.encode()).hexdigest()
+        
+        return final_hash
+    
+    FINGERPRINT_VERSION = 2
     
     def _get_or_create_device_id(self) -> str:
-        """Get existing device ID or create new one from hardware"""
+        """
+        Get existing device ID or create new one from hardware.
+        
+        VERSION CONTROL:
+        - v1: Single-stage hash with raw identifiers stored (deprecated)
+        - v2: Two-stage hash, NO raw identifiers stored (current)
+        
+        If version mismatch detected, fingerprint is regenerated.
+        This ensures testnet reset works correctly after upgrade.
+        """
         if os.path.exists(self.DEVICE_ID_PATH):
             try:
                 with open(self.DEVICE_ID_PATH, 'r') as f:
                     data = json.load(f)
-                    return data.get('device_id')
+                    stored_version = data.get('version', 1)
+                    
+                    if stored_version == self.FINGERPRINT_VERSION:
+                        return data.get('device_id')
+                    else:
+                        print(f"🔄 Fingerprint version upgrade: v{stored_version} → v{self.FINGERPRINT_VERSION}")
             except:
                 pass
         
@@ -127,7 +185,8 @@ class DeviceFingerprint:
         with open(self.DEVICE_ID_PATH, 'w') as f:
             json.dump({
                 'device_id': device_id,
-                'identifiers': identifiers,
+                'version': self.FINGERPRINT_VERSION,
+                'component_count': len(identifiers),
                 'platform': platform.system()
             }, f, indent=2)
         

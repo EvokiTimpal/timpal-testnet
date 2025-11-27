@@ -283,6 +283,8 @@ class Node:
             
             if not tx.verify():
                 print(f"❌ TX REJECT: Signature verification failed for {tx.tx_type} from {tx.sender[:20]}...")
+                # REPUTATION: Penalty for invalid signature
+                self.p2p.penalize_invalid_tx(peer_id)
                 return
             
             balances = {addr: bal for addr, bal in self.ledger.balances.items()}
@@ -294,10 +296,16 @@ class Node:
                 expected_nonce = max(nonces.get(tx.sender, 0), self.mempool.get_pending_nonce(tx.sender))
                 if tx.nonce != expected_nonce:
                     print(f"❌ TX REJECT: Nonce mismatch for {tx.tx_type} from {tx.sender[:20]}... (expected {expected_nonce}, got {tx.nonce})")
+                    # NOTE: No reputation penalty for nonce mismatch - usually caused by 
+                    # normal timing races, not malicious behavior. The tx will be re-sent
+                    # when the sender updates their nonce.
                     return
             
             if tx.is_valid(balances):
                 added = self.mempool.add_transaction(tx)
+                if added:
+                    # REPUTATION: Reward for valid transaction
+                    self.p2p.reward_good_tx(peer_id)
                 if tx.tx_type == "validator_registration":
                     if added:
                         print(f"✅ VALIDATOR REGISTRATION received and added to mempool from {tx.sender[:20]}...")
@@ -306,6 +314,8 @@ class Node:
                         print(f"⚠️  VALIDATOR REGISTRATION rejected by mempool (duplicate?) from {tx.sender[:20]}...")
             else:
                 print(f"❌ TX REJECT: Validation failed for {tx.tx_type} from {tx.sender[:20]}...")
+                # REPUTATION: Penalty for invalid transaction
+                self.p2p.penalize_invalid_tx(peer_id)
         except Exception as e:
             print(f"❌ TX ERROR: {str(e)} for transaction from peer {peer_id}")
             pass
@@ -326,6 +336,8 @@ class Node:
                 print(f"🚫 ROGUE NODE DETECTED: Peer {peer_id[:12]}... claims block {block.height}")
                 print(f"   Maximum possible height: {max_possible_height} (based on genesis timestamp)")
                 print(f"   Ignoring fake block from rogue peer")
+                # REPUTATION: Severe penalty for rogue blocks
+                self.p2p.penalize_invalid_block(peer_id)
                 return
             
             # PERMANENT FIX: Handle height gaps to prevent deadlock
@@ -366,6 +378,8 @@ class Node:
                     
                     if proposer_address not in current_validators:
                         print(f"❌ REJECT Block {block.height}: Proposer {proposer_address[:20]}... not in validator set")
+                        # REPUTATION: Penalty for block from unknown proposer
+                        self.p2p.penalize_invalid_block(peer_id)
                         return
                     
                     # SIGNATURE VALIDATION: Always verify proposer signature (prevents forgery)
@@ -377,6 +391,8 @@ class Node:
                     
                     if not block.verify_proposer_signature(validator_public_key):
                         print(f"❌ REJECT Block {block.height}: Invalid proposer signature")
+                        # REPUTATION: Severe penalty for forged signatures
+                        self.p2p.penalize_invalid_block(peer_id)
                         return
                     
                     # VRF VALIDATION: Use PARENT block's historical frame for deterministic validation
@@ -423,6 +439,8 @@ class Node:
                             expected_list = [p[:20]+'...' for p in expected_proposers[:3]]
                             print(f"❌ REJECT Block {block.height} (slot {block_slot}): Invalid proposer {proposer_address[:20]}...")
                             print(f"   Expected one of: {expected_list}")
+                            # REPUTATION: Penalty for block from wrong proposer (VRF violation)
+                            self.p2p.penalize_invalid_block(peer_id)
                             return
                     else:
                         # No parent historical state - must sync via HTTP first
@@ -492,6 +510,9 @@ class Node:
                 # P2P blocks: Skip strict validation (historical blocks may have old timing)
                 # Only enforce timing for blocks THIS node creates (in mine_blocks function)
                 self.ledger.add_block(block, skip_proposer_check=True)
+                
+                # REPUTATION: Reward peer for providing a valid block
+                self.p2p.reward_good_block(peer_id)
                 
                 # SYNC LOGGING: Track block reception for debugging sync issues
                 print(f"📥 BLOCK RECEIVED: Height {block.height} from peer {peer_id[:8]}... (chain now at {block.height} blocks)")

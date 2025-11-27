@@ -41,6 +41,52 @@ class P2PNetwork:
         self.connection_attempts: Dict[str, List[float]] = defaultdict(list)
         self.banned_ips: Set[str] = set()
         
+        # PEER REPUTATION SYSTEM (P2P-only, does NOT affect consensus)
+        # Score range: 0-100, starts at 50, quarantine threshold at 20
+        self.peer_reputation: Dict[str, int] = {}
+        self.quarantined_peers: Set[str] = set()
+        
+        # Reputation score constants
+        self.REP_DEFAULT_SCORE = 50
+        self.REP_MIN_SCORE = 0
+        self.REP_MAX_SCORE = 100
+        self.REP_QUARANTINE_THRESHOLD = 20
+        
+        # Positive adjustments
+        self.REP_GOOD_BLOCK = 5
+        self.REP_VALID_SYNC = 3
+        self.REP_GOOD_TX = 2
+        self.REP_STABLE_CONNECTION = 2
+        
+        # Negative adjustments
+        self.REP_INVALID_BLOCK = -15
+        self.REP_INVALID_TX = -10
+        self.REP_SPAM_FLOOD = -20
+        self.REP_EMPTY_RESPONSE = -5
+        self.REP_DISCONNECT_RAPID = -3
+        self.REP_AUTH_FAILURE = -10
+        
+        print(f"📊 Peer reputation system initialized (quarantine threshold: {self.REP_QUARANTINE_THRESHOLD})")
+        
+        # P2P RATE LIMITER (spam protection, does NOT affect consensus)
+        # Thresholds for different message types
+        self.RATE_MAX_MESSAGES_PER_SECOND = 30
+        self.RATE_MAX_SYNC_PER_MINUTE = 8
+        self.RATE_MAX_TX_PER_SECOND = 10
+        self.RATE_HARD_LIMIT_DURATION = 5.0  # Seconds to ignore peer after hard limit
+        
+        # Per-peer rate tracking (peer_id -> counters)
+        self.peer_message_counts: Dict[str, int] = defaultdict(int)
+        self.peer_sync_counts: Dict[str, int] = defaultdict(int)
+        self.peer_tx_counts: Dict[str, int] = defaultdict(int)
+        self.peer_hard_limited: Dict[str, float] = {}  # peer_id -> time until unblock
+        
+        # Track last reset times for counter cleanup
+        self._last_second_reset = time.time()
+        self._last_minute_reset = time.time()
+        
+        print(f"🛡️  P2P Rate limiter initialized (msg: {self.RATE_MAX_MESSAGES_PER_SECOND}/s, sync: {self.RATE_MAX_SYNC_PER_MINUTE}/min, tx: {self.RATE_MAX_TX_PER_SECOND}/s)")
+        
         # CRITICAL SECURITY: Initialize security manager for mandatory authentication
         self.security_manager = P2PSecurityManager()
         print("🔒 P2P Security Manager initialized - mandatory authentication enabled")
@@ -88,6 +134,263 @@ class P2PNetwork:
         
         return True
     
+    # ============================================================
+    # PEER REPUTATION SYSTEM
+    # P2P-only feature - does NOT affect consensus
+    # ============================================================
+    
+    def get_peer_score(self, peer_id: str) -> int:
+        """Get reputation score for a peer (default: 50)."""
+        return self.peer_reputation.get(peer_id, self.REP_DEFAULT_SCORE)
+    
+    def adjust_peer_score(self, peer_id: str, adjustment: int, reason: str = "") -> int:
+        """
+        Adjust peer reputation score.
+        
+        Args:
+            peer_id: Peer identifier
+            adjustment: Score change (+ve for good, -ve for bad behavior)
+            reason: Optional reason for logging
+            
+        Returns:
+            New score after adjustment
+        """
+        old_score = self.get_peer_score(peer_id)
+        new_score = max(self.REP_MIN_SCORE, min(self.REP_MAX_SCORE, old_score + adjustment))
+        self.peer_reputation[peer_id] = new_score
+        
+        # Log score changes
+        direction = "+" if adjustment > 0 else ""
+        peer_short = peer_id[:16] if len(peer_id) > 16 else peer_id
+        print(f"📊 PEER SCORE: {peer_short}... {old_score} → {new_score} ({direction}{adjustment}) {reason}")
+        
+        # Check quarantine status
+        if new_score < self.REP_QUARANTINE_THRESHOLD:
+            if peer_id not in self.quarantined_peers:
+                self.quarantined_peers.add(peer_id)
+                print(f"⚠️  PEER QUARANTINED: {peer_short}... (score {new_score} < {self.REP_QUARANTINE_THRESHOLD})")
+        else:
+            # Remove from quarantine if score recovered
+            if peer_id in self.quarantined_peers:
+                self.quarantined_peers.discard(peer_id)
+                print(f"✅ PEER UNQUARANTINED: {peer_short}... (score {new_score} >= {self.REP_QUARANTINE_THRESHOLD})")
+        
+        return new_score
+    
+    def is_peer_quarantined(self, peer_id: str) -> bool:
+        """Check if peer is quarantined (low reputation)."""
+        return peer_id in self.quarantined_peers
+    
+    def reward_good_block(self, peer_id: str):
+        """Reward peer for sending a valid block."""
+        self.adjust_peer_score(peer_id, self.REP_GOOD_BLOCK, "[valid block]")
+    
+    def reward_valid_sync(self, peer_id: str):
+        """Reward peer for providing valid sync data."""
+        self.adjust_peer_score(peer_id, self.REP_VALID_SYNC, "[valid sync]")
+    
+    def reward_good_tx(self, peer_id: str):
+        """Reward peer for relaying a valid transaction."""
+        self.adjust_peer_score(peer_id, self.REP_GOOD_TX, "[valid tx]")
+    
+    def reward_stable_connection(self, peer_id: str):
+        """Reward peer for maintaining stable connection."""
+        self.adjust_peer_score(peer_id, self.REP_STABLE_CONNECTION, "[stable]")
+    
+    def penalize_invalid_block(self, peer_id: str):
+        """Penalize peer for sending an invalid block."""
+        self.adjust_peer_score(peer_id, self.REP_INVALID_BLOCK, "[INVALID BLOCK]")
+    
+    def penalize_invalid_tx(self, peer_id: str):
+        """Penalize peer for sending an invalid transaction."""
+        self.adjust_peer_score(peer_id, self.REP_INVALID_TX, "[INVALID TX]")
+    
+    def penalize_spam(self, peer_id: str):
+        """Penalize peer for flooding/spamming."""
+        self.adjust_peer_score(peer_id, self.REP_SPAM_FLOOD, "[SPAM/FLOOD]")
+    
+    def penalize_empty_response(self, peer_id: str):
+        """Penalize peer for sending empty/bogus responses."""
+        self.adjust_peer_score(peer_id, self.REP_EMPTY_RESPONSE, "[empty response]")
+    
+    def penalize_disconnect(self, peer_id: str):
+        """Penalize peer for rapid/unexpected disconnection."""
+        self.adjust_peer_score(peer_id, self.REP_DISCONNECT_RAPID, "[disconnect]")
+    
+    def penalize_auth_failure(self, peer_id: str):
+        """Penalize peer for authentication failure."""
+        self.adjust_peer_score(peer_id, self.REP_AUTH_FAILURE, "[AUTH FAIL]")
+    
+    def get_peers_by_reputation(self) -> List[str]:
+        """
+        Get list of all connected peers sorted by reputation (highest first).
+        Excludes quarantined peers from the list.
+        
+        Returns:
+            List of peer_ids sorted by score descending
+        """
+        all_peers = list(self.peers.keys()) + list(self.outbound_peers.keys())
+        
+        # Filter out quarantined peers
+        available_peers = [p for p in all_peers if not self.is_peer_quarantined(p)]
+        
+        # Sort by reputation score (highest first)
+        available_peers.sort(key=lambda p: self.get_peer_score(p), reverse=True)
+        
+        return available_peers
+    
+    def get_best_sync_peer(self) -> Optional[str]:
+        """
+        Get the best peer for syncing (highest reputation, not quarantined).
+        Falls back to any available peer if all are quarantined.
+        
+        Returns:
+            Best peer_id for sync, or None if no peers available
+        """
+        ranked_peers = self.get_peers_by_reputation()
+        
+        if ranked_peers:
+            return ranked_peers[0]
+        
+        # Fallback: if all peers are quarantined, use any available (testnet friendly)
+        all_peers = list(self.peers.keys()) + list(self.outbound_peers.keys())
+        if all_peers:
+            print(f"⚠️  All peers quarantined, using fallback peer for sync")
+            return all_peers[0]
+        
+        return None
+    
+    def get_reputation_stats(self) -> Dict[str, Any]:
+        """Get summary stats about peer reputation."""
+        all_peers = list(self.peers.keys()) + list(self.outbound_peers.keys())
+        scores = [self.get_peer_score(p) for p in all_peers]
+        
+        return {
+            "total_peers": len(all_peers),
+            "quarantined": len(self.quarantined_peers),
+            "avg_score": sum(scores) / len(scores) if scores else 0,
+            "min_score": min(scores) if scores else 0,
+            "max_score": max(scores) if scores else 0,
+        }
+    
+    # ============================================================
+    # P2P RATE LIMITER
+    # Spam protection - does NOT affect consensus
+    # ============================================================
+    
+    def _reset_rate_counters(self):
+        """Reset rate counters periodically (called from message handlers)."""
+        current_time = time.time()
+        
+        # Reset per-second counters every second
+        if current_time - self._last_second_reset >= 1.0:
+            self.peer_message_counts.clear()
+            self.peer_tx_counts.clear()
+            self._last_second_reset = current_time
+        
+        # Reset per-minute counters every minute
+        if current_time - self._last_minute_reset >= 60.0:
+            self.peer_sync_counts.clear()
+            self._last_minute_reset = current_time
+        
+        # Clear expired hard limits
+        expired = [p for p, t in self.peer_hard_limited.items() if current_time > t]
+        for peer_id in expired:
+            del self.peer_hard_limited[peer_id]
+            print(f"🔓 RATE LIMIT: Peer {peer_id[:16]}... unblocked after hard limit")
+    
+    def is_peer_rate_limited(self, peer_id: str) -> bool:
+        """Check if peer is currently hard-limited."""
+        if peer_id in self.peer_hard_limited:
+            if time.time() < self.peer_hard_limited[peer_id]:
+                return True
+            else:
+                # Expired, remove
+                del self.peer_hard_limited[peer_id]
+        return False
+    
+    def _apply_hard_limit(self, peer_id: str, reason: str):
+        """Apply hard limit to peer (ignore for RATE_HARD_LIMIT_DURATION seconds)."""
+        self.peer_hard_limited[peer_id] = time.time() + self.RATE_HARD_LIMIT_DURATION
+        print(f"🚫 RATE LIMIT HARD: Peer {peer_id[:16]}... blocked for {self.RATE_HARD_LIMIT_DURATION}s ({reason})")
+        # Apply reputation penalty
+        self.penalize_spam(peer_id)
+    
+    async def check_rate_limit(self, peer_id: str, message_type: str) -> tuple:
+        """
+        Check rate limits for a peer and message type.
+        
+        Returns:
+            (allowed: bool, should_delay: bool)
+            - allowed=False means hard limit, reject message
+            - should_delay=True means soft limit, add delay
+        """
+        self._reset_rate_counters()
+        
+        # Check if peer is hard-limited
+        if self.is_peer_rate_limited(peer_id):
+            return (False, False)  # Reject
+        
+        # Increment and check general message counter
+        self.peer_message_counts[peer_id] += 1
+        msg_count = self.peer_message_counts[peer_id]
+        
+        # Check message type specific limits
+        if message_type in ("new_transaction", "transaction"):
+            self.peer_tx_counts[peer_id] += 1
+            tx_count = self.peer_tx_counts[peer_id]
+            
+            # TX hard limit: 2x threshold
+            if tx_count > self.RATE_MAX_TX_PER_SECOND * 2:
+                self._apply_hard_limit(peer_id, f"TX flood: {tx_count}/s")
+                return (False, False)
+            
+            # TX soft limit (apply minor penalty on first exceed per window)
+            if tx_count == self.RATE_MAX_TX_PER_SECOND + 1:
+                print(f"⚠️  RATE LIMIT: Peer {peer_id[:16]}... exceeded TX limit ({tx_count}/s)")
+                self.adjust_reputation(peer_id, -5)  # Minor penalty for soft limit
+            if tx_count > self.RATE_MAX_TX_PER_SECOND:
+                return (True, True)  # Allow with delay
+        
+        elif message_type == "sync_request":
+            self.peer_sync_counts[peer_id] += 1
+            sync_count = self.peer_sync_counts[peer_id]
+            
+            # Sync hard limit: 2x threshold
+            if sync_count > self.RATE_MAX_SYNC_PER_MINUTE * 2:
+                self._apply_hard_limit(peer_id, f"Sync flood: {sync_count}/min")
+                return (False, False)
+            
+            # Sync soft limit (apply minor penalty on first exceed per window)
+            if sync_count == self.RATE_MAX_SYNC_PER_MINUTE + 1:
+                print(f"⚠️  RATE LIMIT: Peer {peer_id[:16]}... exceeded sync limit ({sync_count}/min)")
+                self.adjust_reputation(peer_id, -5)  # Minor penalty for soft limit
+            if sync_count > self.RATE_MAX_SYNC_PER_MINUTE:
+                return (True, True)  # Allow with delay
+        
+        # General message hard limit: 2x threshold
+        if msg_count > self.RATE_MAX_MESSAGES_PER_SECOND * 2:
+            self._apply_hard_limit(peer_id, f"Message flood: {msg_count}/s")
+            return (False, False)
+        
+        # General message soft limit (apply minor penalty on first exceed per window)
+        if msg_count == self.RATE_MAX_MESSAGES_PER_SECOND + 1:
+            print(f"⚠️  RATE LIMIT: Peer {peer_id[:16]}... exceeded message limit ({msg_count}/s)")
+            self.adjust_reputation(peer_id, -5)  # Minor penalty for soft limit
+        if msg_count > self.RATE_MAX_MESSAGES_PER_SECOND:
+            return (True, True)  # Allow with delay
+        
+        return (True, False)  # Allow, no delay
+    
+    def get_rate_limit_stats(self) -> Dict[str, Any]:
+        """Get rate limiter statistics."""
+        return {
+            "hard_limited_peers": len(self.peer_hard_limited),
+            "active_message_counts": len(self.peer_message_counts),
+            "active_sync_counts": len(self.peer_sync_counts),
+            "active_tx_counts": len(self.peer_tx_counts),
+        }
+    
     def _sign_message(self, message: str) -> str:
         if not self.private_key:
             return ""
@@ -129,6 +432,10 @@ class P2PNetwork:
         self.peer_ips[peer_id] = peer_ip
         self.ip_connection_count[peer_ip] += 1
         
+        # Track connection start time for rapid disconnect detection
+        connection_start = time.time()
+        MIN_CONNECTION_DURATION = 5.0  # Seconds - connections shorter than this are suspicious
+        
         print(f"✅ P2P: Accepted incoming connection from {peer_ip} (peer_id: {peer_id[:8]}...)")
         
         try:
@@ -137,6 +444,13 @@ class P2PNetwork:
         except websockets.exceptions.ConnectionClosed:
             print(f"🔌 P2P: Connection closed from {peer_ip} (peer_id: {peer_id[:8]}...)")
         finally:
+            # REPUTATION: Check for rapid disconnect (possible attack pattern)
+            connection_duration = time.time() - connection_start
+            if connection_duration < MIN_CONNECTION_DURATION:
+                self.penalize_disconnect(peer_id)
+            elif connection_duration > 60:  # Stable connection for 60+ seconds
+                self.reward_stable_connection(peer_id)
+            
             if peer_id in self.peers:
                 del self.peers[peer_id]
             if peer_id in self.peer_ips:
@@ -174,6 +488,8 @@ class P2PNetwork:
             
             if not valid:
                 print(f"🚫 SECURITY: Rejected message from peer {peer_id}: {reason}")
+                # REPUTATION: Penalize for auth failure
+                self.penalize_auth_failure(peer_id)
                 # Ban peer if security manager flagged them
                 if not self.security_manager.is_peer_trusted(peer_id):
                     peer_ip = self.peer_ips.get(peer_id, "unknown")
@@ -183,6 +499,17 @@ class P2PNetwork:
             
             # Authentication passed - record the verified message
             self.security_manager.record_verified_message(data, peer_id)
+            
+            # RATE LIMITING: Check if peer is flooding messages
+            allowed, should_delay = await self.check_rate_limit(peer_id, message_type)
+            
+            if not allowed:
+                # Hard limit - reject message silently
+                return
+            
+            if should_delay:
+                # Soft limit - add delay to slow down spammer
+                await asyncio.sleep(0.05)
             
             # Store/update peer public key
             message_public_key = data.get("public_key", "")
@@ -460,7 +787,9 @@ class P2PNetwork:
             
             print(f"✅ P2P: Connected to {peer_address} successfully!")
             
-            asyncio.create_task(self.handle_outbound_peer(peer_address, websocket))
+            # Track connection start time for reputation tracking
+            connection_start = time.time()
+            asyncio.create_task(self.handle_outbound_peer(peer_address, websocket, connection_start))
             
         except asyncio.TimeoutError:
             print(f"⏱️  P2P: Connection to {peer_address} timed out after 5 seconds")
@@ -476,7 +805,14 @@ class P2PNetwork:
         except Exception as e:
             print(f"❌ P2P: Unexpected error connecting to {peer_address}: {type(e).__name__}: {e}")
     
-    async def handle_outbound_peer(self, peer_address: str, websocket):
+    async def handle_outbound_peer(self, peer_address: str, websocket, connection_start: float = None):
+        """Handle outbound peer with reputation tracking."""
+        MIN_CONNECTION_DURATION = 5.0  # Seconds - connections shorter than this are suspicious
+        
+        # Use current time if connection_start not provided (backward compat)
+        if connection_start is None:
+            connection_start = time.time()
+        
         try:
             async for message in websocket:
                 await self.handle_message(message, peer_address, websocket)
@@ -488,6 +824,13 @@ class P2PNetwork:
             print(f"⚠️  P2P: Unexpected error in outbound connection to {peer_address}")
             print(f"   Error: {type(e).__name__}: {e}")
         finally:
+            # REPUTATION: Check for rapid disconnect
+            connection_duration = time.time() - connection_start
+            if connection_duration < MIN_CONNECTION_DURATION:
+                self.penalize_disconnect(peer_address)
+            elif connection_duration > 60:  # Stable connection for 60+ seconds
+                self.reward_stable_connection(peer_address)
+            
             if peer_address in self.outbound_peers:
                 del self.outbound_peers[peer_address]
                 print(f"🔗 P2P: Removed outbound peer {peer_address} from active connections")
