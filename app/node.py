@@ -902,6 +902,30 @@ class Node:
                         # Skip this expired/invalid attestation
                         continue
                 
+                # CRITICAL FIX: Explicit nonce validation BEFORE including in block
+                # This prevents creating blocks with invalid transactions that other nodes reject
+                # Only validate nonces for regular transfer transactions (not validator ops)
+                is_transfer = tx.tx_type not in ("validator_registration", "validator_heartbeat", "epoch_attestation")
+                
+                if is_transfer:
+                    # Get expected nonce for this sender (using temp_nonces which tracks in-block updates)
+                    expected_nonce = temp_nonces.get(tx.sender, 0)
+                    
+                    # NONCE VALIDATION:
+                    # - If nonce < expected: tx is stale/replayed, remove from mempool
+                    # - If nonce > expected: tx is for future, skip but keep in mempool
+                    # - If nonce == expected: tx is valid, include in block
+                    if tx.nonce < expected_nonce:
+                        # STALE TX: nonce already used, remove from mempool permanently
+                        print(f"⚠️  Removing stale tx {tx.tx_hash[:16]}...: nonce {tx.nonce} < expected {expected_nonce}")
+                        self.mempool.remove_transaction(tx.tx_hash)
+                        continue
+                    elif tx.nonce > expected_nonce:
+                        # FUTURE TX: keep in mempool for later, just skip for this block
+                        # Don't log every skip to avoid spam - these will be included when nonce matches
+                        continue
+                    # tx.nonce == expected_nonce: valid, proceed to include
+                
                 if tx.is_valid(temp_balances, temp_nonces) and tx.verify():
                     valid_txs.append(tx)
                     total_fees += tx.fee
@@ -912,13 +936,14 @@ class Node:
                     
                     # Validator registration and heartbeat transactions don't transfer funds
                     # They only register the validator or signal liveness
-                    if tx.tx_type not in ("validator_registration", "validator_heartbeat", "epoch_attestation"):
+                    if is_transfer:
                         # Regular transfer: deduct from sender, add to recipient
                         temp_balances[tx.sender] -= (tx.amount + tx.fee)
                         temp_balances[tx.recipient] = temp_balances.get(tx.recipient, 0) + tx.amount
                         
-                        # Update nonce only for regular transactions (not heartbeats/registrations)
-                        temp_nonces[tx.sender] = temp_nonces.get(tx.sender, 0) + 1
+                        # CRITICAL: Update temp_nonces so next tx from same sender can be included
+                        # This allows multiple sequential txs from same sender in one block
+                        temp_nonces[tx.sender] = expected_nonce + 1
             
             # TIMPAL PHILOSOPHY: ALL ONLINE VALIDATORS RECEIVE EQUAL BLOCK REWARDS
             # 
