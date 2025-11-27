@@ -13,12 +13,27 @@ Security improvements over original design:
 - Prevents long-range attacks with finality
 - Enables safe chain synchronization
 - Detects and blocks 51% attacks via TMPL balance verification
+
+TESTNET MODE:
+- Relaxed finality rules for easier validator onboarding
+- Reduced reorg threshold (3 blocks instead of 100)
+- Always prefer seed chain to prevent forks
+- These relaxed rules are ONLY for testnet, mainnet uses strict security
 """
 
 import hashlib
 from typing import List, Optional, Tuple, Callable
 from app.block import Block
 import config
+
+def _is_testnet_mode() -> bool:
+    """
+    RUNTIME CHECK: Determine if running in testnet mode.
+    
+    This function checks at RUNTIME, not import time, to ensure
+    the correct config module is used regardless of import order.
+    """
+    return getattr(config, 'IS_TESTNET', False)
 
 
 class ForkChoice:
@@ -55,8 +70,10 @@ class ForkChoice:
     # Network recovery threshold (blocks)
     # If competing chain is this many blocks longer, allow reorg past checkpoints
     # This enables network recovery when majority has moved to a different chain
-    # 100 blocks = ~5 minutes of network consensus on the longer chain
-    NETWORK_RECOVERY_THRESHOLD = 100
+    # MAINNET: 100 blocks = ~5 minutes of network consensus
+    # Note: Testnet uses 3 blocks (checked dynamically at runtime)
+    NETWORK_RECOVERY_THRESHOLD_MAINNET = 100
+    NETWORK_RECOVERY_THRESHOLD_TESTNET = 3
     
     # 51% Attack Detection Constants
     # Reorg depth threshold that triggers attack verification
@@ -81,6 +98,20 @@ class ForkChoice:
         self.finality_checkpoints: dict[int, str] = {}  # height -> block_hash
         self.get_balance = get_balance_func  # Function to query balances
         self.chain_weight_cache: dict[str, int] = {}  # chain_hash -> weight (cache for performance)
+    
+    def _get_network_recovery_threshold(self) -> int:
+        """Get network recovery threshold based on current network mode (RUNTIME CHECK)."""
+        if _is_testnet_mode():
+            return self.NETWORK_RECOVERY_THRESHOLD_TESTNET
+        return self.NETWORK_RECOVERY_THRESHOLD_MAINNET
+    
+    def _allow_deep_reorg(self) -> bool:
+        """Check if deep reorgs are allowed (RUNTIME CHECK - testnet only)."""
+        return _is_testnet_mode()
+    
+    def _always_prefer_seed_chain(self) -> bool:
+        """Check if seed chain should always be preferred (RUNTIME CHECK - testnet only)."""
+        return _is_testnet_mode()
     
     def calculate_chain_weight(self, chain: List[Block]) -> int:
         """
@@ -294,25 +325,34 @@ class ForkChoice:
         latest_checkpoint_height = self._get_latest_checkpoint_height()
         
         if fork_height <= latest_checkpoint_height:
-            # NETWORK RECOVERY: Allow reorg past checkpoint if new chain is significantly longer
-            # This handles network splits where majority moved to different chain
-            new_chain_length = len(new_chain)
-            current_chain_length = len(current_chain)
-            chain_length_advantage = new_chain_length - current_chain_length
-            
-            if chain_length_advantage >= self.NETWORK_RECOVERY_THRESHOLD:
-                print(f"🔄 NETWORK RECOVERY: Allowing reorg past checkpoint {latest_checkpoint_height}")
+            # TESTNET MODE: Always allow reorg past checkpoints (forgiving mode)
+            # This ensures new validators can always sync to seed chain
+            if self._allow_deep_reorg():
+                print(f"🔄 TESTNET MODE: Allowing reorg past checkpoint {latest_checkpoint_height}")
                 print(f"   Fork height: {fork_height}")
-                print(f"   Competing chain is {chain_length_advantage} blocks longer")
-                print(f"   This indicates network consensus has moved to longer chain")
+                print(f"   Deep reorg allowed for easy validator onboarding")
                 # Continue with other checks (don't return here)
             else:
-                return (False, 
-                       f"Fork at height {fork_height} is past finality checkpoint "
-                       f"at height {latest_checkpoint_height}. Reorganization rejected "
-                       f"to prevent long-range attacks. "
-                       f"(Competing chain only {chain_length_advantage} blocks longer, "
-                       f"need {self.NETWORK_RECOVERY_THRESHOLD}+ for network recovery)")
+                # NETWORK RECOVERY: Allow reorg past checkpoint if new chain is significantly longer
+                # This handles network splits where majority moved to different chain
+                new_chain_length = len(new_chain)
+                current_chain_length = len(current_chain)
+                chain_length_advantage = new_chain_length - current_chain_length
+                recovery_threshold = self._get_network_recovery_threshold()
+                
+                if chain_length_advantage >= recovery_threshold:
+                    print(f"🔄 NETWORK RECOVERY: Allowing reorg past checkpoint {latest_checkpoint_height}")
+                    print(f"   Fork height: {fork_height}")
+                    print(f"   Competing chain is {chain_length_advantage} blocks longer")
+                    print(f"   This indicates network consensus has moved to longer chain")
+                    # Continue with other checks (don't return here)
+                else:
+                    return (False, 
+                           f"Fork at height {fork_height} is past finality checkpoint "
+                           f"at height {latest_checkpoint_height}. Reorganization rejected "
+                           f"to prevent long-range attacks. "
+                           f"(Competing chain only {chain_length_advantage} blocks longer, "
+                           f"need {recovery_threshold}+ for network recovery)")
         
         # Check if reorganization depth exceeds maximum
         current_height = len(current_chain) - 1
@@ -324,8 +364,14 @@ class ForkChoice:
         chain_length_advantage = new_chain_length - current_chain_length
         
         if reorg_depth > self.MAX_REORG_DEPTH:
+            recovery_threshold = self._get_network_recovery_threshold()
+            # TESTNET MODE: Always allow deep reorgs
+            if self._allow_deep_reorg():
+                print(f"🔄 TESTNET MODE: Allowing deep reorg of {reorg_depth} blocks")
+                print(f"   Deep reorg allowed for easy validator onboarding")
+                # Continue with other checks
             # Allow deep reorgs during network recovery (when chain is significantly longer)
-            if chain_length_advantage >= self.NETWORK_RECOVERY_THRESHOLD:
+            elif chain_length_advantage >= recovery_threshold:
                 print(f"🔄 NETWORK RECOVERY: Allowing deep reorg of {reorg_depth} blocks")
                 print(f"   Competing chain advantage: {chain_length_advantage} blocks")
                 # Continue with other checks
@@ -333,7 +379,7 @@ class ForkChoice:
                 return (False,
                        f"Reorganization depth {reorg_depth} exceeds maximum "
                        f"{self.MAX_REORG_DEPTH}. Deep reorgs prevented for security. "
-                       f"(Need {self.NETWORK_RECOVERY_THRESHOLD}+ block advantage for network recovery)")
+                       f"(Need {recovery_threshold}+ block advantage for network recovery)")
         
         # NEW: 51% Attack Detection - Check for suspicious deep reorgs
         # GRACE PERIOD EXEMPTION: Skip attack detection during bootstrap (first 5M blocks)
@@ -370,6 +416,20 @@ class ForkChoice:
                     # They have enough coins (won't happen for 19 years)
                     tmpl_amount = total_tmpl / config.PALS_PER_TMPL
                     print(f"⚠️  Attackers own {tmpl_amount:,.0f} TMPL - reorganization allowed")
+        
+        # TESTNET MODE: Always prefer the longer chain from seed
+        # This prevents every new node from forking due to timing issues
+        # New validators should always adopt the seed chain immediately
+        if self._always_prefer_seed_chain():
+            if len(new_chain) > len(current_chain):
+                print(f"🔄 TESTNET MODE: Preferring longer chain ({len(new_chain)} > {len(current_chain)} blocks)")
+                return (True, 
+                       f"Testnet mode: Adopting longer chain (seed preference)")
+            elif len(new_chain) == len(current_chain):
+                # Equal length - prefer external chain to avoid local forks
+                print(f"🔄 TESTNET MODE: Equal length chains, preferring peer chain")
+                return (True, 
+                       f"Testnet mode: Adopting peer chain (equal length, seed preference)")
         
         # Check if new chain is actually better
         comparison = self.compare_chains(current_chain, new_chain)

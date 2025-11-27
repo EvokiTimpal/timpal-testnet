@@ -210,10 +210,14 @@ class Ledger:
             # CRITICAL SECURITY #3b: Enforce minimum block time (prevent rapid block spam)
             # Blocks must be at least BLOCK_TIME seconds apart to maintain consistent 3s intervals
             # Allow small tolerance (-0.5s) for clock drift between validators
+            # TESTNET: Allow larger tolerance (60s) for laptops waking from sleep
             # EXCEPTION: Skip validation during sync (historical blocks may have old timing)
             if not skip_proposer_check:
                 min_timestamp = latest.timestamp + config.BLOCK_TIME
-                MIN_BLOCK_TIME_TOLERANCE = 0.5  # Allow 0.5s tolerance for network/clock drift
+                # TESTNET MODE: Allow 60s tolerance (laptops wake with wrong time)
+                # MAINNET: Only 0.5s tolerance (requires NTP sync)
+                IS_TESTNET_MODE = getattr(config, 'IS_TESTNET', False)
+                MIN_BLOCK_TIME_TOLERANCE = 60.0 if IS_TESTNET_MODE else 0.5
                 
                 if block.timestamp < min_timestamp - MIN_BLOCK_TIME_TOLERANCE:
                     time_delta = block.timestamp - latest.timestamp
@@ -228,6 +232,19 @@ class Ledger:
             current_time = time.time()
             if block.timestamp > current_time + config.MAX_FUTURE_TIMESTAMP_DRIFT:
                 print(f"REJECT: Block timestamp {block.timestamp} is too far in future (current: {current_time})")
+                return False
+            
+            # LAPTOP-FRIENDLY TIMESTAMP VALIDATION (ChatGPT recommended)
+            # Check overall timestamp skew for incoming blocks
+            # Laptops often wake with 10-60 second drift - this prevents unnecessary rejections
+            skew = abs(block.timestamp - current_time)
+            max_skew = getattr(config, 'MAX_TIMESTAMP_SKEW_SECONDS', 60)
+            
+            if skew > max_skew:
+                print(f"⏰ REJECT: Block timestamp skew too large")
+                print(f"   Block timestamp: {block.timestamp}")
+                print(f"   Current time:    {current_time}")
+                print(f"   Skew: {skew:.1f}s > limit {max_skew}s")
                 return False
             
             # TIME-SLICED SLOTS VALIDATION: Ensure block timestamp is within assigned window
@@ -2650,6 +2667,92 @@ class Ledger:
         
         # Alternative chain is better - attempt reorganization
         return self.reorganize_to_chain(alternative_chain)
+    
+    def maybe_reorg_chain(self, competing_chain: List[Block], fork_height: int, 
+                          source_is_trusted: bool = False) -> bool:
+        """
+        LAPTOP-FRIENDLY REORG LOGIC (ChatGPT recommended implementation).
+        
+        Decides whether to adopt a competing chain based on:
+        - Chain length difference
+        - LAPTOP_FRIENDLY_MODE setting
+        - IS_TESTNET vs IS_MAINNET mode
+        - Finality checkpoint (mainnet only)
+        - Trusted source (seed nodes)
+        
+        SECURITY: This method ALWAYS uses full fork-choice validation including:
+        - 51% attack detection
+        - VRF proposer validation
+        - Timestamp validation
+        
+        TIMPAL PHILOSOPHY: Laptop nodes should NEVER get stuck on a fork.
+        They should always be able to adopt the canonical chain from seed nodes.
+        
+        Args:
+            competing_chain: The alternative chain to consider
+            fork_height: Height where chains diverge
+            source_is_trusted: True if chain comes from seed node (VPS)
+        
+        Returns:
+            True if reorg was applied, False otherwise
+        """
+        local_height = self.get_height()
+        competing_height = competing_chain[-1].height if competing_chain else 0
+        delta = competing_height - local_height
+        
+        # Check config flags at runtime
+        laptop_friendly = getattr(config, 'LAPTOP_FRIENDLY_MODE', True)
+        min_reorg_length = getattr(config, 'MIN_REORG_LENGTH', 1)
+        is_testnet = getattr(config, 'IS_TESTNET', False)
+        
+        # SECURITY: Always enforce MIN_REORG_LENGTH regardless of trusted source
+        # This prevents censorship attacks via repeated 1-block reorgs
+        if delta < min_reorg_length:
+            print(f"⏸️  Reorg not needed: delta {delta} < min_reorg_length {min_reorg_length}")
+            return False
+        
+        # No need to reorg if shorter or equal
+        if delta <= 0:
+            print(f"⏸️  Reorg not needed: competing chain not longer (delta={delta})")
+            return False
+        
+        # LAPTOP-FRIENDLY LOGIC: Check if we should allow this reorg
+        # But ALWAYS use full fork-choice validation for security
+        if laptop_friendly:
+            
+            # TESTNET MODE: Log that we're using forgiving rules
+            if is_testnet:
+                print(f"⚠️ REORG attempt: TESTNET mode (forgiving rules)")
+                print(f"   Local: {local_height}, Competing: {competing_height}, Delta: {delta}")
+            
+            # MAINNET MODE: Log stricter validation
+            else:
+                finality_checkpoint = self.fork_choice._get_latest_checkpoint_height()
+                print(f"⚙️  REORG attempt: MAINNET mode (strict validation)")
+                print(f"   Local: {local_height}, Competing: {competing_height}")
+                print(f"   Fork height: {fork_height}, Finality: {finality_checkpoint}")
+                print(f"   Trusted source: {source_is_trusted}")
+        
+        # SECURITY: ALWAYS use full fork-choice validation
+        # This ensures 51% attack detection, VRF validation, and all security checks
+        # The fork_choice.should_reorganize method handles testnet vs mainnet rules internally
+        should_reorg, reason = self.fork_choice.should_reorganize(self.blocks, competing_chain)
+        
+        if not should_reorg:
+            print(f"🚫 Reorg rejected by fork-choice: {reason}")
+            return False
+        
+        # Fork-choice approved - apply the reorg
+        print(f"⚠️ REORG_APPLIED: Replacing chain from {fork_height} → {competing_height}")
+        print(f"   Reason: {reason}")
+        
+        success, msg = self.reorganize_to_chain(competing_chain)
+        if success:
+            print(f"✅ REORG_COMPLETE: Now at height {self.get_height()}")
+        else:
+            print(f"❌ REORG_FAILED: {msg}")
+        
+        return success
     
     def reorganize_to_chain(self, new_chain: List[Block]) -> Tuple[bool, str]:
         """

@@ -104,6 +104,28 @@ WITHDRAWAL_DELAY_BLOCKS = 100
 IS_TESTNET = True
 TESTNET_NO_VALUE_COINS = True  # Coins have NO real-world value
 
+# LAPTOP-FRIENDLY MODE
+# TIMPAL is designed for normal people running validators on laptops
+# 90% of validators will use laptops that sleep/wake, Wi-Fi that disconnects,
+# clocks that drift, and devices that close their lids
+LAPTOP_FRIENDLY_MODE = True  # TIMPAL is intended for laptop validators
+
+# TIMESTAMP SKEW TOLERANCE (seconds)
+# Laptops often wake with 10-60 second drift - this prevents unnecessary forks
+if LAPTOP_FRIENDLY_MODE:
+    MAX_TIMESTAMP_SKEW_SECONDS = 60  # Allow laptops to drift up to 60 seconds
+else:
+    MAX_TIMESTAMP_SKEW_SECONDS = 5   # Stricter for server-only mode
+
+# REORG THRESHOLD
+# Minimum chain length difference to trigger reorg
+# Testnet: Very forgiving to allow quick recovery from laptop sleep
+MIN_REORG_LENGTH = 1  # Testnet: Any longer chain triggers reorg
+
+# ALLOW DEEP REORGS PAST FINALITY
+# Testnet: Allow deep reorgs so laptop nodes NEVER get stuck
+ALLOW_DEEP_REORG_ON_TESTNET = True  # Testnet: enabled for recovery
+
 # DYNAMIC TESTING CONFIGURATION
 # Adjust these to test different scenarios
 TESTING_CONFIG = {

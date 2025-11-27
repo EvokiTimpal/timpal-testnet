@@ -24,7 +24,27 @@ import config
 SLOT_SECONDS = 3.0  # Each slot is 3 seconds (same as BLOCK_TIME)
 NUM_SUBSLOTS = 3  # Split each slot into 3 sub-windows (primary + 2 fallbacks)
 WINDOW_SECONDS = SLOT_SECONDS / NUM_SUBSLOTS  # Each window is 1 second
-CLOCK_DRIFT_TOLERANCE = 0.3  # 300ms tolerance for NTP clock drift
+
+# Default values (overridden at runtime by _get_clock_drift_tolerance)
+CLOCK_DRIFT_TOLERANCE_MAINNET = 0.3  # 300ms tolerance for NTP clock drift
+CLOCK_DRIFT_TOLERANCE_TESTNET = 60.0  # 60s tolerance for laptops waking from sleep
+
+
+def _get_clock_drift_tolerance() -> float:
+    """
+    Get clock drift tolerance based on current network mode (RUNTIME CHECK).
+    
+    TESTNET: Allow ±60s drift (laptops wake from sleep with wrong time)
+    MAINNET: Only 300ms tolerance (requires NTP sync)
+    """
+    if getattr(config, 'IS_TESTNET', False):
+        return CLOCK_DRIFT_TOLERANCE_TESTNET
+    return CLOCK_DRIFT_TOLERANCE_MAINNET
+
+
+# For backward compatibility - this is the default value
+# Actual tolerance is determined at runtime by _get_clock_drift_tolerance()
+CLOCK_DRIFT_TOLERANCE = 0.3
 
 
 def slot_for_height(height: int) -> int:
@@ -82,11 +102,12 @@ def validate_block_window(block_timestamp: float, genesis_timestamp: float,
     
     This is the CORE consensus rule for Time-Sliced Slots:
     - Block valid only if timestamp is in correct window for its rank
-    - Allows clock drift tolerance of +300ms for late blocks (NTP sync)
+    - MAINNET: +300ms tolerance for late blocks (NTP sync)
+    - TESTNET: +60s tolerance for laptops waking from sleep
     
     CRITICAL: Tolerance is ASYMMETRIC to prevent window overlap:
     - Window start: NO tolerance (prevents overlap with previous rank)
-    - Window end: +300ms tolerance (allows late blocks due to clock drift)
+    - Window end: Drift tolerance (allows late blocks due to clock drift)
     
     This ensures adjacent windows NEVER overlap, preventing race conditions.
     
@@ -101,10 +122,12 @@ def validate_block_window(block_timestamp: float, genesis_timestamp: float,
     """
     window_start, window_end = window_bounds(genesis_timestamp, slot, rank)
     
-    # ASYMMETRIC drift tolerance: NO early start (prevents overlap), +300ms late end
+    # ASYMMETRIC drift tolerance: NO early start (prevents overlap), late tolerance allowed
     # This guarantees no overlap between adjacent windows (rank 0 and rank 1)
+    # Get tolerance at RUNTIME to respect current network mode
+    drift_tolerance = _get_clock_drift_tolerance()
     window_start_with_drift = window_start  # No early tolerance
-    window_end_with_drift = window_end + CLOCK_DRIFT_TOLERANCE  # Late tolerance only
+    window_end_with_drift = window_end + drift_tolerance  # Late tolerance only
     
     is_valid = window_start_with_drift <= block_timestamp < window_end_with_drift
     

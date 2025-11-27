@@ -59,3 +59,28 @@ MIN_DEPOSIT_PALS = 50 * PALS_PER_TMPL
 SLASH_DOUBLE_SIGNING = 100
 SLASH_INVALID_BLOCK = 50
 WITHDRAWAL_DELAY_BLOCKS = 100
+
+# MAINNET FLAG
+IS_TESTNET = False
+
+# LAPTOP-FRIENDLY MODE
+# TIMPAL is designed for normal people running validators on laptops
+# 90% of validators will use laptops that sleep/wake, Wi-Fi that disconnects,
+# clocks that drift, and devices that close their lids
+LAPTOP_FRIENDLY_MODE = True  # TIMPAL is intended for laptop validators
+
+# TIMESTAMP SKEW TOLERANCE (seconds)
+# Laptops often wake with 10-60 second drift - this prevents unnecessary forks
+if LAPTOP_FRIENDLY_MODE:
+    MAX_TIMESTAMP_SKEW_SECONDS = 60  # Allow laptops to drift up to 60 seconds
+else:
+    MAX_TIMESTAMP_SKEW_SECONDS = 5   # Stricter for server-only mode
+
+# REORG THRESHOLD
+# Minimum chain length difference to trigger reorg
+# Lower = more forgiving for laptop nodes following canonical chain
+MIN_REORG_LENGTH = 3  # Mainnet: 3 blocks minimum difference for reorg
+
+# ALLOW DEEP REORGS PAST FINALITY
+# Mainnet: Only allow deep reorgs if source is trusted (e.g., seed node)
+ALLOW_DEEP_REORG_ON_TESTNET = False  # Mainnet: disabled

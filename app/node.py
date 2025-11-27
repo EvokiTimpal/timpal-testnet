@@ -3,6 +3,8 @@ import time
 import uuid
 import hashlib
 import aiohttp
+import logging
+from enum import Enum
 from typing import Optional, Dict, Any
 from app.block import Block
 from app.transaction import Transaction
@@ -13,6 +15,24 @@ from app.rewards import RewardCalculator
 from app.p2p import P2PNetwork
 from app.device_fingerprint import enforce_single_node
 import config
+
+
+class NodeSyncState(str, Enum):
+    """
+    Node synchronization state machine.
+    
+    TIMPAL is designed for laptop validators that:
+    - Sleep/wake frequently
+    - Have unstable Wi-Fi
+    - Experience clock drift (10-60 seconds)
+    - Close their lids
+    
+    This state machine ensures nodes gracefully handle these situations
+    WITHOUT forking or requiring manual intervention.
+    """
+    HEALTHY = "healthy"           # Fully synced, can propose blocks
+    OUT_OF_SYNC = "out_of_sync"   # Behind network, cannot propose
+    CATCHING_UP = "catching_up"   # Actively syncing blocks
 
 
 class Node:
@@ -49,6 +69,11 @@ class Node:
         # STAGE 3: Sync gating - prevent proposing until fully synced
         self.synced = False
         
+        # NODE SYNC STATE MACHINE (ChatGPT-recommended enhancement)
+        # Ensures laptop nodes gracefully handle sleep/wake, Wi-Fi drops, clock drift
+        self.sync_state = NodeSyncState.OUT_OF_SYNC  # Start out-of-sync until proven healthy
+        self.logger = logging.getLogger(f"TIMPAL.Node.{self.reward_address[:12] if self.reward_address else 'unknown'}")
+        
         # GENESIS NODE FLAG: Only the genesis node can create the genesis block locally
         # All other nodes MUST sync block 0 from the network
         self.is_genesis_node = is_genesis_node
@@ -57,6 +82,9 @@ class Node:
         # This will be checked in mine_blocks() using actual p2p.seed_nodes
         # (allows run_testnet_node.py to override seed_nodes after Node creation)
         self.SYNC_LAG_THRESHOLD = 5  # Blocks behind peers before re-entering sync mode
+        
+        # HEIGHT GAP THRESHOLD: How many blocks behind triggers catch-up mode
+        self.CATCH_UP_THRESHOLD = 3  # 3 blocks behind = enter catch-up mode
         
         # Block gossip: Track recently seen blocks to prevent infinite loops
         self.recently_seen_blocks = set()
@@ -163,6 +191,66 @@ class Node:
                         connected_validators.add(validator_addr)
         
         return connected_validators
+    
+    # ===================================================================
+    # NODE SYNC STATE MACHINE METHODS
+    # ChatGPT-recommended enhancement for laptop-friendly validators
+    # ===================================================================
+    
+    def mark_out_of_sync(self, reason: str):
+        """
+        Mark node as OUT_OF_SYNC - cannot propose blocks.
+        
+        Called when:
+        - Height gap detected (behind peers by 3+ blocks)
+        - Laptop wakes from sleep
+        - Network reconnected after disconnect
+        """
+        if self.sync_state != NodeSyncState.OUT_OF_SYNC:
+            self.logger.warning(f"⛔ OUT_OF_SYNC: {reason}")
+            print(f"⛔ Node marked OUT_OF_SYNC: {reason}")
+        self.sync_state = NodeSyncState.OUT_OF_SYNC
+        self.synced = False  # Sync with legacy flag
+    
+    def mark_catching_up(self):
+        """
+        Mark node as CATCHING_UP - actively syncing blocks.
+        
+        Called when:
+        - Starting to sync missing blocks
+        - HTTP batch sync in progress
+        """
+        if self.sync_state != NodeSyncState.CATCHING_UP:
+            self.logger.info("🔄 CATCH_UP: syncing with network")
+            print(f"🔄 Node entering CATCHING_UP mode (syncing with network)")
+        self.sync_state = NodeSyncState.CATCHING_UP
+        self.synced = False  # Cannot propose while catching up
+    
+    def mark_healthy(self):
+        """
+        Mark node as HEALTHY - fully synced, can propose blocks.
+        
+        Called when:
+        - Caught up to network head
+        - Sync completed successfully
+        """
+        if self.sync_state != NodeSyncState.HEALTHY:
+            self.logger.info("✅ SYNC_COMPLETE: node is HEALTHY")
+            print(f"✅ Node sync state HEALTHY - fully caught up")
+        self.sync_state = NodeSyncState.HEALTHY
+        self.synced = True  # Sync with legacy flag
+    
+    def can_propose_block(self) -> bool:
+        """
+        Check if node can propose a block.
+        
+        Returns:
+            True if node is HEALTHY and can propose, False otherwise
+        """
+        if self.sync_state != NodeSyncState.HEALTHY:
+            self.logger.debug(f"Skipping block proposal: node is {self.sync_state.value}")
+            return False
+        return True
     
     async def _get_peer_height(self, peer_url: str) -> int:
         """
@@ -615,28 +703,44 @@ class Node:
             # because they're waiting for blocks from other validators who are also behind
             max_peer_height = await self._get_max_peer_height()
             local_height = latest_block.height
+            height_gap = max_peer_height - local_height
             
-            # STAGE 3: Mark as not synced if we fall too far behind
-            if max_peer_height > local_height + self.SYNC_LAG_THRESHOLD:
-                if self.synced:
-                    print(f"⚠️  SYNC STATUS: Falling behind (local: {local_height}, max peer: {max_peer_height})")
-                    print(f"   Entering sync mode, stopping block production temporarily")
-                    self.synced = False
-            
-            if max_peer_height > local_height:
-                print(f"🔄 CATCH-UP MODE: Local height {local_height}, max peer height {max_peer_height}")
-                print(f"   Syncing missing blocks {local_height + 1} to {max_peer_height}...")
+            # LAPTOP-FRIENDLY SYNC STATE MACHINE (ChatGPT enhancement)
+            # Detect when node falls behind and needs to catch up
+            if height_gap >= self.CATCH_UP_THRESHOLD:
+                # Node is behind by 3+ blocks - enter OUT_OF_SYNC then CATCHING_UP
+                self.mark_out_of_sync(
+                    f"Height gap: local={local_height}, peer={max_peer_height} (gap={height_gap})"
+                )
+                self.mark_catching_up()
+                
+                # Sync missing blocks
+                print(f"🔄 CATCH_UP: syncing blocks {local_height + 1} → {max_peer_height}")
                 await self._sync_missing_blocks(local_height + 1, max_peer_height)
                 
-                # STAGE 3: Mark as synced when caught up
-                if max_peer_height - local_height <= self.SYNC_LAG_THRESHOLD:
-                    if not self.synced:
-                        print(f"✅ SYNC STATUS: Caught up! (local: {local_height}, max peer: {max_peer_height})")
-                        print(f"   Resuming block production")
-                        self.synced = True
+                # Check if we caught up
+                new_height = self.ledger.get_latest_block().height if self.ledger.get_latest_block() else 0
+                if new_height >= max_peer_height:
+                    print(f"✅ SYNC_COMPLETE: height now {new_height}, marking HEALTHY")
+                    self.mark_healthy()
                 
-                # After catch-up, skip this mining cycle to refresh state
+                # Skip this mining cycle to refresh state
                 continue
+            
+            elif height_gap > 0:
+                # Small gap (1-2 blocks) - sync without full state change
+                print(f"🔄 Minor sync: {local_height} → {max_peer_height} ({height_gap} blocks)")
+                await self._sync_missing_blocks(local_height + 1, max_peer_height)
+                
+                # If we were catching up, check if we're now healthy
+                if self.sync_state == NodeSyncState.CATCHING_UP:
+                    new_height = self.ledger.get_latest_block().height if self.ledger.get_latest_block() else 0
+                    if new_height >= max_peer_height:
+                        print(f"✅ SYNC_COMPLETE: height now {new_height}, marking HEALTHY")
+                        self.mark_healthy()
+                
+                continue
+            
             else:
                 # CRITICAL FIX: Only mark as synced if we have peers OR we're the bootstrap node
                 # This prevents validator nodes from creating independent chains when disconnected
@@ -646,13 +750,13 @@ class Node:
                 has_peers = max_peer_height > 0 or peer_count > 0
                 can_be_synced = is_bootstrap or has_peers
                 
-                if not self.synced and can_be_synced:
+                if self.sync_state != NodeSyncState.HEALTHY and can_be_synced:
                     if is_bootstrap:
                         print(f"✅ SYNC STATUS: Bootstrap node at height {local_height} (no peers required)")
                     else:
                         print(f"✅ SYNC STATUS: At network head (height: {local_height}, peers: {peer_count})")
-                    self.synced = True
-                elif not self.synced and not can_be_synced:
+                    self.mark_healthy()
+                elif self.sync_state != NodeSyncState.HEALTHY and not can_be_synced:
                     # Validator node with no peers - keep waiting
                     if next_height % 30 == 0:
                         print(f"⏸️  WAITING FOR PEERS: Cannot sync without peer connections (height: {local_height})")
@@ -661,9 +765,9 @@ class Node:
                     continue
             
             # STAGE 3: Gate proposer participation until synced
-            if not self.synced:
+            if not self.can_propose_block():
                 if next_height % 30 == 0:  # Log every 30 blocks to avoid spam
-                    print(f"⏸️  NOT SYNCED: Skipping block production until fully synced")
+                    print(f"⏸️  NOT SYNCED: Skipping block production (state: {self.sync_state.value})")
                 await asyncio.sleep(config.BLOCK_TIME)
                 continue
             
