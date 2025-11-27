@@ -234,18 +234,32 @@ class Ledger:
                 print(f"REJECT: Block timestamp {block.timestamp} is too far in future (current: {current_time})")
                 return False
             
-            # LAPTOP-FRIENDLY TIMESTAMP VALIDATION (ChatGPT recommended)
-            # Check overall timestamp skew for incoming blocks
-            # Laptops often wake with 10-60 second drift - this prevents unnecessary rejections
-            skew = abs(block.timestamp - current_time)
-            max_skew = getattr(config, 'MAX_TIMESTAMP_SKEW_SECONDS', 60)
+            # LAPTOP-FRIENDLY TIMESTAMP VALIDATION (User-requested fix)
+            # ONLY reject blocks that are too far in the FUTURE
+            # Do NOT reject old blocks - they were valid when created
+            # 
+            # During SYNC (skip_proposer_check=True):
+            #   - Skip future skew check entirely
+            #   - Only require block_timestamp >= parent_block.timestamp (already checked above)
+            #   - This allows syncing historical blocks that are many minutes old
+            #
+            # During NORMAL OPERATION (skip_proposer_check=False):
+            #   - Only reject if block is too far in the FUTURE (prevents time manipulation)
+            #   - Old blocks are OK (they were valid when proposer created them)
             
-            if skew > max_skew:
-                print(f"⏰ REJECT: Block timestamp skew too large")
-                print(f"   Block timestamp: {block.timestamp}")
-                print(f"   Current time:    {current_time}")
-                print(f"   Skew: {skew:.1f}s > limit {max_skew}s")
-                return False
+            if not skip_proposer_check:
+                # NORMAL MODE: Only reject future blocks
+                max_skew = getattr(config, 'MAX_TIMESTAMP_SKEW_SECONDS', 60)
+                skew_future = block.timestamp - current_time
+                
+                if skew_future > max_skew:
+                    print(f"⏰ REJECT: Block timestamp is too far in the FUTURE")
+                    print(f"   Block timestamp: {block.timestamp}")
+                    print(f"   Current time:    {current_time}")
+                    print(f"   Future skew: {skew_future:.1f}s > limit {max_skew}s")
+                    return False
+            # SYNC MODE (skip_proposer_check=True): No skew check needed
+            # Historical blocks may be minutes/hours old - that's expected during catch-up
             
             # TIME-SLICED SLOTS VALIDATION: Ensure block timestamp is within assigned window
             # This prevents race conditions when offline validators come back online
