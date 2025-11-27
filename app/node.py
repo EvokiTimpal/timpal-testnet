@@ -86,6 +86,10 @@ class Node:
         # HEIGHT GAP THRESHOLD: How many blocks behind triggers catch-up mode
         self.CATCH_UP_THRESHOLD = 3  # 3 blocks behind = enter catch-up mode
         
+        # CRITICAL FIX: Track last slot we produced a block for
+        # Prevents creating duplicate blocks in same slot when loop cycles quickly
+        self.last_produced_slot = -1
+        
         # Block gossip: Track recently seen blocks to prevent infinite loops
         self.recently_seen_blocks = set()
         
@@ -869,8 +873,15 @@ class Node:
                     await asyncio.sleep(0.1)
                     continue
             
-            # IT'S MY WINDOW! Proceed to create and propose block
-            print(f"✅ Rank {my_rank} proposer - it's my window, creating block...")
+            # IT'S MY WINDOW! But first check we haven't already produced for this slot
+            # CRITICAL FIX: Prevents duplicate blocks when loop cycles quickly within same slot
+            if current_slot <= self.last_produced_slot:
+                # Already produced a block for this slot - skip to next cycle
+                # This happens when the loop cycles faster than expected
+                await asyncio.sleep(0.1)
+                continue
+            
+            print(f"✅ Rank {my_rank} proposer - it's my window, creating block for slot {current_slot}...")
             
             pending_txs = self.mempool.get_pending_transactions(3000)
             
@@ -997,8 +1008,12 @@ class Node:
                 print(f"ℹ️  NOTE: Block {new_block.height} already exists — duplicate attempt skipped (normal behavior)")
                 continue  # Skip this cycle and try again
             
+            # CRITICAL FIX: Track which slot we just produced for
+            # Prevents duplicate blocks if loop cycles quickly within same slot
+            self.last_produced_slot = current_slot
+            
             # CRITICAL: Log block creation so we can track chain progression
-            print(f"✅ Block {new_block.height} created and added to ledger")
+            print(f"✅ Block {new_block.height} (slot {current_slot}) created and added to ledger")
             print(f"   Proposer: {self.reward_address[:20]}...")
             print(f"   Transactions: {len(valid_txs)}, Reward: {total_reward_pals / 100_000_000:.8f} TMPL")
             
