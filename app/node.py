@@ -205,28 +205,54 @@ class Node:
         """
         Mark node as OUT_OF_SYNC - cannot propose blocks.
         
+        NO-FORK GUARANTEE: When a node goes offline or out of sync with the 
+        genesis chain, it MUST stop producing blocks immediately.
+        
         Called when:
         - Height gap detected (behind peers by 3+ blocks)
         - Laptop wakes from sleep
         - Network reconnected after disconnect
+        - All peers lost (network partition)
+        - Local height > network height (potential fork detected)
         """
+        local_height = max(0, self.ledger.get_block_count() - 1)
+        peer_count = self.p2p.get_peer_count()
+        
         if self.sync_state != NodeSyncState.OUT_OF_SYNC:
-            self.logger.warning(f"⛔ OUT_OF_SYNC: {reason}")
-            print(f"⛔ Node marked OUT_OF_SYNC: {reason}")
+            self.logger.warning(
+                f"SYNC STATE → OUT_OF_SYNC (local_height={local_height}, "
+                f"peers={peer_count}, reason={reason})"
+            )
+            print(f"⛔ SYNC STATE → OUT_OF_SYNC: {reason}")
+            print(f"   Local height: {local_height}, Peers: {peer_count}")
+            print(f"   Block production DISABLED until fully synced")
+        
         self.sync_state = NodeSyncState.OUT_OF_SYNC
         self.synced = False  # Sync with legacy flag
+        self._last_verified_network_height = None  # Reset verified height
     
-    def mark_catching_up(self):
+    def mark_catching_up(self, target_height: int = None):
         """
         Mark node as CATCHING_UP - actively syncing blocks.
+        
+        NO-FORK GUARANTEE: While catching up, node cannot propose blocks.
+        It can only receive, validate, and apply blocks from the network.
         
         Called when:
         - Starting to sync missing blocks
         - HTTP batch sync in progress
         """
+        local_height = max(0, self.ledger.get_block_count() - 1)
+        
         if self.sync_state != NodeSyncState.CATCHING_UP:
-            self.logger.info("🔄 CATCH_UP: syncing with network")
-            print(f"🔄 Node entering CATCHING_UP mode (syncing with network)")
+            target_info = f", target_height={target_height}" if target_height else ""
+            self.logger.info(
+                f"SYNC STATE → CATCHING_UP (local_height={local_height}{target_info})"
+            )
+            print(f"🔄 SYNC STATE → CATCHING_UP: syncing with network")
+            print(f"   Local height: {local_height}" + (f", Target: {target_height}" if target_height else ""))
+            print(f"   Block production DISABLED until sync completes")
+        
         self.sync_state = NodeSyncState.CATCHING_UP
         self.synced = False  # Cannot propose while catching up
     
@@ -234,27 +260,184 @@ class Node:
         """
         Mark node as HEALTHY - fully synced, can propose blocks.
         
+        NO-FORK GUARANTEE: Only after this is called can the node 
+        participate in block production again.
+        
         Called when:
-        - Caught up to network head
+        - Caught up to network head (local_height == network_height)
         - Sync completed successfully
         """
+        local_height = max(0, self.ledger.get_block_count() - 1)
+        peer_count = self.p2p.get_peer_count()
+        
         if self.sync_state != NodeSyncState.HEALTHY:
-            self.logger.info("✅ SYNC_COMPLETE: node is HEALTHY")
-            print(f"✅ Node sync state HEALTHY - fully caught up")
+            self.logger.info(
+                f"SYNC STATE → HEALTHY (height={local_height}, peers={peer_count})"
+            )
+            print(f"✅ SYNC STATE → HEALTHY: Node fully synced")
+            print(f"   Height: {local_height}, Peers: {peer_count}")
+            print(f"   Rejoining proposer rotation - block production ENABLED")
+        
         self.sync_state = NodeSyncState.HEALTHY
         self.synced = True  # Sync with legacy flag
     
-    def can_propose_block(self) -> bool:
+    def can_propose_block(self, next_height: int = None) -> bool:
         """
-        Check if node can propose a block.
+        SINGLE AUTHORITY GATE FOR BLOCK PRODUCTION.
+        
+        NO-FORK GUARANTEE: A node can propose a block ONLY if:
+        1. It is online (has at least 1 live peer, unless bootstrap node)
+        2. It is fully synchronized with the canonical chain
+        3. Its sync_state is HEALTHY
+        4. Network height was recently verified (within last sync cycle)
+        
+        This is the ONLY gate to block production. No other paths may bypass it.
+        
+        Args:
+            next_height: Optional height being proposed (for logging)
+            
+        Returns:
+            True ONLY if node is allowed to propose a block
+        """
+        # Get current state for logging
+        local_height = max(0, self.ledger.get_block_count() - 1)
+        peer_count = self.p2p.get_peer_count()
+        
+        # DYNAMIC BOOTSTRAP DETECTION: Bootstrap nodes (no seeds) can produce with 0 peers
+        is_bootstrap = (len(self.p2p.seed_nodes) == 0)
+        
+        # CHECK 1: Peer availability (non-bootstrap nodes MUST have peers)
+        # Use ACTIVE P2P connection count, not just seed reachability
+        if not is_bootstrap and peer_count == 0:
+            self.logger.info(
+                f"SKIP PROPOSAL: No active peers (local_height={local_height}, peers=0)"
+            )
+            # CRITICAL: Mark out of sync AND reset synced flag
+            if self.sync_state != NodeSyncState.OUT_OF_SYNC:
+                self.mark_out_of_sync("No active P2P peers - network connectivity lost")
+            return False
+        
+        # CHECK 2: Sync state must be HEALTHY
+        if self.sync_state != NodeSyncState.HEALTHY:
+            self.logger.debug(
+                f"SKIP PROPOSAL: state={self.sync_state.value} "
+                f"(local_height={local_height}, peers={peer_count})"
+            )
+            return False
+        
+        # CHECK 3: Synced flag must be True (set by mark_healthy after sync verification)
+        if not self.synced:
+            self.logger.info(
+                f"SKIP PROPOSAL: synced=False (local_height={local_height})"
+            )
+            return False
+        
+        # CHECK 4: Network height must have been verified recently
+        # If we haven't verified network height since becoming HEALTHY, don't propose
+        if not hasattr(self, '_last_verified_network_height'):
+            self._last_verified_network_height = None
+        
+        if self._last_verified_network_height is None and not is_bootstrap:
+            self.logger.info(
+                f"SKIP PROPOSAL: Network height not verified (local_height={local_height})"
+            )
+            return False
+        
+        return True
+    
+    def is_eligible_proposer(self) -> bool:
+        """
+        Check if this node should be considered as a proposer candidate.
+        
+        NO-FORK GUARANTEE: Nodes that are not fully synced should NOT be
+        included in the proposer selection, even for their own VRF calculation.
+        
+        This prevents out-of-sync nodes from being selected as proposers.
         
         Returns:
-            True if node is HEALTHY and can propose, False otherwise
+            True if node can be considered for proposer selection
         """
-        if self.sync_state != NodeSyncState.HEALTHY:
-            self.logger.debug(f"Skipping block proposal: node is {self.sync_state.value}")
+        # Same checks as can_propose_block but without logging (called frequently)
+        is_bootstrap = (len(self.p2p.seed_nodes) == 0)
+        peer_count = self.p2p.get_peer_count()
+        
+        if not is_bootstrap and peer_count == 0:
             return False
+        
+        if self.sync_state != NodeSyncState.HEALTHY:
+            return False
+        
+        if not self.synced:
+            return False
+        
         return True
+    
+    async def _get_best_peer_height(self) -> int:
+        """
+        Get the best (maximum) peer height from the network.
+        
+        NO-FORK GUARANTEE: Returns the canonical chain height.
+        If no peers are reachable, returns None (not 0).
+        
+        This method checks BOTH:
+        1. HTTP endpoints of seed nodes (for height data)
+        2. Active P2P connections (for connectivity verification)
+        
+        Returns:
+            Maximum peer height, or None if no peers available
+        """
+        # FIRST: Check if we have active P2P connections
+        # This catches the case where seeds are reachable but we're isolated
+        active_peer_count = self.p2p.get_peer_count()
+        is_bootstrap = (len(self.p2p.seed_nodes) == 0)
+        
+        # Non-bootstrap nodes MUST have active P2P peers
+        if not is_bootstrap and active_peer_count == 0:
+            self.logger.debug("_get_best_peer_height: No active P2P connections")
+            return None
+        
+        peer_http_urls = []
+        
+        # Build HTTP URLs from P2P seed nodes
+        for seed in self.p2p.seed_nodes:
+            if seed.startswith('ws://'):
+                host_port = seed.replace('ws://', '').replace('/', '')
+                if ':' in host_port:
+                    host, port_str = host_port.rsplit(':', 1)
+                    try:
+                        http_port = int(port_str) + 1
+                        peer_http_urls.append(f"http://{host}:{http_port}")
+                    except ValueError:
+                        pass
+        
+        # If no seed URLs, we can't determine network height
+        if not peer_http_urls:
+            return None
+        
+        max_height = None
+        reachable_peers = 0
+        
+        for peer_url in peer_http_urls:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        f"{peer_url}/api/health",
+                        timeout=aiohttp.ClientTimeout(total=2)
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            peer_height = data.get('height', 0)
+                            reachable_peers += 1
+                            if max_height is None or peer_height > max_height:
+                                max_height = peer_height
+            except Exception:
+                continue
+        
+        # Return None if no peers were reachable (network partition)
+        if reachable_peers == 0:
+            return None
+        
+        return max_height
     
     async def _get_peer_height(self, peer_url: str) -> int:
         """
@@ -807,30 +990,54 @@ class Node:
                 await asyncio.sleep(1.0)
                 continue
             
-            # PROACTIVE CATCH-UP: Before attempting to create blocks, check if we're behind
-            # This prevents deadlock where nodes at different heights all skip their turns
-            # because they're waiting for blocks from other validators who are also behind
-            max_peer_height = await self._get_max_peer_height()
-            local_height = latest_block.height
-            height_gap = max_peer_height - local_height
+            # ================================================================
+            # NO-FORK CONSENSUS: PROACTIVE SYNC STATE DETECTION
+            # ================================================================
+            # Before attempting to create blocks, verify sync status with network.
+            # This ensures NO FORKS by preventing block production when:
+            # 1. No peers are available (network partition)
+            # 2. We're behind the network (need to catch up)
+            # 3. We're ahead of the network (potential fork - need reorg)
             
-            # LAPTOP-FRIENDLY SYNC STATE MACHINE (ChatGPT enhancement)
-            # Detect when node falls behind and needs to catch up
+            local_height = latest_block.height
+            
+            # Use _get_best_peer_height() which returns None if no peers reachable
+            best_peer_height = await self._get_best_peer_height()
+            
+            # CASE 1: No peers available (non-bootstrap nodes)
+            if best_peer_height is None and not is_bootstrap:
+                # Cannot determine network state - MUST NOT produce blocks
+                if self.sync_state != NodeSyncState.OUT_OF_SYNC:
+                    self.mark_out_of_sync("No peers reachable - cannot verify network state")
+                
+                if next_height % 30 == 0:
+                    print(f"⏸️  NO PEERS: Cannot produce blocks without network connectivity")
+                    print(f"   Local height: {local_height}, Seed nodes: {self.p2p.seed_nodes}")
+                await asyncio.sleep(1.0)
+                continue
+            
+            # For bootstrap nodes without seeds, best_peer_height will be None
+            # This is OK - bootstrap can produce blocks independently
+            if best_peer_height is None and is_bootstrap:
+                best_peer_height = local_height  # Treat as synced
+            
+            height_gap = best_peer_height - local_height
+            
+            # CASE 2: Node is BEHIND network (height_gap > 0)
             if height_gap >= self.CATCH_UP_THRESHOLD:
                 # Node is behind by 3+ blocks - enter OUT_OF_SYNC then CATCHING_UP
                 self.mark_out_of_sync(
-                    f"Height gap: local={local_height}, peer={max_peer_height} (gap={height_gap})"
+                    f"Behind network: local={local_height}, network={best_peer_height} (gap={height_gap})"
                 )
-                self.mark_catching_up()
+                self.mark_catching_up(target_height=best_peer_height)
                 
                 # Sync missing blocks
-                print(f"🔄 CATCH_UP: syncing blocks {local_height + 1} → {max_peer_height}")
-                await self._sync_missing_blocks(local_height + 1, max_peer_height)
+                print(f"🔄 CATCH_UP: syncing blocks {local_height + 1} → {best_peer_height}")
+                await self._sync_missing_blocks(local_height + 1, best_peer_height)
                 
                 # Check if we caught up
                 new_height = self.ledger.get_latest_block().height if self.ledger.get_latest_block() else 0
-                if new_height >= max_peer_height:
-                    print(f"✅ SYNC_COMPLETE: height now {new_height}, marking HEALTHY")
+                if new_height >= best_peer_height:
                     self.mark_healthy()
                 
                 # Skip this mining cycle to refresh state
@@ -838,45 +1045,61 @@ class Node:
             
             elif height_gap > 0:
                 # Small gap (1-2 blocks) - sync without full state change
-                print(f"🔄 Minor sync: {local_height} → {max_peer_height} ({height_gap} blocks)")
-                await self._sync_missing_blocks(local_height + 1, max_peer_height)
+                print(f"🔄 Minor sync: {local_height} → {best_peer_height} ({height_gap} blocks)")
+                await self._sync_missing_blocks(local_height + 1, best_peer_height)
                 
                 # If we were catching up, check if we're now healthy
                 if self.sync_state == NodeSyncState.CATCHING_UP:
                     new_height = self.ledger.get_latest_block().height if self.ledger.get_latest_block() else 0
-                    if new_height >= max_peer_height:
-                        print(f"✅ SYNC_COMPLETE: height now {new_height}, marking HEALTHY")
+                    if new_height >= best_peer_height:
                         self.mark_healthy()
                 
                 continue
             
-            else:
-                # CRITICAL FIX: Only mark as synced if we have peers OR we're the bootstrap node
-                # This prevents validator nodes from creating independent chains when disconnected
-                # max_peer_height can be 0 in two cases:
-                #   1. Bootstrap node with no seeds (GOOD - should create blocks)
-                #   2. Validator node with no peer connections (BAD - should wait for peers)
-                has_peers = max_peer_height > 0 or peer_count > 0
-                can_be_synced = is_bootstrap or has_peers
+            # CASE 3: Node is AHEAD of network (height_gap < 0) - POTENTIAL FORK!
+            elif height_gap < 0:
+                # NO-FORK GUARANTEE: If we're ahead, we might be on a fork
+                # This can happen if:
+                # - Network partition occurred and we kept producing
+                # - Peer data is stale
+                # - We received blocks from a forked chain
+                #
+                # CRITICAL: Mark OUT_OF_SYNC and wait for reconciliation
+                self.mark_out_of_sync(
+                    f"Ahead of network: local={local_height}, network={best_peer_height} (ahead by {-height_gap})"
+                )
                 
-                if self.sync_state != NodeSyncState.HEALTHY and can_be_synced:
+                print(f"⚠️  FORK DETECTION: Local chain is ahead of network!")
+                print(f"   Local height: {local_height}, Network height: {best_peer_height}")
+                print(f"   Entering OUT_OF_SYNC mode to reconcile with canonical chain")
+                print(f"   Block production DISABLED until synced with network")
+                
+                # Wait before retrying - allow network state to update
+                await asyncio.sleep(2.0)
+                continue
+            
+            # CASE 4: Fully synced (height_gap == 0)
+            else:
+                # We're at the same height as the network
+                # Track verified network height for can_propose_block() check
+                self._last_verified_network_height = best_peer_height
+                
+                if self.sync_state != NodeSyncState.HEALTHY:
                     if is_bootstrap:
-                        print(f"✅ SYNC STATUS: Bootstrap node at height {local_height} (no peers required)")
+                        print(f"✅ SYNC STATUS: Bootstrap node at height {local_height}")
                     else:
                         print(f"✅ SYNC STATUS: At network head (height: {local_height}, peers: {peer_count})")
                     self.mark_healthy()
-                elif self.sync_state != NodeSyncState.HEALTHY and not can_be_synced:
-                    # Validator node with no peers - keep waiting
-                    if next_height % 30 == 0:
-                        print(f"⏸️  WAITING FOR PEERS: Cannot sync without peer connections (height: {local_height})")
-                        print(f"   Seed nodes: {self.p2p.seed_nodes}")
-                    await asyncio.sleep(1.0)
-                    continue
             
-            # STAGE 3: Gate proposer participation until synced
-            if not self.can_propose_block():
-                if next_height % 30 == 0:  # Log every 30 blocks to avoid spam
-                    print(f"⏸️  NOT SYNCED: Skipping block production (state: {self.sync_state.value})")
+            # ================================================================
+            # SINGLE AUTHORITY GATE: can_propose_block()
+            # ================================================================
+            # This is the ONLY gate for block production. All sync checks above
+            # lead to this single decision point.
+            if not self.can_propose_block(next_height):
+                if next_height % 30 == 0:
+                    print(f"⏸️  PROPOSAL BLOCKED: state={self.sync_state.value}, "
+                          f"height={local_height}, peers={peer_count}")
                 await asyncio.sleep(config.BLOCK_TIME)
                 continue
             
@@ -933,6 +1156,22 @@ class Node:
                 # No validators available - wait for network to stabilize
                 if next_height % 10 == 0:
                     print(f"⚠️  No active validators at height {next_height}, waiting...")
+                continue
+            
+            # ================================================================
+            # VRF ELIGIBILITY GATE: Check if this node should be considered
+            # ================================================================
+            # NO-FORK GUARANTEE: Even if this node appears in the ranked proposers
+            # list, it should NOT propose if it's not fully synced and healthy.
+            # This prevents out-of-sync nodes from creating fork-causing blocks.
+            if not self.is_eligible_proposer():
+                # Node is not eligible to be a proposer right now
+                # Skip this slot entirely - let a healthy node take it
+                self.logger.debug(
+                    f"VRF SKIP: Node not eligible for proposer selection "
+                    f"(state={self.sync_state.value}, synced={self.synced}, peers={peer_count})"
+                )
+                await asyncio.sleep(0.5)
                 continue
             
             # Check if I'm one of the ranked proposers for this slot

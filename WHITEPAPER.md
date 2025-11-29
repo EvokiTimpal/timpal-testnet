@@ -88,7 +88,42 @@ device_fingerprint = hash(
 )
 ```
 
-### 3.3 On-Chain Enforcement
+### 3.3 Fingerprint Privacy Protection (v2)
+
+Device fingerprints are protected using **two-stage hashing** to prevent correlation attacks while maintaining Sybil resistance:
+
+**Stage 1: Component Hashing**
+```python
+# Each hardware component is hashed individually
+hashed_cpu = sha256(cpu_id)
+hashed_mac = sha256(mac_address)
+hashed_board = sha256(motherboard_serial)
+hashed_disk = sha256(disk_serial)
+hashed_uuid = sha256(hardware_uuid)
+```
+
+**Stage 2: Combined Fingerprint**
+```python
+# Individual hashes combined into final fingerprint
+fingerprint_v2 = sha256(
+    hashed_cpu + hashed_mac + hashed_board + hashed_disk + hashed_uuid
+)
+```
+
+**Privacy Features:**
+- **Two-stage hashing**: Even if one component leaks, others remain protected
+- **Explorer masking**: Public display shows only `abc123...xyz789` format (first 6 + last 6 chars)
+- **No raw hardware data**: Actual device identifiers never leave the machine
+- **One-way function**: Cannot reverse-engineer device from fingerprint
+- **Format versioning**: `v2:` prefix ensures compatibility with future privacy enhancements
+
+**Why This Matters:**
+- Prevents tracking validators across networks
+- Protects against device correlation attacks
+- Maintains full Sybil resistance (same device = same fingerprint)
+- Compliant with privacy best practices
+
+### 3.4 On-Chain Enforcement
 
 Validator registration requires:
 1. Unique device fingerprint (never seen before)
@@ -98,7 +133,7 @@ Validator registration requires:
 
 Attempting to register a duplicate device fingerprint results in transaction rejection.
 
-### 3.4 Unlimited Non-Validator Wallets
+### 3.5 Unlimited Non-Validator Wallets
 
 Users can create unlimited wallets for:
 - Sending and receiving transactions
@@ -107,7 +142,7 @@ Users can create unlimited wallets for:
 
 The one-per-device limit applies **only to validators earning rewards**, not to regular wallets.
 
-### 3.5 Economic Barrier (Post-Grace Period)
+### 3.6 Economic Barrier (Post-Grace Period)
 
 **CRITICAL: This is NOT Proof-of-Stake!** The 100 TMPL deposit is a fixed anti-Sybil barrier, not proportional staking. All validators receive equal rewards regardless of deposit amount.
 
@@ -404,7 +439,7 @@ Network security derives from:
 
 - **Encryption**: AES-256-GCM
 - **Key Derivation**: PBKDF2-HMAC-SHA512 (210,000 iterations)
-- **Recovery**: BIP39-style 12-word mnemonic phrases
+- **Recovery**: BIP39-style mnemonic phrases (12 or 24 words) with optional passphrase
 - **PIN Protection**: Minimum 6-digit PIN requirement
 
 ---
@@ -622,7 +657,75 @@ Year 20+ supply = 127M+ TMPL (attack threshold reached)
 - **Prevention**: Device fingerprinting limits to physical devices
 - **Cost**: Prohibitively expensive at scale
 
-### 12.3 Network Security
+### 12.4 P2P Rate Limiting
+
+TIMPAL implements multi-tier rate limiting to prevent network abuse while maintaining normal operation:
+
+**Rate Limits Per Peer:**
+
+| Message Type | Soft Limit | Hard Limit (2x) | Window |
+|-------------|------------|-----------------|--------|
+| **General Messages** | 30/sec | 60/sec | 1 second |
+| **Sync Requests** | 8/min | 16/min | 1 minute |
+| **Transaction Broadcasts** | 10/sec | 20/sec | 1 second |
+
+**Two-Tier Enforcement:**
+- **Soft Limit**: Warning + reputation penalty (-5 points)
+- **Hard Limit**: Message dropped + severe reputation penalty (-20 points)
+
+**Reputation Integration:**
+- Rate limit violations reduce peer reputation
+- Low-reputation peers may be disconnected
+- Protects against DoS and spam attacks
+- Legitimate traffic unaffected (limits are generous)
+
+**Example Attack Prevention:**
+```python
+# Attacker sends 100 sync requests per minute
+# Soft limit (8/min) exceeded at request 9 → -5 reputation
+# Hard limit (16/min) exceeded at request 17 → -20 reputation + message dropped
+# Repeated violations → peer disconnected
+```
+
+**Why This Matters:**
+- Prevents resource exhaustion attacks
+- Stops malicious peers from overwhelming validators
+- Maintains network stability under attack
+- Laptop-friendly: honest nodes never hit limits
+
+### 12.5 Block Production Nonce Validation
+
+TIMPAL uses strict nonce validation to prevent transaction-based fork attacks:
+
+**Nonce Rules:**
+```python
+expected_nonce = ledger.get_nonce(sender)
+
+if tx.nonce < expected_nonce:
+    # STALE: Replay attack or duplicate → REJECT permanently
+    remove_from_mempool(tx)
+    
+elif tx.nonce > expected_nonce:
+    # FUTURE: Not ready yet → SKIP for this block
+    keep_for_later(tx)
+    
+else:  # tx.nonce == expected_nonce
+    # VALID: Include in block
+    add_to_block(tx)
+```
+
+**Single Source of Truth:**
+- Block producers use `select_valid_transactions()` method
+- Same validation logic as block validators
+- Prevents blocks that other nodes would reject
+- Eliminates fork-causing transaction ordering issues
+
+**Sequential Same-Sender Support:**
+- Multiple transactions from same sender can be in one block
+- Temp nonces tracked during block assembly
+- Example: nonce=0, nonce=1, nonce=2 all valid in same block
+
+### 12.6 Network Security
 
 **Assumptions:**
 - Majority of validators are honest
