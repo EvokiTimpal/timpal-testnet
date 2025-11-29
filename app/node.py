@@ -285,12 +285,14 @@ class Node:
         """
         SINGLE AUTHORITY GATE FOR BLOCK PRODUCTION.
         
-        NO-FORK GUARANTEE: A node can propose a block ONLY if:
-        1. It is online (has at least 1 live peer, unless bootstrap node)
-        2. It is fully synchronized with the canonical chain
-        3. Its sync_state is HEALTHY
-        4. Network height was recently verified (within last sync cycle)
+        NO-FORK GUARANTEE: A node can propose a block ONLY if ALL conditions are true:
+        1. sync_state == HEALTHY
+        2. synced == True
+        3. _last_verified_network_height is not None
+        4. _last_verified_network_height == local_height (CRITICAL!)
+        5. len(peers) > 0 (except bootstrap nodes)
         
+        If ANY condition is false → Block production BLOCKED.
         This is the ONLY gate to block production. No other paths may bypass it.
         
         Args:
@@ -299,49 +301,44 @@ class Node:
         Returns:
             True ONLY if node is allowed to propose a block
         """
-        # Get current state for logging
         local_height = max(0, self.ledger.get_block_count() - 1)
         peer_count = self.p2p.get_peer_count()
-        
-        # DYNAMIC BOOTSTRAP DETECTION: Bootstrap nodes (no seeds) can produce with 0 peers
         is_bootstrap = (len(self.p2p.seed_nodes) == 0)
         
+        if not hasattr(self, '_last_verified_network_height'):
+            self._last_verified_network_height = None
+        
+        verified_height = self._last_verified_network_height
+        
         # CHECK 1: Peer availability (non-bootstrap nodes MUST have peers)
-        # Use ACTIVE P2P connection count, not just seed reachability
         if not is_bootstrap and peer_count == 0:
-            self.logger.info(
-                f"SKIP PROPOSAL: No active peers (local_height={local_height}, peers=0)"
-            )
-            # CRITICAL: Mark out of sync AND reset synced flag
+            print(f"[NO-FORK] SKIP: No peers (local={local_height}, peers=0)")
             if self.sync_state != NodeSyncState.OUT_OF_SYNC:
                 self.mark_out_of_sync("No active P2P peers - network connectivity lost")
             return False
         
         # CHECK 2: Sync state must be HEALTHY
         if self.sync_state != NodeSyncState.HEALTHY:
-            self.logger.debug(
-                f"SKIP PROPOSAL: state={self.sync_state.value} "
-                f"(local_height={local_height}, peers={peer_count})"
-            )
+            print(f"[NO-FORK] SKIP: state={self.sync_state.value} (not HEALTHY)")
             return False
         
-        # CHECK 3: Synced flag must be True (set by mark_healthy after sync verification)
+        # CHECK 3: Synced flag must be True
         if not self.synced:
-            self.logger.info(
-                f"SKIP PROPOSAL: synced=False (local_height={local_height})"
-            )
+            print(f"[NO-FORK] SKIP: synced=False (local={local_height})")
             return False
         
-        # CHECK 4: Network height must have been verified recently
-        # If we haven't verified network height since becoming HEALTHY, don't propose
-        if not hasattr(self, '_last_verified_network_height'):
-            self._last_verified_network_height = None
-        
-        if self._last_verified_network_height is None and not is_bootstrap:
-            self.logger.info(
-                f"SKIP PROPOSAL: Network height not verified (local_height={local_height})"
-            )
+        # CHECK 4: Network height must have been verified
+        if verified_height is None and not is_bootstrap:
+            print(f"[NO-FORK] SKIP: Network height not verified (local={local_height})")
             return False
+        
+        # CHECK 5 (CRITICAL): Verified height MUST MATCH local height
+        # This prevents producing blocks when we haven't verified the CURRENT height
+        if not is_bootstrap and verified_height is not None:
+            if verified_height != local_height:
+                print(f"[NO-FORK] SKIP: Height mismatch! verified={verified_height}, local={local_height}")
+                self.mark_out_of_sync(f"Verified height {verified_height} != local height {local_height}")
+                return False
         
         return True
     
@@ -352,23 +349,47 @@ class Node:
         NO-FORK GUARANTEE: Nodes that are not fully synced should NOT be
         included in the proposer selection, even for their own VRF calculation.
         
-        This prevents out-of-sync nodes from being selected as proposers.
+        This MUST be the FIRST check before any VRF/proposer selection logic.
+        
+        All conditions must be true:
+        1. sync_state == HEALTHY
+        2. synced == True
+        3. _last_verified_network_height is not None
+        4. _last_verified_network_height == local_height
+        5. peers > 0 (except bootstrap)
         
         Returns:
             True if node can be considered for proposer selection
         """
-        # Same checks as can_propose_block but without logging (called frequently)
-        is_bootstrap = (len(self.p2p.seed_nodes) == 0)
+        local_height = max(0, self.ledger.get_block_count() - 1)
         peer_count = self.p2p.get_peer_count()
+        is_bootstrap = (len(self.p2p.seed_nodes) == 0)
         
+        if not hasattr(self, '_last_verified_network_height'):
+            self._last_verified_network_height = None
+        
+        verified_height = self._last_verified_network_height
+        
+        # CHECK 1: Peers required (non-bootstrap)
         if not is_bootstrap and peer_count == 0:
             return False
         
+        # CHECK 2: Sync state must be HEALTHY
         if self.sync_state != NodeSyncState.HEALTHY:
             return False
         
+        # CHECK 3: Synced flag must be True
         if not self.synced:
             return False
+        
+        # CHECK 4: Network height must be verified
+        if verified_height is None and not is_bootstrap:
+            return False
+        
+        # CHECK 5 (CRITICAL): Verified height MUST MATCH local height
+        if not is_bootstrap and verified_height is not None:
+            if verified_height != local_height:
+                return False
         
         return True
     
@@ -1226,6 +1247,84 @@ class Node:
                 continue
             
             print(f"✅ Rank {my_rank} proposer - it's my window, creating block for slot {current_slot}...")
+            
+            # ================================================================
+            # RULE 6: ABSOLUTE FORK PROTECTION CHECK
+            # ================================================================
+            # FRESH re-verification of network state IMMEDIATELY before block creation
+            # This is the FINAL safety gate - catches any connectivity changes
+            
+            pre_block_peer_count = self.p2p.get_peer_count()
+            pre_block_local_height = self.ledger.get_block_count() - 1
+            is_bootstrap_check = (len(self.p2p.seed_nodes) == 0)
+            
+            # RULE 6a: If peers dropped to 0, ABORT immediately
+            if not is_bootstrap_check and pre_block_peer_count == 0:
+                print(f"[NO-FORK] ABORT: Peers dropped to 0! Cannot verify network state")
+                self._last_verified_network_height = None  # CRITICAL: Invalidate verified height
+                self.mark_out_of_sync("Peers dropped to 0 - cannot verify network state")
+                continue
+            
+            # RULE 6b: Fresh network height verification
+            pre_block_peer_height = await self._get_best_peer_height()
+            
+            # If we can't get peer height, ABORT (except bootstrap)
+            if pre_block_peer_height is None and not is_bootstrap_check:
+                print(f"[NO-FORK] ABORT: Cannot fetch network height - connectivity lost")
+                self._last_verified_network_height = None  # CRITICAL: Invalidate verified height
+                self.mark_out_of_sync("Cannot fetch network height - connectivity lost")
+                continue
+            
+            # RULE 6c: Height comparison checks
+            if not is_bootstrap_check and pre_block_peer_height is not None:
+                if pre_block_local_height < pre_block_peer_height:
+                    # Node is BEHIND - STOP and sync
+                    print(f"[NO-FORK] ABORT: Behind network! local={pre_block_local_height}, network={pre_block_peer_height}")
+                    self._last_verified_network_height = None  # CRITICAL: Invalidate
+                    self.mark_out_of_sync(f"Behind network: local={pre_block_local_height} < network={pre_block_peer_height}")
+                    continue
+                    
+                if pre_block_local_height > pre_block_peer_height:
+                    # Node is AHEAD - potential fork - STOP immediately
+                    print(f"[NO-FORK] ABORT: Ahead of network! local={pre_block_local_height}, network={pre_block_peer_height}")
+                    self._last_verified_network_height = None  # CRITICAL: Invalidate
+                    self.mark_out_of_sync(f"Ahead of network (fork?): local={pre_block_local_height} > network={pre_block_peer_height}")
+                    continue
+                
+                # Heights match! Update verified height to CURRENT height
+                self._last_verified_network_height = pre_block_local_height
+            
+            # ================================================================
+            # RULE 7: TRIPLE GATE - FINAL PROTECTION BEFORE SEALING
+            # ================================================================
+            # All three conditions MUST be true right before creating the block
+            if not (self.synced and 
+                    self.sync_state == NodeSyncState.HEALTHY and
+                    (is_bootstrap_check or self._last_verified_network_height == pre_block_local_height)):
+                print(f"[NO-FORK] ABORT: Triple gate failed!")
+                print(f"   synced={self.synced}, state={self.sync_state.value}")
+                print(f"   verified_height={self._last_verified_network_height}, local={pre_block_local_height}")
+                self._last_verified_network_height = None  # CRITICAL: Invalidate
+                self.mark_out_of_sync("Triple gate check failed before block creation")
+                continue
+            
+            # ================================================================
+            # RULE 8: FINAL CAN_PROPOSE_BLOCK() RECHECK
+            # ================================================================
+            # After all verification, re-run can_propose_block() one final time
+            # This catches any state changes that occurred during async operations
+            if not self.can_propose_block(next_height):
+                print(f"[NO-FORK] ABORT: Final can_propose_block() failed after verification")
+                continue
+            
+            # ABSOLUTE FINAL PEER CHECK: One last peer count before sealing
+            # This catches WiFi drops that occurred during async operations above
+            final_peer_count = self.p2p.get_peer_count()
+            if not is_bootstrap_check and final_peer_count == 0:
+                print(f"[NO-FORK] ABORT: Peers dropped to 0 during block preparation!")
+                self._last_verified_network_height = None
+                self.mark_out_of_sync("Peers dropped during block preparation")
+                continue
             
             # SELECT VALID TRANSACTIONS: Uses strict nonce ordering to prevent forks
             # This is the SINGLE SOURCE OF TRUTH for transaction selection
