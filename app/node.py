@@ -4,6 +4,8 @@ import uuid
 import hashlib
 import aiohttp
 import logging
+import json
+import os
 from enum import Enum
 from typing import Optional, Dict, Any
 from app.block import Block
@@ -15,6 +17,9 @@ from app.rewards import RewardCalculator
 from app.p2p import P2PNetwork
 from app.device_fingerprint import enforce_single_node
 import config
+
+VALIDATOR_LIVENESS_FILE = "validator_liveness.json"
+LIVENESS_TIMEOUT_SECONDS = 3
 
 
 class NodeSyncState(str, Enum):
@@ -356,6 +361,209 @@ class Node:
             return ("SOLO", 1, True)
         else:
             return ("MULTI", registered_count, False)
+    
+    # ================================================================
+    # VALIDATOR LIVENESS TRACKING (for Explorer real-time display)
+    # ================================================================
+    
+    def get_real_time_validator_liveness(self) -> Dict[str, Dict]:
+        """
+        Get real-time liveness status for all validators based on P2P state.
+        
+        A validator is ONLINE if ALL conditions are met:
+        1. P2P peer connection exists for that validator
+        2. Last message received within LIVENESS_TIMEOUT_SECONDS
+        3. This node's sync_state == HEALTHY (for self)
+        
+        Returns:
+            Dict mapping validator address to liveness info:
+            {
+                "tmpl...": {
+                    "status": "online" | "offline",
+                    "last_seen": timestamp,
+                    "peer_connected": bool,
+                    "sync_state": "healthy" | "out_of_sync" | "catching_up"
+                }
+            }
+        """
+        current_time = time.time()
+        liveness = {}
+        
+        connected_peer_addresses = set()
+        for peer_id in self.p2p.peers:
+            if peer_id in self.p2p.peer_validator_addresses:
+                connected_peer_addresses.add(self.p2p.peer_validator_addresses[peer_id])
+        
+        for address, validator_data in self.ledger.validator_registry.items():
+            if address == "genesis":
+                continue
+                
+            if not isinstance(validator_data, dict):
+                continue
+                
+            if validator_data.get('status') not in ('active', 'genesis'):
+                continue
+            
+            last_seen = self.consensus.last_seen.get(address, 0)
+            is_peer_connected = address in connected_peer_addresses
+            time_since_seen = current_time - last_seen if last_seen > 0 else float('inf')
+            
+            if address == self.reward_address:
+                is_online = self.sync_state == NodeSyncState.HEALTHY
+                last_seen = current_time
+                sync_state = self.sync_state.value
+            else:
+                is_online = is_peer_connected and time_since_seen < LIVENESS_TIMEOUT_SECONDS
+                sync_state = "unknown"
+            
+            liveness[address] = {
+                "status": "online" if is_online else "offline",
+                "last_seen": last_seen,
+                "peer_connected": is_peer_connected if address != self.reward_address else True,
+                "sync_state": sync_state,
+                "time_since_seen": time_since_seen if address != self.reward_address else 0
+            }
+        
+        return liveness
+    
+    def write_validator_liveness_file(self):
+        """
+        Write current validator liveness to a JSON file for explorer consumption.
+        
+        The explorer (separate process) reads this file to display real-time
+        ACTIVE/OFFLINE status for validators.
+        """
+        try:
+            liveness = self.get_real_time_validator_liveness()
+            
+            online_count = sum(1 for v in liveness.values() if v['status'] == 'online')
+            offline_count = sum(1 for v in liveness.values() if v['status'] == 'offline')
+            
+            data = {
+                "timestamp": time.time(),
+                "node_address": self.reward_address,
+                "node_sync_state": self.sync_state.value,
+                "peer_count": self.p2p.get_peer_count(),
+                "online_validators": online_count,
+                "offline_validators": offline_count,
+                "validators": liveness
+            }
+            
+            liveness_path = os.path.join(self.data_dir, VALIDATOR_LIVENESS_FILE)
+            with open(liveness_path, 'w') as f:
+                json.dump(data, f, indent=2)
+                
+        except Exception as e:
+            self.logger.error(f"Failed to write liveness file: {e}")
+    
+    async def liveness_tracking_loop(self):
+        """
+        Background task that updates validator liveness file every second.
+        
+        The explorer reads this file to show real-time ACTIVE/OFFLINE status.
+        """
+        print(f"📊 Starting validator liveness tracking (updates every 1s)")
+        
+        while self.is_running:
+            try:
+                self.write_validator_liveness_file()
+                await asyncio.sleep(1)
+            except Exception as e:
+                self.logger.error(f"Liveness tracking error: {e}")
+                await asyncio.sleep(1)
+    
+    def _get_canonical_network_height(self) -> Optional[int]:
+        """
+        NO-FORK v3: Get the canonical network height from seed nodes or peers.
+        
+        This is the AUTHORITATIVE height that all nodes must agree on.
+        Used for pre-block validation to prevent forks.
+        
+        Returns:
+            Canonical height from network, or None if network unreachable
+        """
+        try:
+            for seed in self.p2p.seed_nodes:
+                if seed.startswith('ws://'):
+                    host_port = seed.replace('ws://', '').replace('/', '')
+                    if ':' in host_port:
+                        host, port_str = host_port.rsplit(':', 1)
+                        try:
+                            http_port = int(port_str) + 1
+                            import requests
+                            resp = requests.get(
+                                f"http://{host}:{http_port}/api/health",
+                                timeout=2
+                            )
+                            if resp.status_code == 200:
+                                data = resp.json()
+                                seed_height = data.get('height')
+                                if seed_height is not None:
+                                    return seed_height
+                        except Exception:
+                            continue
+        except Exception:
+            pass
+        
+        peer_heights = []
+        for peer_id in self.p2p.peers:
+            peer_info = self.p2p.peers.get(peer_id, {})
+            if isinstance(peer_info, dict):
+                height = peer_info.get('height')
+                if height is not None:
+                    peer_heights.append(height)
+        
+        if not peer_heights:
+            return None
+        
+        return max(peer_heights)
+    
+    def _auto_reconcile_with_canonical(self, canonical_height: int):
+        """
+        NO-FORK v3: Auto-reorg when local chain is ahead of canonical chain.
+        
+        This fixes Bug C - node stuck in infinite sync loop when local ahead.
+        
+        CRITICAL: This function does NOT set the node to HEALTHY.
+        The node remains OUT_OF_SYNC after rollback, and must obtain
+        fresh canonical height verification in the next loop iteration
+        before block production can resume.
+        
+        Args:
+            canonical_height: The authoritative height from the network
+        """
+        local_height = self.ledger.get_block_count() - 1
+        
+        if local_height <= canonical_height:
+            return
+        
+        print(f"\n{'='*60}")
+        print(f"⚠️  [AUTO-REORG] Local chain ahead of canonical!")
+        print(f"{'='*60}")
+        print(f"   Local height:     {local_height}")
+        print(f"   Canonical height: {canonical_height}")
+        print(f"   Rolling back {local_height - canonical_height} block(s)...")
+        
+        if hasattr(self.ledger, 'rollback_to_height'):
+            success = self.ledger.rollback_to_height(canonical_height)
+            if success:
+                print(f"   ✅ Rollback successful!")
+            else:
+                print(f"   ❌ Rollback failed, manual intervention may be required")
+        else:
+            blocks_to_remove = local_height - canonical_height
+            for _ in range(blocks_to_remove):
+                if self.ledger.blocks:
+                    removed = self.ledger.blocks.pop()
+                    print(f"   Removed block {removed.height}")
+        
+        self._last_verified_network_height = None
+        self.synced = False
+        self.sync_state = NodeSyncState.OUT_OF_SYNC
+        
+        print(f"   ✅ Auto-reorg complete, now at height {self.ledger.get_block_count() - 1}")
+        print(f"   ⚠️  Node set to OUT_OF_SYNC - must verify fresh canonical height before resuming")
+        print(f"{'='*60}\n")
     
     def can_propose_block(self, next_height: int = None) -> bool:
         """
@@ -1197,24 +1405,21 @@ class Node:
             
             # CASE 3: Node is AHEAD of network (height_gap < 0) - POTENTIAL FORK!
             elif height_gap < 0:
-                # NO-FORK GUARANTEE: If we're ahead, we might be on a fork
-                # This can happen if:
-                # - Network partition occurred and we kept producing
-                # - Peer data is stale
-                # - We received blocks from a forked chain
-                #
-                # CRITICAL: Mark OUT_OF_SYNC and wait for reconciliation
-                self.mark_out_of_sync(
-                    f"Ahead of network: local={local_height}, network={best_peer_height} (ahead by {-height_gap})"
-                )
-                
-                print(f"⚠️  FORK DETECTION: Local chain is ahead of network!")
+                # NO-FORK v3: Auto-reconcile when local is ahead of canonical
+                # BUG C FIX: Instead of entering infinite sync loop, auto-reorg to canonical chain
+                print(f"⚠️  [FORK] Local chain ahead of network!")
                 print(f"   Local height: {local_height}, Network height: {best_peer_height}")
-                print(f"   Entering OUT_OF_SYNC mode to reconcile with canonical chain")
-                print(f"   Block production DISABLED until synced with network")
                 
-                # Wait before retrying - allow network state to update
-                await asyncio.sleep(2.0)
+                canonical_height = self._get_canonical_network_height()
+                if canonical_height is None:
+                    canonical_height = best_peer_height
+                
+                print(f"   Canonical height: {canonical_height}")
+                print(f"   Triggering AUTO-REORG to reconcile with canonical chain...")
+                
+                self._auto_reconcile_with_canonical(canonical_height)
+                
+                await asyncio.sleep(1.0)
                 continue
             
             # CASE 4: Fully synced (height_gap == 0)
@@ -1365,6 +1570,46 @@ class Node:
                 continue
             
             print(f"✅ Rank {my_rank} proposer - it's my window, creating block for slot {current_slot}...")
+            
+            # ================================================================
+            # NO-FORK v3: HARD PRECHECK BEFORE BLOCK CREATION
+            # ================================================================
+            # BUG A FIX: Validate height with network BEFORE creating block.
+            # This prevents the node from creating a local block that causes a fork.
+            
+            local_height = self.ledger.get_block_count() - 1
+            canonical_height = self._get_canonical_network_height()
+            mode, active_count, is_solo_mode = self._get_validator_mode()
+            
+            if not is_solo_mode:
+                if canonical_height is None:
+                    print(f"[NO-FORK v3] ABORT: No canonical height available in multi-validator mode")
+                    print(f"   local={local_height}, peers={self.p2p.get_peer_count()}, validators={active_count}")
+                    self._last_verified_network_height = None
+                    self.synced = False
+                    self.mark_out_of_sync("No canonical height (multi-validator)")
+                    await asyncio.sleep(1.0)
+                    continue
+                
+                if canonical_height != local_height:
+                    print(f"[NO-FORK v3] ABORT: Height mismatch before block creation!")
+                    print(f"   local={local_height}, canonical={canonical_height}")
+                    
+                    self._last_verified_network_height = None
+                    self.synced = False
+                    
+                    if local_height > canonical_height:
+                        print(f"   Local ahead - triggering AUTO-REORG...")
+                        self._auto_reconcile_with_canonical(canonical_height)
+                        await asyncio.sleep(0.5)
+                        continue
+                    else:
+                        print(f"   Local behind - entering CATCH_UP mode...")
+                        self.mark_out_of_sync(f"Behind network: local={local_height} < canonical={canonical_height}")
+                        await asyncio.sleep(1.0)
+                        continue
+                
+                print(f"[NO-FORK v3] ✓ Height verified: local={local_height} == canonical={canonical_height}")
             
             # ================================================================
             # RULE 6: ABSOLUTE FORK PROTECTION CHECK (MODE-AWARE)
@@ -2043,13 +2288,30 @@ class Node:
                                 break  # Done with this peer
                     
                     # Check if we successfully synced to target from this peer
-                    if peer_success and current_sync_height > end_height:
+                    if peer_success and current_sync_height >= end_height:
                         print(f"\n{'='*60}")
                         print(f"✅ SYNC COMPLETE")
                         print(f"{'='*60}")
                         print(f"📊 Synced blocks {start_height} → {end_height}")
                         print(f"🔒 Final Chain Height: {len(self.ledger.blocks) - 1}")
                         print(f"📦 Total Chunks: {chunks_synced}")
+                        
+                        # BUG C FIX: Check if local is STILL ahead of canonical after sync
+                        # This prevents the infinite sync loop (SYNC COMPLETE 895→895)
+                        # NOTE: Always runs this check, not just when current_sync_height > end_height
+                        local_height = self.ledger.get_block_count() - 1
+                        canonical_height = self._get_canonical_network_height()
+                        
+                        print(f"📊 Post-sync check: local={local_height}, canonical={canonical_height}")
+                        
+                        if canonical_height is not None and local_height > canonical_height:
+                            print(f"\n⚠️  [POST-SYNC CHECK] Local still ahead of canonical!")
+                            print(f"   local={local_height}, canonical={canonical_height}")
+                            print(f"   Triggering AUTO-REORG to reconcile...")
+                            self._auto_reconcile_with_canonical(canonical_height)
+                        elif canonical_height is not None and local_height == canonical_height:
+                            print(f"✅ [POST-SYNC CHECK] Heights match - sync successful!")
+                        
                         return
                         
             except Exception as e:
@@ -2265,7 +2527,8 @@ class Node:
             self.announce_presence(),
             self.send_heartbeats(),
             self.send_epoch_attestations(),
-            self.p2p.peer_discovery_loop()
+            self.p2p.peer_discovery_loop(),
+            self.liveness_tracking_loop()
         )
     
     def stop(self):
