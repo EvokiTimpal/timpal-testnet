@@ -54,6 +54,81 @@ _ledger_cache = None
 _ledger_cache_time = 0
 CACHE_TTL = 5
 
+_liveness_cache = None
+_liveness_cache_time = 0
+LIVENESS_CACHE_TTL = 1
+VALIDATOR_LIVENESS_FILE = "validator_liveness.json"
+
+
+def get_validator_liveness() -> dict:
+    """
+    Get real-time validator liveness from the node's liveness file.
+    
+    The node writes this file every second with P2P-based liveness data.
+    Returns cached data if file was read within LIVENESS_CACHE_TTL seconds.
+    
+    Returns:
+        Dict with liveness data or empty dict if file not found
+    """
+    global _liveness_cache, _liveness_cache_time
+    
+    current_time = time.time()
+    
+    if _liveness_cache is not None and (current_time - _liveness_cache_time) < LIVENESS_CACHE_TTL:
+        return _liveness_cache
+    
+    import glob
+    
+    node_dirs = glob.glob("testnet_data_node_*/")
+    for node_dir in sorted(node_dirs, key=lambda x: os.path.getmtime(x), reverse=True):
+        liveness_path = os.path.join(node_dir, VALIDATOR_LIVENESS_FILE)
+        if os.path.exists(liveness_path):
+            try:
+                with open(liveness_path, 'r') as f:
+                    data = json.load(f)
+                
+                file_age = current_time - data.get('timestamp', 0)
+                if file_age < 10:
+                    _liveness_cache = data
+                    _liveness_cache_time = current_time
+                    return data
+            except Exception:
+                pass
+    
+    _liveness_cache = {}
+    _liveness_cache_time = current_time
+    return {}
+
+
+def calculate_online_validators_block_based(ledger) -> int:
+    """
+    Calculate online validators using block-based detection (fallback method).
+    
+    A validator is considered online if they proposed a block within the last 100 blocks.
+    This is used when the P2P-based liveness file is unavailable.
+    
+    Args:
+        ledger: The ledger instance
+        
+    Returns:
+        Number of validators that proposed blocks recently
+    """
+    LIVENESS_WINDOW = 100
+    current_height = ledger.get_block_count() - 1
+    
+    if current_height < 10:
+        return ledger.get_validator_count()
+    
+    recent_proposers = set()
+    for block in ledger.blocks[-LIVENESS_WINDOW:]:
+        if block.proposer:
+            recent_proposers.add(block.proposer)
+    
+    registered_validators = set(ledger.validator_registry.keys())
+    online_validators = recent_proposers.intersection(registered_validators)
+    
+    return len(online_validators)
+
 
 def mask_fingerprint(device_id: str) -> str:
     """
@@ -248,8 +323,31 @@ async def root(request: Request):
     ledger = get_ledger()
     latest_block = ledger.get_latest_block()
     total_supply = ledger.total_emitted_pals
-    validator_count = ledger.get_validator_count()
-    # Get transaction statistics (hide legacy heartbeats by default for cleaner stats)
+    current_height = ledger.get_block_count() - 1
+    
+    registered_count = 0
+    for addr in ledger.validator_registry:
+        if addr != "genesis":
+            registered_count += 1
+    
+    active_validator_set = ledger.get_active_validators(current_height)
+    active_count = len(active_validator_set)
+    
+    liveness_data = get_validator_liveness()
+    current_time = time.time()
+    ONLINE_THRESHOLD_SECONDS = 5
+    
+    if liveness_data and liveness_data.get('validators'):
+        online_count = 0
+        for addr, v_data in liveness_data.get('validators', {}).items():
+            last_seen = v_data.get('last_seen', 0)
+            if last_seen > 0 and (current_time - last_seen) <= ONLINE_THRESHOLD_SECONDS:
+                online_count += 1
+        liveness_source = "p2p_realtime"
+    else:
+        online_count = 0
+        liveness_source = "unavailable"
+    
     tx_stats = get_transaction_stats(ledger, hide_legacy=True)
     total_transactions = tx_stats['total']
     transfer_count = tx_stats['transfer']
@@ -300,8 +398,8 @@ async def root(request: Request):
             </div>
             <div class="stat-card">
                 <div class="stat-label">Validators</div>
-                <div class="stat-value" id="live-validator-count">{validator_count}</div>
-                <div class="stat-trend">🌐 Decentralized</div>
+                <div class="stat-value" id="live-validator-count">{online_count}/{active_count}/{registered_count}</div>
+                <div class="stat-trend">🌐 Online / Active / Registered</div>
             </div>
             <div class="stat-card">
                 <div class="stat-label">TMPL Transfers</div>
@@ -1549,37 +1647,65 @@ async def get_stats(request: Request):
 @app.get("/validators")
 @limiter.limit("30/minute")
 async def get_validators(request: Request):
-    """Get all registered validators (dynamic validator set)"""
+    """
+    Get all registered validators with REAL-TIME liveness and ACTIVE status.
+    
+    NO-FORK v4 VALIDATOR TYPES:
+    
+    1. REGISTERED: Stored in ledger validator registry (may be offline)
+    2. ACTIVE: Proposed at least one block in last ACTIVE_VALIDATOR_WINDOW blocks
+       - Computed deterministically from ledger (used for rewards)
+       - NOT based on P2P liveness
+    3. ONLINE: Recent P2P activity (for explorer display only)
+       - Based on liveness timestamps from P2P layer
+       - NOT used for rewards or consensus
+    
+    ONLINE DETECTION (P2P-based, refreshes every second):
+    A validator is ONLINE if ALL conditions are true:
+    1. P2P peer connection exists for that validator
+    2. Last message received within 3-5 seconds
+    3. sync_state == HEALTHY (for self-reporting node)
+    
+    If liveness file is unavailable/stale:
+    - Do NOT mark everyone online
+    - Mark online count as 0 (safe fallback)
+    """
     ledger = get_ledger()
     validators = []
     
-    # Get current height for liveness detection
+    liveness_data = get_validator_liveness()
+    realtime_validators = liveness_data.get('validators', {})
     current_height = ledger.get_block_count() - 1
-    LIVENESS_WINDOW = 100  # Consider validator offline if no blocks proposed in last 100 blocks (~5 minutes)
+    current_time = time.time()
+    ONLINE_THRESHOLD_SECONDS = 5
     
-    # Iterate through ALL registered validators in the ledger
+    active_validator_set = ledger.get_active_validators(current_height)
+    
     for address, validator_data in ledger.validator_registry.items():
-        # Get validator info (handles both old and new format)
+        if address == "genesis":
+            continue
+            
         info = ledger.get_validator_info(address)
         
         if info:
             balance = ledger.get_balance(address)
             block_count = sum(1 for block in ledger.blocks if block.proposer == address)
             
-            # LIVENESS DETECTION: Check if validator proposed a block recently
-            last_block_height = -1
-            for block in reversed(ledger.blocks):
-                if block.proposer == address:
-                    last_block_height = block.height
-                    break
+            is_active = address in active_validator_set
             
-            # Determine real-time online/offline status
-            if current_height < 10:
-                display_status = "active"
-            elif last_block_height >= 0 and (current_height - last_block_height) <= LIVENESS_WINDOW:
-                display_status = "active"
+            if address in realtime_validators:
+                rt_status = realtime_validators[address]
+                last_seen = rt_status.get('last_seen', 0)
+                sync_state = rt_status.get('sync_state', 'unknown')
+                
+                if last_seen > 0 and (current_time - last_seen) <= ONLINE_THRESHOLD_SECONDS:
+                    is_online = True
+                else:
+                    is_online = False
             else:
-                display_status = "offline"
+                is_online = False
+                last_seen = 0
+                sync_state = "unknown"
             
             validators.append({
                 "address": address,
@@ -1587,23 +1713,31 @@ async def get_validators(request: Request):
                 "balance": balance,
                 "balance_tmpl": format_pals(balance),
                 "blocks_proposed": block_count,
-                "status": display_status,
+                "registered": True,
+                "active": is_active,
+                "online": is_online,
+                "status": "online" if is_online else "offline",
+                "last_seen": last_seen,
+                "sync_state": sync_state,
                 "registered_at": info.get('registered_at', 0),
                 "device_id_preview": mask_fingerprint(info.get('device_id', 'N/A'))
             })
     
-    # FILTER: Only show ACTIVE/ONLINE validators (user request)
-    # Offline validators should not appear in the list or network graph
-    active_validators = [v for v in validators if v['status'] == 'active']
+    online_validators = [v for v in validators if v['online']]
+    offline_validators = [v for v in validators if not v['online']]
+    active_validators = [v for v in validators if v['active']]
     
-    # Sort by blocks proposed (most active first)
-    active_validators.sort(key=lambda v: v.get('blocks_proposed', 0), reverse=True)
+    online_validators.sort(key=lambda v: v.get('blocks_proposed', 0), reverse=True)
+    offline_validators.sort(key=lambda v: v.get('blocks_proposed', 0), reverse=True)
     
     return {
-        "validators": active_validators,
-        "total_count": len(active_validators),
+        "validators": online_validators + offline_validators,
+        "registered_count": len(validators),
         "active_count": len(active_validators),
-        "inactive_count": 0  # Not showing offline validators
+        "online_count": len(online_validators),
+        "offline_count": len(offline_validators),
+        "total_count": len(validators),
+        "liveness_source": "p2p_realtime" if realtime_validators else "unavailable"
     }
 
 

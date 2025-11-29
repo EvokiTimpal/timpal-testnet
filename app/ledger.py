@@ -19,6 +19,11 @@ from app.historical_state import (
 from app.sqlite_historical_storage import SQLiteHistoricalStorage
 import config
 
+# ACTIVE VALIDATOR WINDOW: Number of blocks to look back for active validator determination
+# A validator is considered ACTIVE if they proposed at least one block in this window
+# This is used for DETERMINISTIC reward distribution (ledger-based, not P2P)
+ACTIVE_VALIDATOR_WINDOW = 100
+
 
 class Ledger:
     def __init__(self, data_dir: str = "blockchain_data", use_production_storage: bool = False):
@@ -1681,52 +1686,84 @@ class Ledger:
         return sorted(list(validators_with_attestations))
     
 
-    def get_active_validators(self) -> list:
+    def get_active_validators(self, current_height: int = None) -> Set[str]:
         """
-        Only validators who are:
-        1) Registered & 'active' (or 'genesis' during bootstrap),
-        2) Satisfy deposit rules (post-grace),
-        3) Are online by our scalable liveness (recent attestations).
+        Return a DETERMINISTIC set of validator addresses considered ACTIVE,
+        based on the last ACTIVE_VALIDATOR_WINDOW blocks.
         
-        DETERMINISTIC: Uses only on-chain data (no P2P state).
-        Returns a list of validator addresses (deterministic across nodes).
+        NO-FORK v4: Active validators are determined PURELY from ledger data:
+        - A validator is ACTIVE if they proposed at least one block in the last N blocks
+        - This is 100% deterministic - all nodes compute the same set
+        - NO P2P liveness data is used here
+        
+        Args:
+            current_height: Current blockchain height (defaults to latest block height)
+            
+        Returns:
+            Set of validator addresses who proposed blocks in the active window
+            
+        Edge cases:
+        - At low heights with no block history: returns all registered validators
+        - Solo validator mode: returns that single validator
         """
-        active = []
-        current_height = len(self.blocks) - 1
-
-        # Primary scalable liveness (epoch attestations)
-        # MAINNET SCALING: auto-scales lookback to cover all validators
-        # Returns all registered validators as fallback (deterministic)
-        validators_with_attestations = self.get_validators_with_recent_attestations()
-
+        max_existing_height = len(self.blocks) - 1
+        
+        if current_height is None:
+            current_height = max_existing_height
+        
+        if current_height < 0:
+            current_height = 0
+        
+        if current_height > max_existing_height:
+            current_height = max_existing_height
+        
+        active_proposers: Set[str] = set()
+        
+        if max_existing_height < 0:
+            pass
+        else:
+            start_height = max(0, current_height - ACTIVE_VALIDATOR_WINDOW + 1)
+            
+            for height in range(start_height, current_height + 1):
+                block = self.blocks[height]
+                if hasattr(block, 'proposer') and block.proposer:
+                    if block.proposer in self.validator_registry:
+                        active_proposers.add(block.proposer)
+        
+        # EDGE CASE: No block history yet (startup/bootstrap)
+        # Fall back to all registered validators to avoid division by zero
+        if not active_proposers:
+            all_registered = set()
+            for addr, data in self.validator_registry.items():
+                if addr == "genesis":
+                    continue
+                if isinstance(data, dict) and data.get('status') in ('active', 'genesis'):
+                    all_registered.add(addr)
+                elif isinstance(data, str):
+                    # Legacy registry format
+                    all_registered.add(addr)
+            
+            if all_registered:
+                return all_registered
+        
+        # SOLO VALIDATOR MODE: If only 1 registered validator, return it
+        # (even if they haven't proposed yet)
+        registered_count = 0
+        single_validator = None
         for addr, data in self.validator_registry.items():
             if addr == "genesis":
                 continue
-
-            is_registered_active = False
             if isinstance(data, dict) and data.get('status') in ('active', 'genesis'):
-                is_registered_active = True
+                registered_count += 1
+                single_validator = addr
             elif isinstance(data, str):
-                # legacy registry format
-                is_registered_active = True
-
-            if not is_registered_active:
-                continue
-
-            if not self.validator_economics.is_validator_active(addr, current_height):
-                continue
-
-            # After bootstrap, require liveness (DETERMINISTIC - no P2P)
-            # validators_with_attestations already includes fallback to all registered
-            if current_height > 10:
-                if addr not in validators_with_attestations:
-                    continue
-
-            active.append(addr)
-
-        # CRITICAL FIX: Return sorted list for deterministic reward_allocations ordering
-        # This ensures all nodes build reward dicts in identical order → same block hash
-        return sorted(active)
+                registered_count += 1
+                single_validator = addr
+        
+        if registered_count == 1 and single_validator:
+            return {single_validator}
+        
+        return active_proposers
 
     def get_online_validators_deterministic(self, current_height: int) -> list:
         """

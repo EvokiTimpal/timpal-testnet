@@ -41,6 +41,15 @@ class P2PNetwork:
         self.connection_attempts: Dict[str, List[float]] = defaultdict(list)
         self.banned_ips: Set[str] = set()
         
+        self.peer_validator_addresses: Dict[str, str] = {}
+        self.peer_last_seen: Dict[str, float] = {}
+        
+        # LIVENESS FIX: Track validator last seen by VALIDATOR ADDRESS (not peer_id)
+        # This is used for P2P-based liveness detection for explorer display
+        # Note: asyncio is single-threaded, so no lock needed for dict updates
+        # Use get_all_validator_last_seen() to get a safe copy for iteration
+        self._validator_last_seen: Dict[str, float] = {}
+        
         # PEER REPUTATION SYSTEM (P2P-only, does NOT affect consensus)
         # Score range: 0-100, starts at 50, quarantine threshold at 20
         self.peer_reputation: Dict[str, int] = {}
@@ -133,6 +142,49 @@ class P2PNetwork:
             return False
         
         return True
+    
+    # ============================================================
+    # VALIDATOR LIVENESS TRACKING (Thread-Safe API)
+    # ============================================================
+    
+    def update_validator_last_seen(self, validator_address: str, timestamp: float = None):
+        """
+        Update validator liveness timestamp.
+        
+        LIVENESS FIX: Provides clean API for updating validator last seen times.
+        Safe in asyncio context (single-threaded event loop).
+        
+        Args:
+            validator_address: The validator address to update
+            timestamp: Optional timestamp (defaults to current time)
+        """
+        if timestamp is None:
+            timestamp = time.time()
+        self._validator_last_seen[validator_address] = timestamp
+    
+    def get_validator_last_seen(self, validator_address: str) -> float:
+        """
+        Get validator liveness timestamp.
+        
+        Args:
+            validator_address: The validator address to query
+            
+        Returns:
+            Last seen timestamp, or 0 if never seen
+        """
+        return self._validator_last_seen.get(validator_address, 0)
+    
+    def get_all_validator_last_seen(self) -> Dict[str, float]:
+        """
+        Get a copy of all validator liveness timestamps.
+        
+        Returns a COPY to prevent "dict changed size during iteration" errors
+        when the explorer iterates over liveness data while updates occur.
+        
+        Returns:
+            Dict copy of validator addresses to last seen timestamps
+        """
+        return dict(self._validator_last_seen)
     
     # ============================================================
     # PEER REPUTATION SYSTEM
@@ -451,6 +503,10 @@ class P2PNetwork:
             elif connection_duration > 60:  # Stable connection for 60+ seconds
                 self.reward_stable_connection(peer_id)
             
+            # LIVENESS FIX: Clean up validator address tracking when peer disconnects
+            if peer_id in self.peer_validator_addresses:
+                del self.peer_validator_addresses[peer_id]
+            
             if peer_id in self.peers:
                 del self.peers[peer_id]
             if peer_id in self.peer_ips:
@@ -459,6 +515,8 @@ class P2PNetwork:
                 self.ip_connection_count[ip] = max(0, self.ip_connection_count[ip] - 1)
             if peer_id in self.peer_public_keys:
                 del self.peer_public_keys[peer_id]
+            if peer_id in self.peer_last_seen:
+                del self.peer_last_seen[peer_id]
     
     async def handle_message(self, message: str, peer_id: str, websocket):
         """
@@ -516,12 +574,26 @@ class P2PNetwork:
             if message_public_key:
                 self.peer_public_keys[peer_id] = message_public_key
             
+            # LIVENESS FIX: Track validator last seen on ANY incoming message
+            # This ensures we have accurate P2P liveness for explorer display
+            if peer_id in self.peer_validator_addresses:
+                validator_addr = self.peer_validator_addresses[peer_id]
+                self.update_validator_last_seen(validator_addr)
+            
             # Process authenticated message
             if message_type == "announce_node":
                 device_id = data.get("device_id")
+                reward_address = data.get("reward_address")
+                
+                if reward_address:
+                    self.peer_validator_addresses[peer_id] = reward_address
+                    self.peer_last_seen[peer_id] = time.time()
+                    # LIVENESS FIX: Also track by validator address (thread-safe)
+                    self.update_validator_last_seen(reward_address)
+                
                 if device_id and device_id not in self.known_device_ids:
                     self.known_device_ids.add(device_id)
-                    print(f"🤝 P2P: Completed handshake with peer {peer_id[:8]}... (device: {device_id[:16]}...)")
+                    print(f"🤝 P2P: Completed handshake with peer {peer_id[:8]}... (device: {device_id[:16]}..., validator: {reward_address[:16] if reward_address else 'N/A'}...)")
             
             elif message_type == "peer_list":
                 peers = data.get("peers", [])

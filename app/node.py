@@ -370,9 +370,12 @@ class Node:
         """
         Get real-time liveness status for all validators based on P2P state.
         
+        LIVENESS FIX: Uses P2P._validator_last_seen (keyed by validator address)
+        instead of consensus.last_seen for accurate P2P-based liveness detection.
+        
         A validator is ONLINE if ALL conditions are met:
         1. P2P peer connection exists for that validator
-        2. Last message received within LIVENESS_TIMEOUT_SECONDS
+        2. Last message received within LIVENESS_TIMEOUT_SECONDS (from _validator_last_seen)
         3. This node's sync_state == HEALTHY (for self)
         
         Returns:
@@ -389,10 +392,8 @@ class Node:
         current_time = time.time()
         liveness = {}
         
-        connected_peer_addresses = set()
-        for peer_id in self.p2p.peers:
-            if peer_id in self.p2p.peer_validator_addresses:
-                connected_peer_addresses.add(self.p2p.peer_validator_addresses[peer_id])
+        # Get set of currently connected validator addresses from P2P
+        connected_peer_addresses = set(self.p2p.peer_validator_addresses.values())
         
         for address, validator_data in self.ledger.validator_registry.items():
             if address == "genesis":
@@ -404,16 +405,19 @@ class Node:
             if validator_data.get('status') not in ('active', 'genesis'):
                 continue
             
-            last_seen = self.consensus.last_seen.get(address, 0)
+            # LIVENESS FIX: Use thread-safe API to get validator last seen
+            last_seen = self.p2p.get_validator_last_seen(address)
             is_peer_connected = address in connected_peer_addresses
             time_since_seen = current_time - last_seen if last_seen > 0 else float('inf')
             
             if address == self.reward_address:
+                # Self: online if our sync_state is HEALTHY
                 is_online = self.sync_state == NodeSyncState.HEALTHY
                 last_seen = current_time
                 sync_state = self.sync_state.value
             else:
-                is_online = is_peer_connected and time_since_seen < LIVENESS_TIMEOUT_SECONDS
+                # Others: online if peer connected AND seen recently
+                is_online = is_peer_connected and time_since_seen <= LIVENESS_TIMEOUT_SECONDS
                 sync_state = "unknown"
             
             liveness[address] = {
@@ -1071,6 +1075,9 @@ class Node:
                 self.consensus.set_validator_set(checkpoint_validators)
                 self.consensus.update_node_activity(proposer_address)
                 
+                # LIVENESS FIX: Also update P2P liveness tracker for block proposer (thread-safe)
+                self.p2p.update_validator_last_seen(proposer_address)
+                
                 for tx in block.transactions:
                     self.mempool.remove_transaction(tx.tx_hash)
             elif latest and block.height > latest.height + 1:
@@ -1085,6 +1092,8 @@ class Node:
             reward_address = data.get("reward_address")
             if reward_address:
                 self.consensus.update_node_activity(reward_address)
+                # LIVENESS FIX: Also update P2P liveness tracker for announcing validator (thread-safe)
+                self.p2p.update_validator_last_seen(reward_address)
         except Exception:
             pass
     
@@ -1309,6 +1318,10 @@ class Node:
                 self.consensus.set_validator_set(checkpoint_validators)
             
             self.consensus.update_node_activity(self.reward_address)
+            # LIVENESS FIX: Update P2P liveness tracker for self ONLY when HEALTHY
+            # This prevents non-deterministic telemetry writes during sync/catch-up
+            if self.sync_state == NodeSyncState.HEALTHY:
+                self.p2p.update_validator_last_seen(self.reward_address)
             
             latest_block = self.ledger.get_latest_block()
             if not latest_block:
@@ -1712,23 +1725,25 @@ class Node:
             # Matches EXACTLY the validation logic used by block validators
             valid_txs, total_fees, temp_balances, temp_nonces = self.select_valid_transactions(next_height)
             
-            # TIMPAL PHILOSOPHY: ALL ONLINE VALIDATORS RECEIVE EQUAL BLOCK REWARDS
+            # NO-FORK v4: ACTIVE VALIDATORS RECEIVE EQUAL BLOCK REWARDS
             # 
-            # DETERMINISTIC LIVENESS: Uses ONLY on-chain data (no P2P state):
-            # 1. Recent block proposers (last N blocks)
-            # 2. Newly registered validators (grace period)
-            # 3. Attestation holders (epoch-based liveness proof)
+            # DETERMINISTIC ACTIVE SET: Uses ONLY ledger data (no P2P state):
+            # - Active = proposed at least one block in last ACTIVE_VALIDATOR_WINDOW blocks
+            # - This is 100% deterministic - all nodes compute the SAME set
+            # - Offline validators automatically drop from active set after N blocks
+            # - Returning validators re-enter active set when they propose again
             #
-            # This ensures ALL NODES compute the SAME set of online validators
+            # This ensures ALL NODES compute the SAME set of active validators
             # → same reward_allocations → same block hash → NO FORKS
-            active_validators = self.ledger.get_online_validators_deterministic(next_height)
+            active_validators_set = self.ledger.get_active_validators(next_height)
+            active_validators = sorted(list(active_validators_set))
             
             # SAFETY: If no validators detected (bootstrap), credit proposer to avoid lost coins
             if not active_validators:
-                print(f"🔧 BOOTSTRAP: No on-chain liveness yet, crediting proposer")
+                print(f"🔧 BOOTSTRAP: No active validators yet, crediting proposer")
                 active_validators = [self.reward_address]
             
-            print(f"💰 Equal rewards to {len(active_validators)} online validators (deterministic)")
+            print(f"💰 Equal rewards to {len(active_validators)} ACTIVE validators (ledger-based)")
             rewards, total_reward_pals, block_reward_pals = self.reward_calculator.calculate_reward(
                 active_validators, 
                 total_fees, 
