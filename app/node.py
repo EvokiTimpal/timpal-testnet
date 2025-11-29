@@ -281,19 +281,98 @@ class Node:
         self.sync_state = NodeSyncState.HEALTHY
         self.synced = True  # Sync with legacy flag
     
+    # ================================================================
+    # SOLO/MULTI VALIDATOR MODE DETECTION
+    # ================================================================
+    # These helpers determine whether strict NO-FORK rules apply
+    
+    def _get_registered_validators_from_state(self) -> list:
+        """
+        Returns list of REGISTERED validator addresses from on-chain state.
+        
+        "Registered" means:
+        - In validator_registry
+        - Status is 'active' or 'genesis' (not exited/slashed)
+        
+        NOTE: This does NOT check liveness/attestations. It only checks
+        the registry. This is intentional for SOLO mode detection:
+        - If only 1 validator is REGISTERED, solo mode applies
+        - Liveness checks are for reward distribution, not fork prevention
+        
+        This uses ONLY on-chain data for determinism across all nodes.
+        """
+        registered = []
+        for addr, data in self.ledger.validator_registry.items():
+            if addr == "genesis":
+                continue
+            if isinstance(data, dict) and data.get('status') in ('active', 'genesis'):
+                registered.append(addr)
+            elif isinstance(data, str):
+                registered.append(addr)
+        return sorted(registered)
+    
+    def _is_solo_active_validator(self) -> bool:
+        """
+        Returns True if and only if:
+        - There is exactly 1 REGISTERED validator in the registry, AND
+        - That validator address == this node's reward_address
+        
+        When True, the node can continue producing blocks even with 0 peers,
+        because there is no other validator to fork against.
+        
+        NOTE: Uses REGISTERED count (not online/active liveness count)
+        because solo mode is about fork prevention, not reward distribution.
+        """
+        registered_validators = self._get_registered_validators_from_state()
+        
+        if len(registered_validators) != 1:
+            return False
+        
+        return registered_validators[0] == self.reward_address
+    
+    def _get_validator_mode(self) -> tuple:
+        """
+        Determine the current validator mode for NO-FORK logic.
+        
+        Returns:
+            (mode: str, registered_count: int, is_solo: bool)
+            
+        Modes:
+        - "SOLO": Exactly 1 REGISTERED validator, and it's us → peers not required
+        - "MULTI": 2+ REGISTERED validators → strict NO-FORK rules apply
+        - "BOOTSTRAP": 0 REGISTERED validators → treated as solo (pre-genesis edge case)
+        
+        NOTE: Uses REGISTERED count (not liveness) because:
+        - If 2 validators are REGISTERED, both could produce blocks → need strict rules
+        - If only 1 is REGISTERED, no one else can fork → solo mode safe
+        """
+        registered_validators = self._get_registered_validators_from_state()
+        registered_count = len(registered_validators)
+        is_solo = (registered_count == 1 and registered_validators[0] == self.reward_address)
+        
+        if registered_count == 0:
+            return ("BOOTSTRAP", 0, True)
+        elif registered_count == 1 and is_solo:
+            return ("SOLO", 1, True)
+        else:
+            return ("MULTI", registered_count, False)
+    
     def can_propose_block(self, next_height: int = None) -> bool:
         """
-        SINGLE AUTHORITY GATE FOR BLOCK PRODUCTION.
+        SINGLE AUTHORITY GATE FOR BLOCK PRODUCTION (MODE-AWARE).
         
-        NO-FORK GUARANTEE: A node can propose a block ONLY if ALL conditions are true:
-        1. sync_state == HEALTHY
-        2. synced == True
-        3. _last_verified_network_height is not None
-        4. _last_verified_network_height == local_height (CRITICAL!)
-        5. len(peers) > 0 (except bootstrap nodes)
+        This gate is now aware of SOLO vs MULTI validator mode:
         
-        If ANY condition is false → Block production BLOCKED.
-        This is the ONLY gate to block production. No other paths may bypass it.
+        SOLO VALIDATOR MODE (1 active validator, and it's us):
+        - Peers not required (we ARE the network)
+        - Network height verification relaxed (set to local if None)
+        - Can produce blocks even with 0 peers
+        
+        MULTI VALIDATOR MODE (2+ active validators):
+        - Strict NO-FORK rules apply
+        - MUST have peers > 0
+        - MUST have verified network height matching local height
+        - Any failure → OUT_OF_SYNC and block production BLOCKED
         
         Args:
             next_height: Optional height being proposed (for logging)
@@ -310,53 +389,82 @@ class Node:
         
         verified_height = self._last_verified_network_height
         
-        # CHECK 1: Peer availability (non-bootstrap nodes MUST have peers)
-        if not is_bootstrap and peer_count == 0:
-            print(f"[NO-FORK] SKIP: No peers (local={local_height}, peers=0)")
-            if self.sync_state != NodeSyncState.OUT_OF_SYNC:
-                self.mark_out_of_sync("No active P2P peers - network connectivity lost")
-            return False
+        mode, active_count, is_solo_mode = self._get_validator_mode()
         
-        # CHECK 2: Sync state must be HEALTHY
+        if mode == "BOOTSTRAP":
+            if not hasattr(self, '_logged_bootstrap_mode'):
+                print(f"[NO-FORK] WARN: active_validator_count=0, treating as bootstrap mode.")
+                self._logged_bootstrap_mode = True
+        
+        if is_solo_mode:
+            if not hasattr(self, '_logged_solo_mode') or self._logged_solo_mode != local_height:
+                print(f"[NO-FORK] SOLO VALIDATOR MODE: validator_count={active_count}, "
+                      f"address={self.reward_address[:20]}...")
+                print(f"   Block production allowed even with 0 peers.")
+                self._logged_solo_mode = local_height
+            
+            if verified_height is None:
+                self._last_verified_network_height = local_height
+                verified_height = local_height
+            
+            if self.sync_state != NodeSyncState.HEALTHY:
+                self.sync_state = NodeSyncState.HEALTHY
+                self.synced = True
+            
+            if not self.synced:
+                self.synced = True
+        else:
+            if not is_bootstrap and peer_count == 0:
+                print(f"[NO-FORK] ABORT: multi-validator mode requires peers>0. "
+                      f"local_height={local_height}, verified_height={verified_height}, "
+                      f"peers={peer_count}, active_validators={active_count}")
+                self._last_verified_network_height = None
+                if self.sync_state != NodeSyncState.OUT_OF_SYNC:
+                    self.mark_out_of_sync("No active P2P peers in multi-validator mode")
+                return False
+            
+            if verified_height is None and not is_bootstrap:
+                print(f"[NO-FORK] ABORT: Network height not verified in multi-validator mode. "
+                      f"local_height={local_height}, peers={peer_count}, "
+                      f"active_validators={active_count}")
+                return False
+            
+            if not is_bootstrap and verified_height is not None:
+                if verified_height != local_height:
+                    print(f"[NO-FORK] ABORT: height mismatch in multi-validator mode. "
+                          f"local={local_height}, verified={verified_height}, "
+                          f"peers={peer_count}, active_validators={active_count}")
+                    self._last_verified_network_height = None
+                    self.mark_out_of_sync(f"Height mismatch: verified={verified_height} != local={local_height}")
+                    return False
+        
         if self.sync_state != NodeSyncState.HEALTHY:
             print(f"[NO-FORK] SKIP: state={self.sync_state.value} (not HEALTHY)")
             return False
         
-        # CHECK 3: Synced flag must be True
         if not self.synced:
             print(f"[NO-FORK] SKIP: synced=False (local={local_height})")
             return False
-        
-        # CHECK 4: Network height must have been verified
-        if verified_height is None and not is_bootstrap:
-            print(f"[NO-FORK] SKIP: Network height not verified (local={local_height})")
-            return False
-        
-        # CHECK 5 (CRITICAL): Verified height MUST MATCH local height
-        # This prevents producing blocks when we haven't verified the CURRENT height
-        if not is_bootstrap and verified_height is not None:
-            if verified_height != local_height:
-                print(f"[NO-FORK] SKIP: Height mismatch! verified={verified_height}, local={local_height}")
-                self.mark_out_of_sync(f"Verified height {verified_height} != local height {local_height}")
-                return False
         
         return True
     
     def is_eligible_proposer(self) -> bool:
         """
-        Check if this node should be considered as a proposer candidate.
+        Check if this node should be considered as a proposer candidate (MODE-AWARE).
         
         NO-FORK GUARANTEE: Nodes that are not fully synced should NOT be
         included in the proposer selection, even for their own VRF calculation.
         
         This MUST be the FIRST check before any VRF/proposer selection logic.
         
-        All conditions must be true:
-        1. sync_state == HEALTHY
-        2. synced == True
-        3. _last_verified_network_height is not None
-        4. _last_verified_network_height == local_height
-        5. peers > 0 (except bootstrap)
+        SOLO VALIDATOR MODE:
+        - Peers not required (we ARE the network)
+        - Always eligible if local ledger is consistent
+        
+        MULTI VALIDATOR MODE:
+        - Strict NO-FORK rules apply
+        - MUST have peers > 0
+        - MUST have verified height matching local height
         
         Returns:
             True if node can be considered for proposer selection
@@ -370,23 +478,33 @@ class Node:
         
         verified_height = self._last_verified_network_height
         
-        # CHECK 1: Peers required (non-bootstrap)
+        mode, active_count, is_solo_mode = self._get_validator_mode()
+        
+        if is_solo_mode:
+            if verified_height is None:
+                self._last_verified_network_height = local_height
+            
+            if self.sync_state != NodeSyncState.HEALTHY:
+                self.sync_state = NodeSyncState.HEALTHY
+                self.synced = True
+            
+            if not self.synced:
+                self.synced = True
+            
+            return True
+        
         if not is_bootstrap and peer_count == 0:
             return False
         
-        # CHECK 2: Sync state must be HEALTHY
         if self.sync_state != NodeSyncState.HEALTHY:
             return False
         
-        # CHECK 3: Synced flag must be True
         if not self.synced:
             return False
         
-        # CHECK 4: Network height must be verified
         if verified_height is None and not is_bootstrap:
             return False
         
-        # CHECK 5 (CRITICAL): Verified height MUST MATCH local height
         if not is_bootstrap and verified_height is not None:
             if verified_height != local_height:
                 return False
@@ -1249,82 +1367,100 @@ class Node:
             print(f"✅ Rank {my_rank} proposer - it's my window, creating block for slot {current_slot}...")
             
             # ================================================================
-            # RULE 6: ABSOLUTE FORK PROTECTION CHECK
+            # RULE 6: ABSOLUTE FORK PROTECTION CHECK (MODE-AWARE)
             # ================================================================
             # FRESH re-verification of network state IMMEDIATELY before block creation
             # This is the FINAL safety gate - catches any connectivity changes
+            #
+            # SOLO VALIDATOR MODE: Skip remote height checks (we ARE the network)
+            # MULTI VALIDATOR MODE: Strict verification required
             
             pre_block_peer_count = self.p2p.get_peer_count()
             pre_block_local_height = self.ledger.get_block_count() - 1
             is_bootstrap_check = (len(self.p2p.seed_nodes) == 0)
             
-            # RULE 6a: If peers dropped to 0, ABORT immediately
-            if not is_bootstrap_check and pre_block_peer_count == 0:
-                print(f"[NO-FORK] ABORT: Peers dropped to 0! Cannot verify network state")
-                self._last_verified_network_height = None  # CRITICAL: Invalidate verified height
-                self.mark_out_of_sync("Peers dropped to 0 - cannot verify network state")
-                continue
+            mode, active_count, is_solo_mode = self._get_validator_mode()
             
-            # RULE 6b: Fresh network height verification
-            pre_block_peer_height = await self._get_best_peer_height()
-            
-            # If we can't get peer height, ABORT (except bootstrap)
-            if pre_block_peer_height is None and not is_bootstrap_check:
-                print(f"[NO-FORK] ABORT: Cannot fetch network height - connectivity lost")
-                self._last_verified_network_height = None  # CRITICAL: Invalidate verified height
-                self.mark_out_of_sync("Cannot fetch network height - connectivity lost")
-                continue
-            
-            # RULE 6c: Height comparison checks
-            if not is_bootstrap_check and pre_block_peer_height is not None:
-                if pre_block_local_height < pre_block_peer_height:
-                    # Node is BEHIND - STOP and sync
-                    print(f"[NO-FORK] ABORT: Behind network! local={pre_block_local_height}, network={pre_block_peer_height}")
-                    self._last_verified_network_height = None  # CRITICAL: Invalidate
-                    self.mark_out_of_sync(f"Behind network: local={pre_block_local_height} < network={pre_block_peer_height}")
-                    continue
-                    
-                if pre_block_local_height > pre_block_peer_height:
-                    # Node is AHEAD - potential fork - STOP immediately
-                    print(f"[NO-FORK] ABORT: Ahead of network! local={pre_block_local_height}, network={pre_block_peer_height}")
-                    self._last_verified_network_height = None  # CRITICAL: Invalidate
-                    self.mark_out_of_sync(f"Ahead of network (fork?): local={pre_block_local_height} > network={pre_block_peer_height}")
+            if is_solo_mode:
+                if not hasattr(self, '_logged_solo_rule6') or self._logged_solo_rule6 != pre_block_local_height:
+                    print(f"[NO-FORK] SOLO VALIDATOR MODE ENABLED at height {pre_block_local_height}, "
+                          f"validator_count={active_count}, peers={pre_block_peer_count}.")
+                    self._logged_solo_rule6 = pre_block_local_height
+                
+                self._last_verified_network_height = pre_block_local_height
+                if self.sync_state != NodeSyncState.HEALTHY:
+                    self.sync_state = NodeSyncState.HEALTHY
+                    self.synced = True
+            else:
+                if not is_bootstrap_check and pre_block_peer_count == 0:
+                    print(f"[NO-FORK] ABORT: multi-validator mode requires peers>0. "
+                          f"local_height={pre_block_local_height}, verified_height={self._last_verified_network_height}, "
+                          f"peers={pre_block_peer_count}, active_validators={active_count}")
+                    self._last_verified_network_height = None
+                    self.mark_out_of_sync("Peers dropped to 0 in multi-validator mode")
                     continue
                 
-                # Heights match! Update verified height to CURRENT height
-                self._last_verified_network_height = pre_block_local_height
+                pre_block_peer_height = await self._get_best_peer_height()
+                
+                if pre_block_peer_height is None and not is_bootstrap_check:
+                    print(f"[NO-FORK] ABORT: Cannot fetch network height in multi-validator mode. "
+                          f"local_height={pre_block_local_height}, peers={pre_block_peer_count}, "
+                          f"active_validators={active_count}")
+                    self._last_verified_network_height = None
+                    self.mark_out_of_sync("Cannot fetch network height in multi-validator mode")
+                    continue
+                
+                if not is_bootstrap_check and pre_block_peer_height is not None:
+                    if pre_block_local_height < pre_block_peer_height:
+                        print(f"[NO-FORK] ABORT: Behind network in multi-validator mode! "
+                              f"local={pre_block_local_height}, network={pre_block_peer_height}, "
+                              f"peers={pre_block_peer_count}, active_validators={active_count}")
+                        self._last_verified_network_height = None
+                        self.mark_out_of_sync(f"Behind network: local={pre_block_local_height} < network={pre_block_peer_height}")
+                        continue
+                        
+                    if pre_block_local_height > pre_block_peer_height:
+                        print(f"[NO-FORK] ABORT: Ahead of network in multi-validator mode! "
+                              f"local={pre_block_local_height}, network={pre_block_peer_height}, "
+                              f"peers={pre_block_peer_count}, active_validators={active_count}")
+                        self._last_verified_network_height = None
+                        self.mark_out_of_sync(f"Ahead of network (fork?): local={pre_block_local_height} > network={pre_block_peer_height}")
+                        continue
+                    
+                    self._last_verified_network_height = pre_block_local_height
             
             # ================================================================
-            # RULE 7: TRIPLE GATE - FINAL PROTECTION BEFORE SEALING
+            # RULE 7: TRIPLE GATE - FINAL PROTECTION BEFORE SEALING (MODE-AWARE)
             # ================================================================
-            # All three conditions MUST be true right before creating the block
-            if not (self.synced and 
-                    self.sync_state == NodeSyncState.HEALTHY and
-                    (is_bootstrap_check or self._last_verified_network_height == pre_block_local_height)):
-                print(f"[NO-FORK] ABORT: Triple gate failed!")
-                print(f"   synced={self.synced}, state={self.sync_state.value}")
-                print(f"   verified_height={self._last_verified_network_height}, local={pre_block_local_height}")
-                self._last_verified_network_height = None  # CRITICAL: Invalidate
-                self.mark_out_of_sync("Triple gate check failed before block creation")
-                continue
+            if is_solo_mode:
+                pass
+            else:
+                if not (self.synced and 
+                        self.sync_state == NodeSyncState.HEALTHY and
+                        (is_bootstrap_check or self._last_verified_network_height == pre_block_local_height)):
+                    print(f"[NO-FORK] ABORT: Triple gate failed in multi-validator mode!")
+                    print(f"   synced={self.synced}, state={self.sync_state.value}")
+                    print(f"   verified_height={self._last_verified_network_height}, local={pre_block_local_height}")
+                    print(f"   peers={pre_block_peer_count}, active_validators={active_count}")
+                    self._last_verified_network_height = None
+                    self.mark_out_of_sync("Triple gate check failed in multi-validator mode")
+                    continue
             
             # ================================================================
-            # RULE 8: FINAL CAN_PROPOSE_BLOCK() RECHECK
+            # RULE 8: FINAL CAN_PROPOSE_BLOCK() RECHECK (MODE-AWARE)
             # ================================================================
-            # After all verification, re-run can_propose_block() one final time
-            # This catches any state changes that occurred during async operations
             if not self.can_propose_block(next_height):
                 print(f"[NO-FORK] ABORT: Final can_propose_block() failed after verification")
                 continue
             
-            # ABSOLUTE FINAL PEER CHECK: One last peer count before sealing
-            # This catches WiFi drops that occurred during async operations above
-            final_peer_count = self.p2p.get_peer_count()
-            if not is_bootstrap_check and final_peer_count == 0:
-                print(f"[NO-FORK] ABORT: Peers dropped to 0 during block preparation!")
-                self._last_verified_network_height = None
-                self.mark_out_of_sync("Peers dropped during block preparation")
-                continue
+            if not is_solo_mode and not is_bootstrap_check:
+                final_peer_count = self.p2p.get_peer_count()
+                if final_peer_count == 0:
+                    print(f"[NO-FORK] ABORT: Peers dropped to 0 during block preparation in multi-validator mode! "
+                          f"local_height={pre_block_local_height}, active_validators={active_count}")
+                    self._last_verified_network_height = None
+                    self.mark_out_of_sync("Peers dropped during block preparation in multi-validator mode")
+                    continue
             
             # SELECT VALID TRANSACTIONS: Uses strict nonce ordering to prevent forks
             # This is the SINGLE SOURCE OF TRUTH for transaction selection
