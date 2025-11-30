@@ -498,9 +498,19 @@ class Node:
         This is the AUTHORITATIVE height that all nodes must agree on.
         Used for pre-block validation to prevent forks.
         
+        SOLO MODE: Returns local height (we ARE the canonical chain)
+        MULTI MODE: Queries peers/seeds for canonical height
+        
         Returns:
-            Canonical height from network, or None if network unreachable
+            Canonical height from network, or None if network unreachable (MULTI mode only)
         """
+        local_height = self.ledger.get_block_count() - 1
+        
+        mode, effective_count, is_solo = self._get_validator_mode()
+        
+        if is_solo:
+            return local_height
+        
         try:
             for seed in self.p2p.seed_nodes:
                 if seed.startswith('ws://'):
@@ -536,7 +546,6 @@ class Node:
             return None
         
         if len(peer_heights) == 1:
-            local_height = self.ledger.get_block_count() - 1
             peer_height = peer_heights[0]
             if abs(peer_height - local_height) <= 1:
                 return max(local_height, peer_height)
