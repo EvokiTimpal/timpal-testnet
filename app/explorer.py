@@ -335,7 +335,7 @@ async def root(request: Request):
     
     liveness_data = get_validator_liveness()
     current_time = time.time()
-    ONLINE_THRESHOLD_SECONDS = 5
+    ONLINE_THRESHOLD_SECONDS = 1  # IMMEDIATE OFFLINE: 1 second threshold
     
     if liveness_data and liveness_data.get('validators'):
         online_count = 0
@@ -1677,7 +1677,7 @@ async def get_validators(request: Request):
     realtime_validators = liveness_data.get('validators', {})
     current_height = ledger.get_block_count() - 1
     current_time = time.time()
-    ONLINE_THRESHOLD_SECONDS = 5
+    ONLINE_THRESHOLD_SECONDS = 1  # IMMEDIATE OFFLINE: 1 second threshold
     
     active_validator_set = ledger.get_active_validators(current_height)
     

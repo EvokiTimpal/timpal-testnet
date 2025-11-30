@@ -186,6 +186,31 @@ class P2PNetwork:
         """
         return dict(self._validator_last_seen)
     
+    def clear_stale_liveness(self, threshold_seconds: float = 1.0):
+        """
+        IMMEDIATE OFFLINE: Remove validators from liveness map if stale.
+        
+        This ensures:
+        - Offline validators disappear from liveness map within 1 second
+        - Explorer shows OFFLINE immediately
+        - SOLO/MULTI mode transitions happen instantly
+        
+        Args:
+            threshold_seconds: Stale threshold (default 1 second for immediate detection)
+        """
+        now = time.time()
+        stale_validators = []
+        
+        for addr, last_seen in list(self._validator_last_seen.items()):
+            if now - last_seen > threshold_seconds:
+                stale_validators.append(addr)
+        
+        for addr in stale_validators:
+            del self._validator_last_seen[addr]
+        
+        if stale_validators:
+            print(f"🧹 LIVENESS: Cleared {len(stale_validators)} stale validator(s) from liveness map")
+    
     # ============================================================
     # PEER REPUTATION SYSTEM
     # P2P-only feature - does NOT affect consensus

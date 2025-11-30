@@ -485,12 +485,17 @@ class Node:
         """
         Background task that updates validator liveness file every second.
         
+        IMMEDIATE OFFLINE: Also clears stale liveness entries (>1 second old)
+        This ensures offline validators disappear from explorer within 1 second.
+        
         The explorer reads this file to show real-time ACTIVE/OFFLINE status.
         """
         print(f"📊 Starting validator liveness tracking (updates every 1s)")
+        print(f"   IMMEDIATE OFFLINE: Stale entries cleared after 1 second")
         
         while self.is_running:
             try:
+                self.p2p.clear_stale_liveness(threshold_seconds=1.0)
                 self.write_validator_liveness_file()
                 await asyncio.sleep(1)
             except Exception as e:

@@ -19,10 +19,11 @@ from app.historical_state import (
 from app.sqlite_historical_storage import SQLiteHistoricalStorage
 import config
 
-# ACTIVE VALIDATOR WINDOW: Number of blocks to look back for active validator determination
-# A validator is considered ACTIVE if they proposed at least one block in this window
-# This is used for DETERMINISTIC reward distribution (ledger-based, not P2P)
-ACTIVE_VALIDATOR_WINDOW = 100
+# IMMEDIATE OFFLINE: Active validator = ONLY the last block proposer
+# This ensures offline validators are immediately removed from rewards
+# Old: ACTIVE_VALIDATOR_WINDOW = 100 (validators active in last 100 blocks)
+# New: ACTIVE = last block proposer ONLY (immediate offline detection)
+ACTIVE_VALIDATOR_WINDOW = 1  # IMMEDIATE: Only last block proposer is ACTIVE
 
 
 class Ledger:
@@ -1688,22 +1689,22 @@ class Ledger:
 
     def get_active_validators(self, current_height: int = None) -> Set[str]:
         """
-        Return a DETERMINISTIC set of validator addresses considered ACTIVE,
-        based on the last ACTIVE_VALIDATOR_WINDOW blocks.
+        IMMEDIATE OFFLINE: Return ONLY the last block proposer as ACTIVE.
         
-        NO-FORK v4: Active validators are determined PURELY from ledger data:
-        - A validator is ACTIVE if they proposed at least one block in the last N blocks
-        - This is 100% deterministic - all nodes compute the same set
-        - NO P2P liveness data is used here
+        This ensures:
+        - Offline validators are immediately removed from rewards
+        - Only the last block proposer is considered ACTIVE
+        - Rewards go 100% to the active proposer
+        - NO 100-block window delays
         
         Args:
             current_height: Current blockchain height (defaults to latest block height)
             
         Returns:
-            Set of validator addresses who proposed blocks in the active window
+            Set containing ONLY the last block proposer (immediate offline detection)
             
         Edge cases:
-        - At low heights with no block history: returns all registered validators
+        - At height 0 or no blocks: returns first registered validator
         - Solo validator mode: returns that single validator
         """
         max_existing_height = len(self.blocks) - 1
@@ -1717,37 +1718,24 @@ class Ledger:
         if current_height > max_existing_height:
             current_height = max_existing_height
         
-        active_proposers: Set[str] = set()
-        
-        if max_existing_height < 0:
-            pass
-        else:
-            start_height = max(0, current_height - ACTIVE_VALIDATOR_WINDOW + 1)
-            
-            for height in range(start_height, current_height + 1):
-                block = self.blocks[height]
-                if hasattr(block, 'proposer') and block.proposer:
-                    if block.proposer in self.validator_registry:
-                        active_proposers.add(block.proposer)
+        # IMMEDIATE OFFLINE: Only the LAST block proposer is ACTIVE
+        if max_existing_height >= 0 and current_height >= 0:
+            last_block = self.blocks[current_height]
+            if hasattr(last_block, 'proposer') and last_block.proposer:
+                if last_block.proposer in self.validator_registry:
+                    return {last_block.proposer}
         
         # EDGE CASE: No block history yet (startup/bootstrap)
-        # Fall back to all registered validators to avoid division by zero
-        if not active_proposers:
-            all_registered = set()
-            for addr, data in self.validator_registry.items():
-                if addr == "genesis":
-                    continue
-                if isinstance(data, dict) and data.get('status') in ('active', 'genesis'):
-                    all_registered.add(addr)
-                elif isinstance(data, str):
-                    # Legacy registry format
-                    all_registered.add(addr)
-            
-            if all_registered:
-                return all_registered
+        # Fall back to first registered validator
+        for addr, data in self.validator_registry.items():
+            if addr == "genesis":
+                continue
+            if isinstance(data, dict) and data.get('status') in ('active', 'genesis'):
+                return {addr}
+            elif isinstance(data, str):
+                return {addr}
         
         # SOLO VALIDATOR MODE: If only 1 registered validator, return it
-        # (even if they haven't proposed yet)
         registered_count = 0
         single_validator = None
         for addr, data in self.validator_registry.items():
@@ -1763,7 +1751,7 @@ class Ledger:
         if registered_count == 1 and single_validator:
             return {single_validator}
         
-        return active_proposers
+        return set()
 
     def get_online_validators_deterministic(self, current_height: int) -> list:
         """
