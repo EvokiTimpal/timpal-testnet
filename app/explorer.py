@@ -1882,10 +1882,31 @@ async def stream(request: Request):
                     # Count only real TMPL transfer transactions (exclude heartbeats and registrations)
                     total_transactions = sum(1 for block in ledger.blocks for tx in block.transactions if tx.tx_type == "transfer")
                     
+                    # Calculate validator counts for homepage display
+                    registered_count = sum(1 for addr in ledger.validator_registry if addr != "genesis")
+                    active_validator_set = ledger.get_active_validators(current_height)
+                    active_count = len(active_validator_set)
+                    
+                    # Get real-time online count from liveness data
+                    liveness_data = get_validator_liveness()
+                    current_time = time.time()
+                    ONLINE_THRESHOLD_SECONDS = 1  # IMMEDIATE OFFLINE: 1 second threshold
+                    
+                    if liveness_data and liveness_data.get('validators'):
+                        online_count = 0
+                        for addr, v_data in liveness_data.get('validators', {}).items():
+                            last_seen = v_data.get('last_seen', 0)
+                            if last_seen > 0 and (current_time - last_seen) <= ONLINE_THRESHOLD_SECONDS:
+                                online_count += 1
+                    else:
+                        online_count = 0
+                    
                     data = {
                         "latest_block": current_height,
                         "total_supply_tmpl": format_pals(ledger.total_emitted_pals),
-                        "validator_count": ledger.get_validator_count(),
+                        "online_count": online_count,
+                        "active_count": active_count,
+                        "registered_count": registered_count,
                         "total_transactions": total_transactions,
                         "timestamp": time.time()
                     }

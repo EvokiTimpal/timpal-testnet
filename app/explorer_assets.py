@@ -378,10 +378,14 @@ def get_live_updates_script():
                 supplyElement.textContent = data.total_supply_tmpl;
             }
             
-            // Update validator count
+            // Update validator count (Online / Active / Registered format)
             const validatorElement = document.getElementById('live-validator-count');
-            if (validatorElement && data.validator_count) {
-                validatorElement.textContent = data.validator_count;
+            if (validatorElement) {
+                if (data.online_count !== undefined && data.active_count !== undefined && data.registered_count !== undefined) {
+                    validatorElement.textContent = data.online_count + '/' + data.active_count + '/' + data.registered_count;
+                } else if (data.validator_count) {
+                    validatorElement.textContent = data.validator_count;
+                }
             }
             
             // Update transaction count
