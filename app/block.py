@@ -14,7 +14,8 @@ class Block:
                  proposer_signature: Optional[str] = None,
                  block_hash: Optional[str] = None,
                  slot: Optional[int] = None,
-                 rank: int = 0):
+                 rank: int = 0,
+                 heartbeats: Optional[List[Transaction]] = None):
         self.height = height
         self.timestamp = timestamp
         self.transactions = transactions
@@ -22,6 +23,13 @@ class Block:
         self.proposer = proposer
         self.reward = reward
         self.reward_allocations = reward_allocations or {}
+        
+        # DEDICATED HEARTBEATS SECTION: Separate from transactions for mainnet scaling
+        # Heartbeats are validator liveness proofs - they never compete with regular transactions
+        # Each validator can have exactly ONE heartbeat per block (prevents spam)
+        # With 100K validators, this scales without impacting transaction throughput
+        self.heartbeats = heartbeats or []
+        
         self.merkle_root = merkle_root or self.calculate_merkle_root()
         self.proposer_signature = proposer_signature
         
@@ -34,12 +42,15 @@ class Block:
         self.block_hash = block_hash or self.calculate_hash()
     
     def calculate_merkle_root(self) -> str:
-        if not self.transactions:
+        # CRITICAL SECURITY: Recalculate all hashes to detect tampering
+        # Don't use cached tx.tx_hash - always compute fresh from transaction data
+        # Combine transactions AND heartbeats in merkle tree (heartbeats are part of block commitment)
+        all_items = self.transactions + (self.heartbeats if self.heartbeats else [])
+        
+        if not all_items:
             return hashlib.sha256(b"").hexdigest()
         
-        # CRITICAL SECURITY: Recalculate transaction hashes to detect tampering
-        # Don't use cached tx.tx_hash - always compute fresh from transaction data
-        tx_hashes = [tx.calculate_hash() for tx in self.transactions]
+        tx_hashes = [tx.calculate_hash() for tx in all_items]
         
         while len(tx_hashes) > 1:
             if len(tx_hashes) % 2 != 0:
@@ -104,6 +115,7 @@ class Block:
             "height": self.height,
             "timestamp": self.timestamp,
             "transactions": [tx.to_dict() for tx in self.transactions],
+            "heartbeats": [hb.to_dict() for hb in self.heartbeats] if self.heartbeats else [],
             "previous_hash": self.previous_hash,
             "proposer": self.proposer,
             "reward": self.reward,
@@ -118,6 +130,8 @@ class Block:
     @classmethod
     def from_dict(cls, data: dict):
         transactions = [Transaction.from_dict(tx) for tx in data["transactions"]]
+        # Deserialize heartbeats (backward compatible - empty list if not present)
+        heartbeats = [Transaction.from_dict(hb) for hb in data.get("heartbeats", [])]
         return cls(
             height=data["height"],
             timestamp=data["timestamp"],
@@ -130,7 +144,8 @@ class Block:
             proposer_signature=data.get("proposer_signature"),
             block_hash=data.get("block_hash"),
             slot=data.get("slot"),
-            rank=data.get("rank", 0)
+            rank=data.get("rank", 0),
+            heartbeats=heartbeats
         )
     
     @classmethod

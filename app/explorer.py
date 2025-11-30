@@ -79,21 +79,28 @@ def get_validator_liveness() -> dict:
     
     import glob
     
-    node_dirs = glob.glob("testnet_data_node_*/")
-    for node_dir in sorted(node_dirs, key=lambda x: os.path.getmtime(x), reverse=True):
-        liveness_path = os.path.join(node_dir, VALIDATOR_LIVENESS_FILE)
-        if os.path.exists(liveness_path):
-            try:
-                with open(liveness_path, 'r') as f:
-                    data = json.load(f)
-                
-                file_age = current_time - data.get('timestamp', 0)
-                if file_age < 10:
-                    _liveness_cache = data
-                    _liveness_cache_time = current_time
-                    return data
-            except Exception:
-                pass
+    # Try multiple possible locations for the liveness file
+    search_paths = [
+        "validator_liveness.json",  # Current directory
+        "testnet_data_node_*/validator_liveness.json",  # Inside node data dirs
+    ]
+    
+    for pattern in search_paths:
+        matches = glob.glob(pattern)
+        for liveness_path in sorted(matches, key=lambda x: os.path.getmtime(x) if os.path.exists(x) else 0, reverse=True):
+            if os.path.exists(liveness_path):
+                try:
+                    with open(liveness_path, 'r') as f:
+                        data = json.load(f)
+                    
+                    file_age = current_time - data.get('timestamp', 0)
+                    # Accept files up to 60 seconds old (more lenient for explorer running separately)
+                    if file_age < 60:
+                        _liveness_cache = data
+                        _liveness_cache_time = current_time
+                        return data
+                except Exception:
+                    pass
     
     _liveness_cache = {}
     _liveness_cache_time = current_time
@@ -325,28 +332,14 @@ async def root(request: Request):
     total_supply = ledger.total_emitted_pals
     current_height = ledger.get_block_count() - 1
     
-    registered_count = 0
-    for addr in ledger.validator_registry:
-        if addr != "genesis":
-            registered_count += 1
+    # REGISTERED: Count all validators in registry (excluding genesis placeholder)
+    registered_count = sum(1 for addr in ledger.validator_registry if addr != "genesis")
     
+    # ONLINE: Use heartbeat-based detection (same as reward eligibility)
+    # Validators with heartbeats in last 2 blocks are considered ONLINE
+    # This matches get_active_validators() logic for reward distribution
     active_validator_set = ledger.get_active_validators(current_height)
-    active_count = len(active_validator_set)
-    
-    liveness_data = get_validator_liveness()
-    current_time = time.time()
-    ONLINE_THRESHOLD_SECONDS = 1  # IMMEDIATE OFFLINE: 1 second threshold
-    
-    if liveness_data and liveness_data.get('validators'):
-        online_count = 0
-        for addr, v_data in liveness_data.get('validators', {}).items():
-            last_seen = v_data.get('last_seen', 0)
-            if last_seen > 0 and (current_time - last_seen) <= ONLINE_THRESHOLD_SECONDS:
-                online_count += 1
-        liveness_source = "p2p_realtime"
-    else:
-        online_count = 0
-        liveness_source = "unavailable"
+    online_count = len(active_validator_set)
     
     tx_stats = get_transaction_stats(ledger, hide_legacy=True)
     total_transactions = tx_stats['total']
@@ -398,8 +391,8 @@ async def root(request: Request):
             </div>
             <div class="stat-card">
                 <div class="stat-label">Validators</div>
-                <div class="stat-value" id="live-validator-count">{online_count}/{active_count}/{registered_count}</div>
-                <div class="stat-trend">🌐 Online / Active / Registered</div>
+                <div class="stat-value" id="live-validator-count">{online_count}/{registered_count}</div>
+                <div class="stat-trend">🌐 Online / Registered</div>
             </div>
             <div class="stat-card">
                 <div class="stat-label">TMPL Transfers</div>
@@ -1882,30 +1875,17 @@ async def stream(request: Request):
                     # Count only real TMPL transfer transactions (exclude heartbeats and registrations)
                     total_transactions = sum(1 for block in ledger.blocks for tx in block.transactions if tx.tx_type == "transfer")
                     
-                    # Calculate validator counts for homepage display
+                    # REGISTERED: Count all validators in registry
                     registered_count = sum(1 for addr in ledger.validator_registry if addr != "genesis")
+                    
+                    # ONLINE: Use heartbeat-based detection (same as reward eligibility)
                     active_validator_set = ledger.get_active_validators(current_height)
-                    active_count = len(active_validator_set)
-                    
-                    # Get real-time online count from liveness data
-                    liveness_data = get_validator_liveness()
-                    current_time = time.time()
-                    ONLINE_THRESHOLD_SECONDS = 1  # IMMEDIATE OFFLINE: 1 second threshold
-                    
-                    if liveness_data and liveness_data.get('validators'):
-                        online_count = 0
-                        for addr, v_data in liveness_data.get('validators', {}).items():
-                            last_seen = v_data.get('last_seen', 0)
-                            if last_seen > 0 and (current_time - last_seen) <= ONLINE_THRESHOLD_SECONDS:
-                                online_count += 1
-                    else:
-                        online_count = 0
+                    online_count = len(active_validator_set)
                     
                     data = {
                         "latest_block": current_height,
                         "total_supply_tmpl": format_pals(ledger.total_emitted_pals),
                         "online_count": online_count,
-                        "active_count": active_count,
                         "registered_count": registered_count,
                         "total_transactions": total_transactions,
                         "timestamp": time.time()

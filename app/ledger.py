@@ -1691,21 +1691,23 @@ class Ledger:
         """
         IMMEDIATE OFFLINE: Return ONLY the last block proposer as ACTIVE.
         
+        TIMPAL FUNDAMENTAL RULE: ALL ONLINE validators receive EQUAL rewards.
+        
+        ONLINE = validators who sent heartbeat transactions in the last 2 blocks.
         This ensures:
-        - Offline validators are immediately removed from rewards
-        - Only the last block proposer is considered ACTIVE
-        - Rewards go 100% to the active proposer
-        - NO 100-block window delays
+        - Immediate offline detection (miss 1 block = lose rewards in next block)
+        - Equal reward distribution among ALL online validators
+        - Deterministic calculation (heartbeats are on-chain, not P2P)
         
         Args:
             current_height: Current blockchain height (defaults to latest block height)
             
         Returns:
-            Set containing ONLY the last block proposer (immediate offline detection)
+            Set of validators with heartbeats in the last 2 blocks
             
         Edge cases:
-        - At height 0 or no blocks: returns first registered validator
-        - Solo validator mode: returns that single validator
+        - At height 0 or no blocks: returns all registered validators (bootstrap)
+        - No heartbeats found: falls back to last block proposer
         """
         max_existing_height = len(self.blocks) - 1
         
@@ -1718,38 +1720,51 @@ class Ledger:
         if current_height > max_existing_height:
             current_height = max_existing_height
         
-        # IMMEDIATE OFFLINE: Only the LAST block proposer is ACTIVE
+        # HEARTBEAT-BASED LIVENESS: Check last 2 blocks for heartbeats
+        # 2 blocks = ~6 seconds with 3-second block time
+        # MAINNET-READY: Heartbeats are in dedicated block.heartbeats section
+        HEARTBEAT_LOOKBACK = 2
+        validators_with_heartbeats = set()
+        
+        start_block = max(0, current_height - HEARTBEAT_LOOKBACK + 1)
+        for height in range(start_block, current_height + 1):
+            if height < len(self.blocks):
+                block = self.blocks[height]
+                # MAINNET-READY: Read from dedicated heartbeats section
+                # (Backward compatible: also check transactions for old blocks)
+                if hasattr(block, 'heartbeats') and block.heartbeats:
+                    for hb in block.heartbeats:
+                        if hb.sender in self.validator_registry:
+                            validators_with_heartbeats.add(hb.sender)
+                # Backward compatibility: check transactions for old blocks without heartbeats section
+                for tx in block.transactions:
+                    if tx.tx_type == "validator_heartbeat":
+                        if tx.sender in self.validator_registry:
+                            validators_with_heartbeats.add(tx.sender)
+        
+        # If we found validators with heartbeats, use them
+        if validators_with_heartbeats:
+            return validators_with_heartbeats
+        
+        # FALLBACK 1: Use last block proposer (they're obviously online)
         if max_existing_height >= 0 and current_height >= 0:
             last_block = self.blocks[current_height]
             if hasattr(last_block, 'proposer') and last_block.proposer:
                 if last_block.proposer in self.validator_registry:
                     return {last_block.proposer}
         
-        # EDGE CASE: No block history yet (startup/bootstrap)
-        # Fall back to first registered validator
+        # FALLBACK 2: Bootstrap - return all registered validators
+        all_validators = set()
         for addr, data in self.validator_registry.items():
             if addr == "genesis":
                 continue
             if isinstance(data, dict) and data.get('status') in ('active', 'genesis'):
-                return {addr}
+                all_validators.add(addr)
             elif isinstance(data, str):
-                return {addr}
+                all_validators.add(addr)
         
-        # SOLO VALIDATOR MODE: If only 1 registered validator, return it
-        registered_count = 0
-        single_validator = None
-        for addr, data in self.validator_registry.items():
-            if addr == "genesis":
-                continue
-            if isinstance(data, dict) and data.get('status') in ('active', 'genesis'):
-                registered_count += 1
-                single_validator = addr
-            elif isinstance(data, str):
-                registered_count += 1
-                single_validator = addr
-        
-        if registered_count == 1 and single_validator:
-            return {single_validator}
+        if all_validators:
+            return all_validators
         
         return set()
 

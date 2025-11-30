@@ -1242,6 +1242,12 @@ class Node:
         Select ONLY valid transactions for block production.
         Ensures correct nonce order and prevents invalid blocks.
         
+        MAINNET-READY ARCHITECTURE:
+        - Heartbeats are collected SEPARATELY from regular transactions
+        - They go into block.heartbeats (dedicated section, unlimited)
+        - Regular transactions go into block.transactions (limited by block size)
+        - This prevents heartbeat flooding from blocking real transactions
+        
         This is the SINGLE SOURCE OF TRUTH for transaction selection.
         Both block production and block validation use the same rules.
         
@@ -1250,21 +1256,39 @@ class Node:
             max_txs: Maximum number of transactions to consider
             
         Returns:
-            Tuple of (valid_txs, total_fees, temp_balances, temp_nonces)
+            Tuple of (valid_txs, heartbeats, total_fees, temp_balances, temp_nonces)
+            - valid_txs: Regular transactions (transfers, registrations, attestations)
+            - heartbeats: Validator heartbeat transactions (go in dedicated section)
             CALLER MUST USE temp_nonces for subsequent operations!
         """
         pending_txs = self.mempool.get_pending_transactions(max_txs)
         
         valid_txs = []
+        heartbeats = []  # DEDICATED: Heartbeats collected separately for mainnet scaling
         total_fees = 0
         temp_balances = {addr: bal for addr, bal in self.ledger.balances.items()}
         temp_nonces = {addr: nonce for addr, nonce in self.ledger.nonces.items()}
+        
+        # Track which validators already have a heartbeat in this block (1 per validator max)
+        heartbeat_senders = set()
         
         # Collect stale txs to remove AFTER iteration (safe removal)
         stale_tx_hashes = []
         
         for tx in pending_txs:
             sender = tx.sender
+            
+            # DEDICATED HEARTBEAT HANDLING: Separate from regular transactions
+            # Each validator can have at most 1 heartbeat per block (prevents spam)
+            if tx.tx_type == "validator_heartbeat":
+                if sender not in heartbeat_senders:
+                    # Validate heartbeat (must be from registered validator)
+                    if sender in self.ledger.validator_registry and tx.verify():
+                        heartbeats.append(tx)
+                        heartbeat_senders.add(sender)
+                # Always remove heartbeat from mempool after processing (used or duplicate)
+                stale_tx_hashes.append(tx.tx_hash)
+                continue
             
             # CRITICAL: Skip expired epoch attestations to prevent block rejection
             if tx.tx_type == "epoch_attestation":
@@ -1276,7 +1300,7 @@ class Node:
                     continue
             
             # NONCE VALIDATION: Only for regular transfers (not validator ops)
-            is_transfer = tx.tx_type not in ("validator_registration", "validator_heartbeat", "epoch_attestation")
+            is_transfer = tx.tx_type not in ("validator_registration", "epoch_attestation")
             
             if is_transfer:
                 # Get expected nonce for this sender (from temp_nonces to track in-block progression)
@@ -1319,7 +1343,7 @@ class Node:
         for tx_hash in stale_tx_hashes:
             self.mempool.remove_transaction(tx_hash)
         
-        return valid_txs, total_fees, temp_balances, temp_nonces
+        return valid_txs, heartbeats, total_fees, temp_balances, temp_nonces
     
     async def mine_blocks(self):
         while self.is_running:
@@ -1766,7 +1790,8 @@ class Node:
             # SELECT VALID TRANSACTIONS: Uses strict nonce ordering to prevent forks
             # This is the SINGLE SOURCE OF TRUTH for transaction selection
             # Matches EXACTLY the validation logic used by block validators
-            valid_txs, total_fees, temp_balances, temp_nonces = self.select_valid_transactions(next_height)
+            # MAINNET-READY: Returns heartbeats separately from regular transactions
+            valid_txs, heartbeats, total_fees, temp_balances, temp_nonces = self.select_valid_transactions(next_height)
             
             # NO-FORK v4: ACTIVE VALIDATORS RECEIVE EQUAL BLOCK REWARDS
             # 
@@ -1845,7 +1870,8 @@ class Node:
                 reward=block_reward_pals,  # Only newly minted coins, NOT fees
                 reward_allocations=rewards,
                 slot=current_slot,
-                rank=my_rank
+                rank=my_rank,
+                heartbeats=heartbeats  # MAINNET-READY: Dedicated heartbeat section (separate from transactions)
             )
             
             if self.private_key:
@@ -1865,10 +1891,12 @@ class Node:
             # CRITICAL: Log block creation so we can track chain progression
             print(f"✅ Block {new_block.height} (slot {current_slot}) created and added to ledger")
             print(f"   Proposer: {self.reward_address[:20]}...")
-            print(f"   Transactions: {len(valid_txs)}, Reward: {total_reward_pals / 100_000_000:.8f} TMPL")
+            print(f"   Transactions: {len(valid_txs)}, Heartbeats: {len(heartbeats)}, Reward: {total_reward_pals / 100_000_000:.8f} TMPL")
             
+            # Remove included transactions from mempool
             for tx in valid_txs:
                 self.mempool.remove_transaction(tx.tx_hash)
+            # Heartbeats already removed during selection (stale_tx_hashes)
             
             broadcast_data: Dict[str, Any] = {"block": new_block.to_dict()}
             if self.public_key:
@@ -1889,16 +1917,42 @@ class Node:
     
     async def send_heartbeats(self):
         """
-        DEPRECATED: Heartbeat transactions are disabled to prevent mempool flooding.
+        Send heartbeat transactions to prove validator is online.
         
-        PROBLEM: With 100K+ validators sending heartbeats every 2 seconds, mempool would be
-        flooded with millions of heartbeats, blocking ALL user money transfers from blocks.
+        REWARD ELIGIBILITY: Only validators with heartbeats in the last 2 blocks
+        receive rewards. This ensures:
+        1. Immediate offline detection (miss 1 block = lose rewards)
+        2. Equal reward distribution among ALL online validators
+        3. Deterministic calculation (on-chain heartbeats, not P2P)
         
-        SOLUTION: Use P2P announce_presence() for liveness tracking instead.
-        Validators announce via lightweight P2P messages, not blockchain transactions.
+        NOTE: For mainnet with 100K+ validators, this will be replaced with
+        attestation committees. For testnet with small validator sets, this is fine.
         """
-        # DISABLED: Do not send heartbeat transactions to mempool
-        return
+        from app.transaction import Transaction
+        
+        print(f"💓 Starting heartbeat loop (every {config.BLOCK_TIME}s)")
+        
+        while self.is_running:
+            try:
+                # Create and submit heartbeat transaction
+                heartbeat_tx = Transaction.create_validator_heartbeat(
+                    sender=self.reward_address,
+                    timestamp=time.time()
+                )
+                
+                # Sign the heartbeat
+                if self.private_key:
+                    heartbeat_tx.sign(self.private_key)
+                
+                # Submit to mempool
+                if self.mempool.add_transaction(heartbeat_tx):
+                    print(f"💓 Heartbeat sent: {heartbeat_tx.tx_hash[:16]}...")
+                
+            except Exception as e:
+                print(f"⚠️  Heartbeat error: {e}")
+            
+            # Send heartbeat every block time
+            await asyncio.sleep(config.BLOCK_TIME)
     
     async def send_epoch_attestations(self):
         """
