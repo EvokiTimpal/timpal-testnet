@@ -340,16 +340,17 @@ class Node:
         Determine the current validator mode for NO-FORK logic.
         
         Returns:
-            (mode: str, validator_count: int, is_solo: bool)
+            (mode: str, online_count: int, is_solo: bool)
             
         Modes:
-        - "SOLO": <= 1 online OR active validator → peers not required
-        - "MULTI": 2+ online/active validators → strict NO-FORK rules apply
+        - "SOLO": <= 1 ONLINE validator → peers not required, continue producing
+        - "MULTI": 2+ ONLINE validators → strict NO-FORK rules apply
         - "BOOTSTRAP": 0 REGISTERED validators → treated as solo (pre-genesis edge case)
         
-        NOTE: Uses ONLINE or ACTIVE count (not just registered) because:
-        - If only 1 validator is actually online/active, solo mode is safe
-        - Even if multiple are registered, if only 1 is participating, no fork risk
+        CRITICAL: Uses ONLINE_COUNT as PRIMARY indicator (not active or registered):
+        - If only 1 validator is actually online, SOLO mode is safe
+        - Even if 2+ are registered/active in ledger, if only 1 is online, no fork risk
+        - active_validators is still used for rewards, but NOT for mode detection
         """
         registered_validators = self._get_registered_validators_from_state()
         registered_count = len(registered_validators)
@@ -357,25 +358,30 @@ class Node:
         if registered_count == 0:
             return ("BOOTSTRAP", 0, True)
         
-        current_height = self.ledger.get_block_count() - 1
-        active_validators = self.ledger.get_active_validators(current_height)
-        active_count = len(active_validators)
-        
         online_count = 0
         liveness = self.get_real_time_validator_liveness()
         for addr, info in liveness.items():
             if info.get('status') == 'online':
                 online_count += 1
         
-        effective_count = max(online_count, active_count)
+        is_us_online = self.reward_address in [
+            addr for addr, info in liveness.items() 
+            if info.get('status') == 'online'
+        ]
         
-        is_us_active = self.reward_address in active_validators or active_count == 0
-        is_solo = (effective_count <= 1 and is_us_active)
-        
-        if effective_count <= 1 and is_solo:
-            return ("SOLO", effective_count, True)
+        if online_count <= 1:
+            if online_count == 0:
+                is_solo = (registered_count == 1 and 
+                           registered_validators[0] == self.reward_address)
+            else:
+                is_solo = is_us_online
+            
+            if is_solo:
+                return ("SOLO", online_count, True)
+            else:
+                return ("MULTI", online_count, False)
         else:
-            return ("MULTI", effective_count, False)
+            return ("MULTI", online_count, False)
     
     # ================================================================
     # VALIDATOR LIVENESS TRACKING (for Explorer real-time display)
