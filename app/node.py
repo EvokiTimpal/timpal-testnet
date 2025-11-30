@@ -340,27 +340,42 @@ class Node:
         Determine the current validator mode for NO-FORK logic.
         
         Returns:
-            (mode: str, registered_count: int, is_solo: bool)
+            (mode: str, validator_count: int, is_solo: bool)
             
         Modes:
-        - "SOLO": Exactly 1 REGISTERED validator, and it's us → peers not required
-        - "MULTI": 2+ REGISTERED validators → strict NO-FORK rules apply
+        - "SOLO": <= 1 online OR active validator → peers not required
+        - "MULTI": 2+ online/active validators → strict NO-FORK rules apply
         - "BOOTSTRAP": 0 REGISTERED validators → treated as solo (pre-genesis edge case)
         
-        NOTE: Uses REGISTERED count (not liveness) because:
-        - If 2 validators are REGISTERED, both could produce blocks → need strict rules
-        - If only 1 is REGISTERED, no one else can fork → solo mode safe
+        NOTE: Uses ONLINE or ACTIVE count (not just registered) because:
+        - If only 1 validator is actually online/active, solo mode is safe
+        - Even if multiple are registered, if only 1 is participating, no fork risk
         """
         registered_validators = self._get_registered_validators_from_state()
         registered_count = len(registered_validators)
-        is_solo = (registered_count == 1 and registered_validators[0] == self.reward_address)
         
         if registered_count == 0:
             return ("BOOTSTRAP", 0, True)
-        elif registered_count == 1 and is_solo:
-            return ("SOLO", 1, True)
+        
+        current_height = self.ledger.get_block_count() - 1
+        active_validators = self.ledger.get_active_validators(current_height)
+        active_count = len(active_validators)
+        
+        online_count = 0
+        liveness = self.get_real_time_validator_liveness()
+        for addr, info in liveness.items():
+            if info.get('status') == 'online':
+                online_count += 1
+        
+        effective_count = max(online_count, active_count)
+        
+        is_us_active = self.reward_address in active_validators or active_count == 0
+        is_solo = (effective_count <= 1 and is_us_active)
+        
+        if effective_count <= 1 and is_solo:
+            return ("SOLO", effective_count, True)
         else:
-            return ("MULTI", registered_count, False)
+            return ("MULTI", effective_count, False)
     
     # ================================================================
     # VALIDATOR LIVENESS TRACKING (for Explorer real-time display)
@@ -519,6 +534,14 @@ class Node:
         
         if not peer_heights:
             return None
+        
+        if len(peer_heights) == 1:
+            local_height = self.ledger.get_block_count() - 1
+            peer_height = peer_heights[0]
+            if abs(peer_height - local_height) <= 1:
+                return max(local_height, peer_height)
+            else:
+                return None
         
         return max(peer_heights)
     
