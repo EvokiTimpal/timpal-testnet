@@ -699,10 +699,14 @@ class Ledger:
                     old_balance = self.balances.get(node_address, 0)
                     self.balances[node_address] = old_balance + reward_amount
                     total_rewards_credited += reward_amount
-                    # DEBUG: Log reward crediting
-                    print(f"💰 REWARD CREDITED: {node_address[:20]}... +{reward_amount} pals (balance: {old_balance} → {self.balances[node_address]})")
+                    # DEBUG: Log reward crediting (display in tTMPL, not pals)
+                    reward_tmpl = reward_amount / 100_000_000
+                    old_tmpl = old_balance / 100_000_000
+                    new_tmpl = self.balances[node_address] / 100_000_000
+                    print(f"💰 REWARD CREDITED: {node_address[:20]}... +{reward_tmpl:.8f} tTMPL (balance: {old_tmpl:,.8f} → {new_tmpl:,.8f} tTMPL)")
             if total_rewards_credited > 0:
-                print(f"✅ Block {block.height}: {total_rewards_credited} pals credited to {len(block.reward_allocations)} validators")
+                total_tmpl = total_rewards_credited / 100_000_000
+                print(f"✅ Block {block.height}: {total_tmpl:.8f} tTMPL credited to {len(block.reward_allocations)} validators")
         
         # CRITICAL FAIRNESS: Redistribute slashed coins to honest validators
         # Slashed coins (from double-signing, invalid blocks) are distributed
