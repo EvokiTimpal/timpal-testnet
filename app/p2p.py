@@ -111,7 +111,9 @@ class P2PNetwork:
             return False
     
     async def handle_client(self, websocket, path: str = ""):
+        print(f"🔔 P2P: handle_client called - new connection attempt")
         peer_ip = self._get_peer_ip(websocket)
+        print(f"🔔 P2P: Peer IP detected as: {peer_ip}")
         
         if self._is_ip_rate_limited(peer_ip):
             print(f"🚫 P2P: Rejected incoming connection from {peer_ip} - rate limited or banned")
@@ -517,7 +519,9 @@ class P2PNetwork:
                     asyncio.create_task(self.connect_to_peer(seed_node))
     
     async def start_server(self):
+        print(f"🌐 P2P: Starting WebSocket server on 0.0.0.0:{self.port}...")
         async with websockets.serve(self.handle_client, "0.0.0.0", self.port):
+            print(f"✅ P2P: WebSocket server listening on port {self.port}")
             await asyncio.Future()
     
     def get_peer_count(self) -> int:
