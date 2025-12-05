@@ -1,4 +1,4 @@
-from typing import List, Dict
+from typing import List, Dict, Optional
 from app.transaction import Transaction
 from collections import defaultdict
 import time
@@ -13,6 +13,19 @@ class Mempool:
         self.max_total_tx = max_total_tx
     
     def add_transaction(self, tx: Transaction) -> bool:
+        """
+        Add transaction to mempool.
+        
+        CRITICAL: Only "transfer" transactions belong in the mempool.
+        Other transaction types (validator_registration, heartbeat, attestation, etc.)
+        are handled directly by their respective systems and should NOT be counted
+        as pending transactions.
+        """
+        # ONLY accept transfer transactions in mempool
+        # Validator registrations, heartbeats, attestations are NOT transactions
+        if tx.tx_type != "transfer":
+            return False  # Silently reject non-transfer transactions
+        
         if tx.tx_hash in self.pending_transactions:
             return False
         
@@ -67,7 +80,7 @@ class Mempool:
         self.tx_count_by_address.clear()
         self.pending_nonces.clear()
     
-    def get_transaction(self, tx_hash: str) -> Transaction:
+    def get_transaction(self, tx_hash: str) -> Optional[Transaction]:
         return self.pending_transactions.get(tx_hash)
     
     def size(self) -> int:
