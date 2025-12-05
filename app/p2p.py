@@ -204,9 +204,12 @@ class P2PNetwork:
                         asyncio.create_task(self.connect_to_peer(peer_addr))
             
             elif message_type == "sync_request":
+                print(f"📨 P2P: Received sync_request from peer {peer_id[:8]}...")
                 if self.sync_handler:
                     # CRITICAL FIX: Pass websocket directly for reliable sync responses
                     await self.sync_handler(data, peer_id, websocket)
+                else:
+                    print(f"⚠️  P2P: No sync_handler registered, cannot respond to sync_request")
             
             if message_type in self.message_handlers:
                 handler = self.message_handlers[message_type]
@@ -258,6 +261,10 @@ class P2PNetwork:
         
         message_data["signature"] = signature
         message = json.dumps(message_data)
+        
+        # DEBUG: Log sync_request broadcasts
+        if message_type == "sync_request":
+            print(f"📤 P2P: Broadcasting sync_request to {len(self.peers)} inbound + {len(self.outbound_peers)} outbound peers")
         
         # CRITICAL FIX: Create snapshot to prevent "dictionary changed size during iteration"
         # Other tasks can add/remove peers concurrently, so we need a stable copy
