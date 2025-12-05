@@ -1,0 +1,30 @@
+# TIMPAL Genesis Requirements (100% Cross-Platform)
+# Works identically on macOS, Windows, Linux, Docker, and Replit
+# NO system dependencies, NO C++ compilation required
+
+# Web frameworks
+fastapi
+python-multipart
+uvicorn[standard]
+aiohttp>=3.9.0
+
+# Core dependencies
+pydantic
+sqlalchemy
+ecdsa
+websockets
+jinja2
+cryptography
+slowapi
+pytest
+pytest-asyncio
+
+# BIP-39 wallet dependencies (v2 wallet system)
+bip-utils>=2.9.3
+argon2-cffi>=23.1.0
+
+# Wallet CLI dependencies
+requests
+
+# NOTE: TIMPAL Genesis uses pure-Python JSON storage
+# No LevelDB, no plyvel, no lmdb, no binary wheels needed!
