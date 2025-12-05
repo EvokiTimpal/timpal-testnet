@@ -531,6 +531,12 @@ class Node:
     
     async def mine_blocks(self):
         while self.is_running:
+            # ANTI-FORK: Wait for sync to complete before mining
+            # This prevents nodes from creating blocks on wrong chain
+            if not self.synced and self.ledger.get_block_count() == 0:
+                await asyncio.sleep(1.0)
+                continue
+            
             # SCHEDULED BLOCK TIME: Calculate exact scheduled time for next block
             # This prevents clock skew between validators from causing 4-6s gaps
             # All validators agree on scheduled_time = parent.timestamp + BLOCK_TIME
@@ -1405,19 +1411,19 @@ class Node:
     
     async def bootstrap_or_sync(self):
         """
-        Hybrid sync: HTTP batch sync + websocket real-time sync.
+        P2P WebSocket sync - syncs blockchain over WebSocket connection.
         
-        Based on Tendermint/Cosmos approach:
-        1. HTTP batch sync for initial catchup (reliable, fast)
-        2. Websocket sync for real-time updates once caught up
-        
-        This solves the websocket connection issues during initial sync.
+        CRITICAL ANTI-FORK RULE:
+        - Only nodes started with --genesis flag can create block 0
+        - All other nodes MUST sync from the network
+        - If sync fails but peers exist, wait and retry - NEVER fork
         """
         print("🔄 Starting blockchain sync...")
         
         # Check if we already have blocks (node restart scenario)
         if self.ledger.get_block_count() > 0:
             print(f"✅ Already have {self.ledger.get_block_count()} blocks, skipping sync")
+            self.synced = True
             return
         
         # Wait a moment for P2P connections to establish
@@ -1425,46 +1431,59 @@ class Node:
         
         # Check if we have any peers
         peer_count = self.p2p.get_peer_count()
+        
+        # GENESIS NODE: Only --genesis flag allows local genesis creation
+        if self.is_genesis_node:
+            if peer_count == 0:
+                print("🔥 GENESIS MODE: Creating genesis block (--genesis flag)")
+                genesis_block = Block.create_genesis_block(self.genesis_address, self.public_key)
+                self.ledger.add_block(genesis_block)
+                self.synced = True
+                return
+            else:
+                print("⚠️  GENESIS MODE but peers exist - syncing from network instead")
+        
+        # NETWORK NODE: Must sync from peers
         if peer_count == 0:
-            print("⚠️  No peers connected - creating genesis block (bootstrap node)")
-            genesis_block = Block.create_genesis_block(self.genesis_address, self.public_key)
-            self.ledger.add_block(genesis_block)
+            print("❌ ERROR: No peers connected and not a genesis node!")
+            print("   Cannot create genesis block without --genesis flag")
+            print("   Please check seed node is running and try again")
+            # Do NOT create genesis - wait for peers
             return
         
-        print(f"📡 Connected to {peer_count} peer(s), starting HTTP batch sync...")
+        print(f"📡 Connected to {peer_count} peer(s), requesting blockchain via P2P...")
         
-        # Build HTTP URLs for seed nodes (assuming HTTP port = P2P port + 1)
-        peer_http_urls = []
-        print(f"🔍 Building HTTP URLs from {len(self.p2p.seed_nodes)} seed node(s)")
-        for seed in self.p2p.seed_nodes:
-            print(f"🔍 Seed node: {seed}")
-            # Convert ws://localhost:9000 -> http://localhost:9001
-            if seed.startswith('ws://'):
-                host_port = seed.replace('ws://', '').replace('/', '')
-                if ':' in host_port:
-                    host, port_str = host_port.rsplit(':', 1)
-                    try:
-                        http_port = int(port_str) + 1
-                        http_url = f"http://{host}:{http_port}"
-                        peer_http_urls.append(http_url)
-                        print(f"🔍 Generated HTTP URL: {http_url}")
-                    except ValueError:
-                        print(f"⚠️  Failed to parse port from {seed}")
+        # Request sync via P2P WebSocket (not HTTP!)
+        # The sync_request will trigger handle_sync_request on peers
+        # which sends blocks back via new_block messages
+        await self.p2p.broadcast("sync_request", {"current_height": 0})
         
-        print(f"🔍 Total HTTP URLs generated: {len(peer_http_urls)}")
+        # Wait for blocks to arrive via P2P
+        max_wait_seconds = 30
+        check_interval = 1
+        waited = 0
         
-        # Try HTTP batch sync first (Tendermint-style)
-        if peer_http_urls:
-            print(f"🔍 Starting HTTP batch sync with {len(peer_http_urls)} URL(s)")
-            sync_success = await self.http_batch_sync(peer_http_urls)
-            if sync_success:
-                print(f"✅ HTTP batch sync complete! Chain height: {self.ledger.get_block_count()}")
+        print(f"⏳ Waiting for blocks from peers (up to {max_wait_seconds}s)...")
+        
+        while waited < max_wait_seconds:
+            await asyncio.sleep(check_interval)
+            waited += check_interval
+            
+            block_count = self.ledger.get_block_count()
+            if block_count > 0:
+                print(f"✅ P2P sync successful! Received {block_count} blocks")
+                self.synced = True
                 return
+            
+            # Re-broadcast sync request every 10 seconds
+            if waited % 10 == 0 and waited > 0:
+                print(f"🔄 Re-requesting sync (waited {waited}s, have {block_count} blocks)...")
+                await self.p2p.broadcast("sync_request", {"current_height": 0})
         
-        # Fallback: Create genesis if HTTP sync failed
-        print("⚠️  HTTP batch sync failed - creating genesis block")
-        genesis_block = Block.create_genesis_block(self.genesis_address, self.public_key)
-        self.ledger.add_block(genesis_block)
+        # Sync timed out
+        print(f"⚠️  P2P sync timed out after {max_wait_seconds}s")
+        print("   Blocks may still arrive - node will continue running")
+        print("   If no blocks arrive, check seed node connectivity")
     
     
     async def start(self):

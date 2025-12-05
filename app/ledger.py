@@ -2130,7 +2130,9 @@ class Ledger:
                     v for v, val in self.validator_registry.items()
                     if isinstance(val, dict) and val.get('status') in ('active', 'genesis')
                 )
-                print(f"⚠️  No liveness data - using all {len(validators_for_selection)} registered (active|genesis) validators")
+                # Suppress spam: only log this warning once per 100 heights
+                if current_height % 100 == 0:
+                    print(f"⚠️  No liveness data - using all {len(validators_for_selection)} registered (active|genesis) validators")
         
         if not validators_for_selection:
             return None
