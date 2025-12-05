@@ -21,10 +21,11 @@ import config
 
 
 class Ledger:
-    def __init__(self, data_dir: str = "blockchain_data", use_production_storage: bool = False):
+    def __init__(self, data_dir: str = "blockchain_data", use_production_storage: bool = False, read_only: bool = False):
         self._closed = False
         self.data_dir = data_dir
         self.use_production_storage = use_production_storage
+        self.read_only = read_only  # Suppress reward warnings for read-only contexts (e.g., block explorer)
         self.production_storage = None
         self.crash_recovery = None
         
@@ -1602,6 +1603,12 @@ class Ledger:
         if not validators_with_attestations:
             # Throttle warning: Only log once per hour to reduce spam
             current_time = time.time()
+            
+            # Skip all warnings in read-only mode (e.g., block explorer)
+            if self.read_only:
+                # Read-only context doesn't distribute rewards, return all registered validators for display
+                return set(self.validator_registry.keys())
+            
             if current_time - self._last_attestation_warning > 3600:  # 3600 seconds = 1 hour
                 print(f"⚠️  WARNING: No epoch attestations found, using P2P connections for liveness")
                 self._last_attestation_warning = current_time
@@ -2910,8 +2917,9 @@ class Ledger:
                 # Update nonce
                 self.nonces[tx.sender] = tx.nonce
         
+        emitted_tmpl = self.total_emitted_pals / config.PALS_PER_TMPL
         print(f"✅ Financial state rebuilt: {len(self.balances)} accounts, "
-              f"{self.total_emitted_pals:,} pals emitted")
+              f"{emitted_tmpl:,.8f} {config.SYMBOL} emitted")
     
     def _rebuild_state_from_blocks(self):
         """
@@ -2976,9 +2984,10 @@ class Ledger:
             if final_height > 0 and final_height not in self.validator_set_checkpoints:
                 self.validator_set_checkpoints[final_height] = set(self.validator_registry.keys())
         
+        emitted_tmpl = self.total_emitted_pals / config.PALS_PER_TMPL
         print(f"✅ State rebuilt: {len(self.balances)} accounts, "
               f"{len(self.validator_registry)} validators, "
-              f"{self.total_emitted_pals:,} pals emitted")
+              f"{emitted_tmpl:,.8f} {config.SYMBOL} emitted")
     
     def _process_validator_registration_for_rebuild(self, tx, block_height: int):
         """

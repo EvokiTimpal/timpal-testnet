@@ -79,7 +79,7 @@ def get_ledger() -> Ledger:
     
     current_time = time.time()
     if _ledger_cache is None or (current_time - _ledger_cache_time) > CACHE_TTL:
-        _ledger_cache = Ledger(data_dir=data_dir, use_production_storage=True)
+        _ledger_cache = Ledger(data_dir=data_dir, use_production_storage=True, read_only=True)
         _ledger_cache_time = current_time
     
     return _ledger_cache
@@ -2707,7 +2707,8 @@ async def lifespan(app: FastAPI):
     else:
         print("❌ WARNING: Blockchain integrity check failed!")
     
-    print(f"📊 Loaded {len(ledger.blocks)} blocks, {ledger.total_emitted_pals:,} pals emitted")
+    emitted_tmpl = ledger.total_emitted_pals / config.PALS_PER_TMPL
+    print(f"📊 Loaded {len(ledger.blocks)} blocks, {emitted_tmpl:,.8f} {config.SYMBOL} emitted")
     print(f"🔒 Security: Rate limiting enabled, CORS restricted to localhost")
     print(f"⚡ Performance: Ledger caching enabled ({CACHE_TTL}s TTL)")
     yield
