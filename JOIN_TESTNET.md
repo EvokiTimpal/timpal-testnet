@@ -28,21 +28,17 @@ That's it - your node will automatically join the P2P network and start earning 
 
 # Network Architecture
 
-TIMPAL is a **truly decentralized** blockchain. There is no central server or VPS.
+TIMPAL is a **truly decentralized** blockchain.
 
 **How nodes connect:**
-- The first node to start becomes a seed node
-- Other nodes connect to any existing node
+- Validators connect to the seed node
 - Nodes discover each other through P2P gossip
-- Anyone can run a seed node
+- All online validators share block rewards equally
 
-**To start a new testnet:**
-1. First node starts with `--genesis` flag (creates the blockchain)
-2. Other nodes connect with `--seed ws://FIRST_NODE_IP:PORT`
-
-**To join an existing testnet:**
-- Get the seed node address from timpal.org or the community
-- Connect with `--seed ws://SEED_NODE_IP:PORT`
+**Seed Node URL:**
+```
+wss://ded033f6-a180-4051-b591-65aa6ed95235-00-20hfov2fbki2o.kirk.replit.dev
+```
 
 ---
 
@@ -118,16 +114,10 @@ python wallet_cli.py
 set TIMPAL_WALLET_PASSWORD=your_password_here
 ```
 
-**Option A: Start as the FIRST node (creates new testnet):**
+**Start your validator node (join the testnet):**
 ```cmd
-python run_testnet_node.py --port 9000 --genesis
+python run_testnet_node.py --port 3000 --seed wss://ded033f6-a180-4051-b591-65aa6ed95235-00-20hfov2fbki2o.kirk.replit.dev
 ```
-
-**Option B: Join an existing testnet:**
-```cmd
-python run_testnet_node.py --port 3000 --seed ws://SEED_NODE_IP:9000
-```
-(Replace `SEED_NODE_IP` with the IP address of an existing node)
 
 **IMPORTANT FOR WINDOWS:**
 - The `set` command only works in the current Command Prompt window
@@ -139,7 +129,7 @@ If you prefer PowerShell:
 
 ```powershell
 $env:TIMPAL_WALLET_PASSWORD="your_password_here"
-python run_testnet_node.py --port 3000 --seed ws://SEED_NODE_IP:9000
+python run_testnet_node.py --port 3000 --seed wss://ded033f6-a180-4051-b591-65aa6ed95235-00-20hfov2fbki2o.kirk.replit.dev
 ```
 
 ## Step 6: (Optional) Start the Block Explorer
@@ -240,22 +230,15 @@ You'll need to export it **every time** before starting the node.
 export TIMPAL_WALLET_PASSWORD="your_secure_password"
 ```
 
-**Option A: Start as the FIRST node (creates new testnet):**
+**Start your validator node (join the testnet):**
 ```bash
-python3 run_testnet_node.py --port 9000 --genesis
+python3 run_testnet_node.py --port 3000 --seed wss://ded033f6-a180-4051-b591-65aa6ed95235-00-20hfov2fbki2o.kirk.replit.dev
 ```
-
-**Option B: Join an existing testnet:**
-```bash
-python3 run_testnet_node.py --port 3000 --seed ws://SEED_NODE_IP:9000
-```
-(Replace `SEED_NODE_IP` with the IP address of an existing node)
 
 **Important:**
 - You **MUST** export your PASSWORD before running the node (every time)
 - Use the same password you chose when creating the wallet
 - `--port 3000` - Your local P2P port (can be any available port)
-- `--genesis` - Only use this flag for the FIRST node starting a new testnet
 
 Your node will:
 
@@ -291,7 +274,7 @@ Run the same command:
 
 ```bash
 export TIMPAL_WALLET_PASSWORD="your_password"
-python3 run_testnet_node.py --port 3000 --seed ws://SEED_NODE_IP:9000
+python3 run_testnet_node.py --port 3000 --seed wss://ded033f6-a180-4051-b591-65aa6ed95235-00-20hfov2fbki2o.kirk.replit.dev
 ```
 
 ---

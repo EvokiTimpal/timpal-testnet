@@ -63,12 +63,10 @@ Before the mainnet launches, you can join the TIMPAL testnet to:
 - Verify your node runs correctly on your hardware
 - Earn testnet TMPL (no real value, testing only)
 
-**⚠️ CRITICAL: Port 9000 is reserved for the bootstrap node only!**
-
 **How to Join:**
 
 ```bash
-# 1. Clone and install (same as mainnet)
+# 1. Clone and install
 git clone https://github.com/EvokiTimpal/timpal-testnet.git
 cd timpal-testnet
 pip install -r requirements.txt
@@ -76,21 +74,11 @@ pip install -r requirements.txt
 # 2. Create wallet
 python3 wallet_cli.py
 
-# 3. Start your node (connect to existing testnet or create new)
-# Option A: Start new testnet (genesis node)
-python3 run_testnet_node.py --port 9000 --genesis
-
-# Option B: Join existing testnet
-python3 run_testnet_node.py --port 8001 --seed ws://SEED_NODE_IP:9000
+# 3. Start your node (join the testnet)
+python3 run_testnet_node.py --port 3000 --seed wss://ded033f6-a180-4051-b591-65aa6ed95235-00-20hfov2fbki2o.kirk.replit.dev
 ```
 
-**Port Selection:**
-- Use `--genesis` flag only for the first node starting a new testnet
-- All other validators connect with `--seed ws://SEED_NODE_IP:PORT`
-
 **Full Instructions:** See **[JOIN_TESTNET.md](JOIN_TESTNET.md)** for complete step-by-step guide.
-
-**Important:** Always include `--seed` flag when joining an existing network or you will create a private chain!
 
 ### 🧭 Running the TIMPAL Block Explorer
 
@@ -107,10 +95,10 @@ When you run a blockchain node, it uses **TWO ports**:
 
 **Example:**
 ```bash
-# Node on port 8001 creates:
-# - P2P Network: port 8001 (talks to other nodes)
-# - HTTP API: port 8002 (explorer uses this)
-python run_testnet_node.py --port 8001 --seed ws://SEED_NODE_IP:9000
+# Node on port 3000 creates:
+# - P2P Network: port 3000 (talks to other nodes)
+# - HTTP API: port 3001 (explorer uses this)
+python run_testnet_node.py --port 3000 --seed wss://ded033f6-a180-4051-b591-65aa6ed95235-00-20hfov2fbki2o.kirk.replit.dev
 ```
 
 #### **Starting the Explorer**
