@@ -81,8 +81,8 @@ You should see Python 3.8+ and Git version numbers.
 
 ```cmd
 cd %USERPROFILE%\Desktop
-git clone https://github.com/EvokiTimpal/timpal-genesis.git
-cd timpal-genesis
+git clone https://github.com/EvokiTimpal/timpal-testnet.git
+cd timpal-testnet
 ```
 
 ## Step 3: Install Dependencies
@@ -147,7 +147,7 @@ python run_testnet_node.py --port 3000 --seed ws://SEED_NODE_IP:9000
 **In a NEW Command Prompt window:**
 
 ```cmd
-cd %USERPROFILE%\Desktop\timpal-genesis
+cd %USERPROFILE%\Desktop\timpal-testnet
 set EXPLORER_API_PORT=3001
 python start_explorer.py --port 8080
 ```
@@ -170,8 +170,8 @@ cd ~/Desktop
 
 **Then clone the repository:**
 ```bash
-git clone https://github.com/EvokiTimpal/timpal-genesis.git
-cd timpal-genesis
+git clone https://github.com/EvokiTimpal/timpal-testnet.git
+cd timpal-testnet
 ```
 
 ---
