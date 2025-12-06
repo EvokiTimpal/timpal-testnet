@@ -11,10 +11,10 @@ This guide shows **exactly** how to start a validator node on macOS, Windows, or
 1. Clone the TIMPAL Testnet repository  
 2. Install Python requirements  
 3. Create your validator wallet  
-4. Set your wallet PIN  
+4. Set your wallet password  
 5. Start your validator node  
 
-That's it - your node will automatically join the P2P network and start earning testnet rewards.
+That's it - your node will automatically join the P2P network, register as a validator, and start earning testnet rewards.
 
 ---
 
@@ -34,11 +34,26 @@ TIMPAL is a **truly decentralized** blockchain.
 - Validators connect to the seed node
 - Nodes discover each other through P2P gossip
 - All online validators share block rewards equally
+- Validator registration happens automatically on startup
 
-**Seed Node URL:**
+**Public Seed Node URL:**
 ```
-ws://172.56.209.250:9000
+ws://timpal.ddns.net:9000
 ```
+
+---
+
+# Quick Reference: All Commands
+
+| Action | Command |
+|--------|---------|
+| **Create wallet** | `python3 wallet_cli.py` |
+| **Join testnet** | `python3 run_testnet_node.py --port 9000 --seed ws://timpal.ddns.net:9000` |
+| **Start genesis node** | `python3 run_testnet_node.py --port 9000 --genesis` |
+| **Testing (multi-node)** | `python3 run_testnet_node.py --port 9000 --skip-device-check --seed ws://timpal.ddns.net:9000` |
+| **Check sync status** | `curl http://localhost:9001/api/blockchain/info` |
+| **Start explorer** | `EXPLORER_API_PORT=9001 python3 start_explorer.py --port 8080` |
+| **Check balance** | `python3 wallet_cli.py` (choose "Check balance") |
 
 ---
 
@@ -116,7 +131,7 @@ set TIMPAL_WALLET_PASSWORD=your_password_here
 
 **Start your validator node (join the testnet):**
 ```cmd
-python run_testnet_node.py --port 3000 --seed ws://172.56.209.250:9000
+python run_testnet_node.py --port 9000 --seed ws://timpal.ddns.net:9000
 ```
 
 **IMPORTANT FOR WINDOWS:**
@@ -129,7 +144,7 @@ If you prefer PowerShell:
 
 ```powershell
 $env:TIMPAL_WALLET_PASSWORD="your_password_here"
-python run_testnet_node.py --port 3000 --seed ws://172.56.209.250:9000
+python run_testnet_node.py --port 9000 --seed ws://timpal.ddns.net:9000
 ```
 
 ## Step 6: (Optional) Start the Block Explorer
@@ -138,7 +153,7 @@ python run_testnet_node.py --port 3000 --seed ws://172.56.209.250:9000
 
 ```cmd
 cd %USERPROFILE%\Desktop\timpal-testnet
-set EXPLORER_API_PORT=3001
+set EXPLORER_API_PORT=9001
 python start_explorer.py --port 8080
 ```
 
@@ -232,13 +247,14 @@ export TIMPAL_WALLET_PASSWORD="your_secure_password"
 
 **Start your validator node (join the testnet):**
 ```bash
-python3 run_testnet_node.py --port 3000 --seed ws://172.56.209.250:9000
+python3 run_testnet_node.py --port 9000 --seed ws://timpal.ddns.net:9000
 ```
 
 **Important:**
 - You **MUST** export your PASSWORD before running the node (every time)
 - Use the same password you chose when creating the wallet
-- `--port 3000` - Your local P2P port (can be any available port)
+- `--port 9000` - Your local P2P port (default, can be any available port)
+- `--seed` - Points to the public seed node for syncing
 
 Your node will:
 
@@ -274,8 +290,127 @@ Run the same command:
 
 ```bash
 export TIMPAL_WALLET_PASSWORD="your_password"
-python3 run_testnet_node.py --port 3000 --seed ws://172.56.209.250:9000
+python3 run_testnet_node.py --port 9000 --seed ws://timpal.ddns.net:9000
 ```
+
+---
+
+# Advanced Commands
+
+## Starting a Genesis Node
+
+The genesis node creates the initial blockchain. **Only use this if you're starting a brand new testnet** - not for joining an existing network.
+
+```bash
+export TIMPAL_WALLET_PASSWORD="your_password"
+python3 run_testnet_node.py --port 9000 --genesis
+```
+
+**Important:**
+- Only ONE genesis node should exist per network
+- Do NOT use `--genesis` when joining an existing testnet
+- Genesis nodes do NOT use `--seed` (they ARE the seed)
+
+---
+
+## Testing with Multiple Nodes (--skip-device-check)
+
+TIMPAL enforces **one validator per device** to prevent Sybil attacks. For testing purposes, you can run multiple nodes on the same machine using the `--skip-device-check` flag.
+
+**Start multiple test nodes on different ports:**
+```bash
+# Terminal 1 - First node
+export TIMPAL_WALLET_PASSWORD="your_password"
+python3 run_testnet_node.py --port 9000 --seed ws://timpal.ddns.net:9000 --skip-device-check
+
+# Terminal 2 - Second node (different port)
+export TIMPAL_WALLET_PASSWORD="your_password"
+python3 run_testnet_node.py --port 9002 --seed ws://timpal.ddns.net:9000 --skip-device-check
+
+# Terminal 3 - Third node (different port)
+export TIMPAL_WALLET_PASSWORD="your_password"
+python3 run_testnet_node.py --port 9004 --seed ws://timpal.ddns.net:9000 --skip-device-check
+```
+
+**Note:** Each node uses TWO ports:
+- P2P port: The `--port` value (e.g., 9000)
+- HTTP API port: P2P port + 1 (e.g., 9001)
+
+So if you run nodes on ports 9000, 9002, and 9004, their HTTP APIs will be on 9001, 9003, and 9005 respectively.
+
+---
+
+## Checking Sync Status
+
+Check if your node is synced with the network:
+
+```bash
+curl http://localhost:9001/api/blockchain/info
+```
+
+This returns JSON with:
+- `height` - Current block height
+- `latest_block_hash` - Hash of the latest block
+- `validator_count` - Number of registered validators
+
+**Example response:**
+```json
+{
+  "height": 1234,
+  "latest_block_hash": "abc123...",
+  "validator_count": 5,
+  "chain_id": "timpal-testnet"
+}
+```
+
+**Check health:**
+```bash
+curl http://localhost:9001/api/health
+```
+
+---
+
+## Connecting from Another Machine
+
+To connect to the TIMPAL testnet from any machine (local network or internet):
+
+**1. Use the public seed node:**
+```bash
+python3 run_testnet_node.py --port 9000 --seed ws://timpal.ddns.net:9000
+```
+
+**2. Port forwarding (for home networks):**
+
+If you want OTHER nodes to connect to YOUR node, you need to forward your P2P port:
+
+| Setting | Value |
+|---------|-------|
+| External Port | 9000 (or your chosen port) |
+| Internal Port | 9000 (same as external) |
+| Protocol | TCP |
+| Internal IP | Your computer's local IP |
+
+**3. Firewall configuration:**
+
+Make sure your firewall allows incoming connections on your P2P port:
+
+**Linux (ufw):**
+```bash
+sudo ufw allow 9000/tcp
+```
+
+**Windows:**
+- Windows Firewall will prompt you when you start the node
+- Click "Allow access" for both private and public networks
+
+**4. Verify connectivity:**
+
+After starting your node, check that it's connected to peers:
+```bash
+curl http://localhost:9001/api/health
+```
+
+Look for `"peers": X` where X > 0 indicates successful connections.
 
 ---
 
@@ -293,19 +428,12 @@ Your blockchain node creates **TWO ports**:
 
 | Component | Port | Purpose |
 |-----------|------|---------|
-| **P2P Network** | Your `--port` value (e.g., 3000) | Node-to-node blockchain communication |
-| **HTTP API** | Your port + 1 (e.g., 3001) | Explorer connects here for data |
+| **P2P Network** | Your `--port` value (e.g., 9000) | Node-to-node blockchain communication |
+| **HTTP API** | Your port + 1 (e.g., 9001) | Explorer connects here for data |
 
 ### Starting the Explorer
 
-**If you started your node with `--port 3000`:**
-
-```bash
-export EXPLORER_API_PORT=3001
-python3 start_explorer.py --port 8080
-```
-
-**If you started your node with `--port 9000`:**
+**If you started your node with `--port 9000` (default):**
 
 ```bash
 export EXPLORER_API_PORT=9001
@@ -316,9 +444,9 @@ python3 start_explorer.py --port 8080
 
 | Your Node Port | HTTP API Port | Explorer Command |
 |----------------|---------------|------------------|
-| 3000 | 3001 | `EXPLORER_API_PORT=3001 python3 start_explorer.py --port 8080` |
-| 8001 | 8002 | `EXPLORER_API_PORT=8002 python3 start_explorer.py --port 8080` |
 | 9000 | 9001 | `EXPLORER_API_PORT=9001 python3 start_explorer.py --port 8080` |
+| 9002 | 9003 | `EXPLORER_API_PORT=9003 python3 start_explorer.py --port 8080` |
+| 8001 | 8002 | `EXPLORER_API_PORT=8002 python3 start_explorer.py --port 8080` |
 
 Then open your browser and visit:
 ```
@@ -346,11 +474,12 @@ python3 wallet_cli.py
 ---
 
 # Important Notes
-- **One validator per device** (Sybil-resistant design)  
+- **One validator per device** (Sybil-resistant design) - use `--skip-device-check` only for testing
 - Your wallet PASSWORD must always be set before running the node
 - **Do NOT delete your 12-word seed phrase** - it's the ONLY way to recover your wallet
 - **Do NOT share your password, PIN, or seed phrase** - anyone with these can steal your funds
 - The PIN is stored inside your wallet and is only used when making transactions
+- Validator registration is **automatic** - no manual registration required
 
 ---
 
@@ -388,7 +517,15 @@ If you see `Address already in use` error:
 Make sure:
 1. Your node is running in another window
 2. You set `EXPLORER_API_PORT` correctly (your node port + 1)
-3. Example: If node uses `--port 3000`, set `EXPLORER_API_PORT=3001`
+3. Example: If node uses `--port 9000`, set `EXPLORER_API_PORT=9001`
+
+## Node Not Syncing
+
+If your node is not syncing blocks:
+1. Check your internet connection
+2. Verify the seed node URL: `ws://timpal.ddns.net:9000`
+3. Check sync status: `curl http://localhost:9001/api/blockchain/info`
+4. Try restarting the node
 
 ---
 
