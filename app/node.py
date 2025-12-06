@@ -232,10 +232,17 @@ class Node:
             # PERMANENT FIX: Handle height gaps to prevent deadlock
             # If we receive a future block, trigger sync to backfill missing blocks
             if latest and block.height > latest.height + 1:
-                print(f"⚠️  HEIGHT GAP DETECTED: Received block {block.height}, current is {latest.height}")
-                print(f"   Triggering sync to backfill blocks {latest.height + 1} to {block.height - 1}...")
-                # Trigger HTTP batch sync to catch up
-                asyncio.create_task(self._sync_missing_blocks(latest.height + 1, block.height - 1))
+                gap_size = block.height - latest.height - 1
+                if gap_size <= 100:
+                    # Small gap - just log and wait for blocks to arrive
+                    if block.height % 1000 == 0:  # Only log occasionally
+                        print(f"⚠️  Small gap: received block {block.height}, waiting for {latest.height + 1}")
+                else:
+                    # Large gap - trigger P2P sync request
+                    print(f"⚠️  HEIGHT GAP DETECTED: Received block {block.height}, current is {latest.height}")
+                    print(f"   Requesting P2P sync for missing {gap_size} blocks...")
+                    # Use P2P sync instead of HTTP (HTTP not available through Replit proxy)
+                    await self.p2p.broadcast("sync_request", {"current_height": latest.height})
                 return
             
             # Skip blocks we already have
@@ -557,8 +564,15 @@ class Node:
                         progress = (sent_count / blocks_to_send) * 100
                         print(f"📦 SYNC PROGRESS: {sent_count}/{blocks_to_send} blocks ({progress:.1f}%)")
                     
+                    # KEEPALIVE: Send ping every 500 blocks to prevent connection timeout
+                    if sent_count % 500 == 0:
+                        try:
+                            await websocket.ping()
+                        except Exception:
+                            pass  # Ignore ping errors, block send will fail if connection is dead
+                    
                     # Slightly longer delay to avoid overwhelming connection
-                    await asyncio.sleep(0.005)
+                    await asyncio.sleep(0.002)  # Faster to complete sync before timeout
             
             print(f"✅ SYNC COMPLETE: Sent {sent_count}/{blocks_to_send} blocks to peer {peer_id[:8]}... ({failed_count} failed)")
             
