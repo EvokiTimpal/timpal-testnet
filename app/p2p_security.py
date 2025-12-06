@@ -36,10 +36,10 @@ class P2PSecurityManager:
     """
     
     # Message age limit (seconds) - reject messages older than this
-    MAX_MESSAGE_AGE = 300  # 5 minutes
+    MAX_MESSAGE_AGE = 600  # 10 minutes (increased for network latency)
     
     # Maximum time drift allowed between nodes (seconds)
-    MAX_TIME_DRIFT = 60  # 1 minute
+    MAX_TIME_DRIFT = 300  # 5 minutes (increased to handle clock skew between nodes)
     
     # Nonce cache size per peer (prevent replay attacks)
     NONCE_CACHE_SIZE = 1000

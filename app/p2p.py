@@ -205,6 +205,13 @@ class P2PNetwork:
                 if device_id and device_id not in self.known_device_ids:
                     self.known_device_ids.add(device_id)
                     print(f"🤝 P2P: Completed handshake with peer {peer_id[:8]}... (device: {device_id[:16]}...)")
+                    
+                    # CRITICAL FIX: Trigger sync callback AFTER handshake completes (not on connection)
+                    # peer_id is a URL for outbound connections, UUID for inbound
+                    is_outbound = peer_id.startswith("ws://") or peer_id.startswith("wss://")
+                    if is_outbound and self.on_peer_connected_callback:
+                        print(f"🔄 P2P: Handshake complete, triggering sync callback for {peer_id[:30]}...")
+                        asyncio.create_task(self.on_peer_connected_callback(peer_id))
             
             elif message_type == "peer_list":
                 peers = data.get("peers", [])
@@ -478,10 +485,6 @@ class P2PNetwork:
             print(f"✅ P2P: Connected to {peer_address} successfully!")
             
             asyncio.create_task(self.handle_outbound_peer(peer_address, websocket))
-            
-            # CRITICAL: Notify node of successful connection for sync-after-reconnect
-            if self.on_peer_connected_callback:
-                asyncio.create_task(self.on_peer_connected_callback(peer_address))
             
         except asyncio.TimeoutError:
             print(f"⏱️  P2P: Connection to {peer_address} timed out after 5 seconds")

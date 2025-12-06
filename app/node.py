@@ -435,16 +435,15 @@ class Node:
     
     async def handle_peer_connected(self, peer_address: str):
         """
-        Called when a peer successfully connects (including reconnections).
+        Called AFTER handshake completes (not on connection).
         
-        CRITICAL FIX: Request sync if we have 0 blocks and just connected to a peer.
-        This handles the case where initial connection fails but reconnection succeeds.
+        CRITICAL FIX: Now triggered by P2P layer after announce_node exchange is complete,
+        ensuring genesis has already processed our handshake before we send sync_request.
         """
         try:
             current_height = self.ledger.get_block_count()
             if current_height == 0 and not self.is_genesis_node:
-                print(f"🔄 RECONNECT SYNC: Connected to {peer_address}, requesting blockchain (have 0 blocks)...")
-                await asyncio.sleep(0.5)  # Brief delay for handshake to complete
+                print(f"🔄 POST-HANDSHAKE SYNC: Handshake with {peer_address} complete, requesting blockchain...")
                 await self.p2p.broadcast("sync_request", {"current_height": 0})
         except Exception as e:
             print(f"⚠️  Error in handle_peer_connected: {e}")
