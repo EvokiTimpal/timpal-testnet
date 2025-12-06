@@ -71,6 +71,18 @@ class TestnetNode:
         self.seed_nodes = seed_nodes or []
         self.is_genesis_node = is_genesis_node
         
+        # DIAGNOSTIC: Print startup info for deployment debugging
+        print("=" * 60)
+        print("TIMPAL TESTNET NODE - STARTUP DIAGNOSTICS")
+        print("=" * 60)
+        print(f"Working directory: {os.getcwd()}")
+        print(f"Files in current dir: {os.listdir('.')[:20]}...")  # First 20 files
+        print(f"wallet_v2.json exists: {os.path.exists('wallet_v2.json')}")
+        print(f"wallet.json exists: {os.path.exists('wallet.json')}")
+        print(f"TIMPAL_WALLET_PASSWORD set: {'Yes' if os.environ.get('TIMPAL_WALLET_PASSWORD') else 'NO!'}")
+        print(f"TIMPAL_WALLET_PIN set: {'Yes' if os.environ.get('TIMPAL_WALLET_PIN') else 'NO!'}")
+        print("=" * 60)
+        
         os.makedirs(self.data_dir, exist_ok=True)
         
         # -----------------------------------------------
@@ -87,6 +99,10 @@ class TestnetNode:
             wallet_version = 1
             print(f"[TESTNET] Loading v1 wallet (legacy)")
         else:
+            print("❌ FATAL: No wallet file found!")
+            print(f"   Looked for: wallet_v2.json, wallet.json")
+            print(f"   Current directory: {os.getcwd()}")
+            print(f"   Directory contents: {os.listdir('.')}")
             raise ValueError("No wallet found (wallet_v2.json or wallet.json) — cannot start testnet node")
         
         # Load wallet based on version
