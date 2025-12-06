@@ -75,7 +75,7 @@ pip install -r requirements.txt
 python3 wallet_cli.py
 
 # 3. Start your node (join the testnet)
-python3 run_testnet_node.py --port 3000 --seed wss://timpaltestnet.replit.app
+python3 run_testnet_node.py --port 3000 --seed ws://172.56.209.250:9000
 ```
 
 **Full Instructions:** See **[JOIN_TESTNET.md](JOIN_TESTNET.md)** for complete step-by-step guide.
@@ -98,7 +98,7 @@ When you run a blockchain node, it uses **TWO ports**:
 # Node on port 3000 creates:
 # - P2P Network: port 3000 (talks to other nodes)
 # - HTTP API: port 3001 (explorer uses this)
-python run_testnet_node.py --port 3000 --seed wss://timpaltestnet.replit.app
+python run_testnet_node.py --port 3000 --seed ws://172.56.209.250:9000
 ```
 
 #### **Starting the Explorer**

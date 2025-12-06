@@ -37,7 +37,7 @@ TIMPAL is a **truly decentralized** blockchain.
 
 **Seed Node URL:**
 ```
-wss://timpaltestnet.replit.app
+ws://172.56.209.250:9000
 ```
 
 ---
@@ -116,7 +116,7 @@ set TIMPAL_WALLET_PASSWORD=your_password_here
 
 **Start your validator node (join the testnet):**
 ```cmd
-python run_testnet_node.py --port 3000 --seed wss://timpaltestnet.replit.app
+python run_testnet_node.py --port 3000 --seed ws://172.56.209.250:9000
 ```
 
 **IMPORTANT FOR WINDOWS:**
@@ -129,7 +129,7 @@ If you prefer PowerShell:
 
 ```powershell
 $env:TIMPAL_WALLET_PASSWORD="your_password_here"
-python run_testnet_node.py --port 3000 --seed wss://timpaltestnet.replit.app
+python run_testnet_node.py --port 3000 --seed ws://172.56.209.250:9000
 ```
 
 ## Step 6: (Optional) Start the Block Explorer
@@ -232,7 +232,7 @@ export TIMPAL_WALLET_PASSWORD="your_secure_password"
 
 **Start your validator node (join the testnet):**
 ```bash
-python3 run_testnet_node.py --port 3000 --seed wss://timpaltestnet.replit.app
+python3 run_testnet_node.py --port 3000 --seed ws://172.56.209.250:9000
 ```
 
 **Important:**
@@ -274,7 +274,7 @@ Run the same command:
 
 ```bash
 export TIMPAL_WALLET_PASSWORD="your_password"
-python3 run_testnet_node.py --port 3000 --seed wss://timpaltestnet.replit.app
+python3 run_testnet_node.py --port 3000 --seed ws://172.56.209.250:9000
 ```
 
 ---
