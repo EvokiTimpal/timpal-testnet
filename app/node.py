@@ -466,6 +466,14 @@ class Node:
             
             print(f"📨 SYNC REQUEST from peer {peer_id[:8]}... (height {requested_height})")
             
+            # DIAGNOSTIC: Send immediate acknowledgment so second node knows request was received
+            await self.p2p.send_to_websocket(websocket, "sync_ack", {
+                "genesis_height": latest.height if latest else 0,
+                "requested_height": requested_height,
+                "blocks_available": (latest.height - requested_height) if latest else 0
+            })
+            print(f"📤 SYNC ACK sent to peer {peer_id[:8]}...")
+            
             if not latest:
                 print(f"⚠️  SYNC RESPONSE: No blocks to send (empty chain)")
                 return

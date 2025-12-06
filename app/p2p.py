@@ -228,6 +228,12 @@ class P2PNetwork:
                 else:
                     print(f"⚠️  P2P: No sync_handler registered, cannot respond to sync_request")
             
+            elif message_type == "sync_ack":
+                # DIAGNOSTIC: Log when genesis acknowledges our sync_request
+                genesis_height = data.get("genesis_height", 0)
+                blocks_available = data.get("blocks_available", 0)
+                print(f"✅ SYNC ACK RECEIVED: Genesis has {genesis_height} blocks, {blocks_available} available to sync")
+            
             if message_type in self.message_handlers:
                 handler = self.message_handlers[message_type]
                 await handler(data, peer_id)
