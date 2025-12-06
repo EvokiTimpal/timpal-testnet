@@ -28,19 +28,19 @@ PHASE1_BLOCKS = 394_200_000
 # Fixed fee
 FEE = 50_000  # 0.0005 TMPL (50,000 pals = 0.0005 × 100,000,000)
 
-# Genesis timestamp (STATIC for canonical genesis validation)
-# Testnet Genesis v5: December 6, 2025 13:00:00 UTC (fresh testnet on local laptop)
-# This MUST remain fixed to ensure all nodes agree on canonical genesis block hash
-GENESIS_TIMESTAMP = 1765025974  # Dec 6, 2025 ~13:00 UTC
+# Genesis timestamp (DYNAMIC for fresh testnet)
+# For fresh testnet: use current time when genesis node starts
+# This allows the testnet to start immediately without timing skew issues
+import time as _time
+GENESIS_TIMESTAMP = int(_time.time())  # Dynamic: use current time for fresh testnet
 
 # Canonical genesis block hash (SECURITY: prevents eclipse attacks)
-# This hash MUST match the locally-created genesis block exactly
-# Any genesis block from the network that doesn't match this hash will be REJECTED
+# Set to None for fresh testnet - the first genesis block will be accepted
+# After genesis is created, this can be updated to lock the genesis block
 # Generated with v2 wallet (BIP-39) - FIXED ADDRESS FORMAT (44 hex chars)
 # Seed phrase: "occur twice shock opinion detail round ridge tape modify stay bargain suffer"
 # Address: tmpl7a255cb7912eed25bac00c5a2e6b5604518d2b0b2c8e
-# Testnet Genesis v5: December 6, 2025 (fresh start on local laptop)
-CANONICAL_GENESIS_HASH = "b9df4ce1d308611718b08b2520c7c731da7745eecc443333102e81377fd683c3"
+CANONICAL_GENESIS_HASH = None  # Fresh testnet mode - accept any genesis
 
 # EPOCH-BASED CONSENSUS (for 100,000+ validator scalability)
 # TESTNET ADJUSTMENT: Shorter epochs (10 blocks = 30s) for faster testing

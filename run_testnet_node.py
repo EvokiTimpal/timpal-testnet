@@ -65,11 +65,12 @@ from seed_wallet import SeedWallet
 class TestnetNode:
     """TIMPAL Testnet Validator Node"""
     
-    def __init__(self, port: int = 8765, data_dir: str = None, seed_nodes: list = None, is_genesis_node: bool = False):
+    def __init__(self, port: int = 8765, data_dir: str = None, seed_nodes: list = None, is_genesis_node: bool = False, skip_device_check: bool = False):
         self.port = port
         self.data_dir = data_dir or f"testnet_data_node_{port}"
         self.seed_nodes = seed_nodes or []
         self.is_genesis_node = is_genesis_node
+        self.skip_device_check = skip_device_check
         
         # DIAGNOSTIC: Print startup info for deployment debugging
         print("=" * 60)
@@ -177,8 +178,9 @@ class TestnetNode:
         
         # Create node with loaded validator keys
         # SECURITY: Device check enforces 1 node per device (Sybil prevention)
+        # skip_device_check can be used for testing multiple nodes on same machine
         self.node = Node(
-            skip_device_check=False,
+            skip_device_check=self.skip_device_check,
             reward_address=reward_address,
             private_key=private_key,
             public_key=public_key,
@@ -753,6 +755,12 @@ IMPORTANT:
         help="🔥 GENESIS NODE ONLY: This node creates the genesis block locally. Only use for the VPS bootstrap node!"
     )
     
+    parser.add_argument(
+        "--skip-device-check",
+        action="store_true",
+        help="🧪 TESTING ONLY: Skip device fingerprint check to allow multiple nodes on same machine for testing"
+    )
+    
     args = parser.parse_args()
     
     # ==========================================
@@ -870,7 +878,8 @@ IMPORTANT:
         port=args.port,
         data_dir=args.data_dir,
         seed_nodes=seed_nodes,
-        is_genesis_node=args.genesis
+        is_genesis_node=args.genesis,
+        skip_device_check=args.skip_device_check
     )
     
     try:
