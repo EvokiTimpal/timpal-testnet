@@ -65,6 +65,7 @@ class Node:
         self.p2p.register_handler("new_block", self.handle_new_block)
         self.p2p.register_handler("announce_node", self.handle_node_announcement)
         self.p2p.register_sync_handler(self.handle_sync_request)
+        self.p2p.register_on_peer_connected(self.handle_peer_connected)
         
         # CRITICAL FIX: Do NOT create genesis here - wait for P2P sync first!
         # Genesis will be created in bootstrap_or_sync() ONLY if no peers respond
@@ -431,6 +432,22 @@ class Node:
                 self.consensus.update_node_activity(reward_address)
         except Exception:
             pass
+    
+    async def handle_peer_connected(self, peer_address: str):
+        """
+        Called when a peer successfully connects (including reconnections).
+        
+        CRITICAL FIX: Request sync if we have 0 blocks and just connected to a peer.
+        This handles the case where initial connection fails but reconnection succeeds.
+        """
+        try:
+            current_height = self.ledger.get_block_count()
+            if current_height == 0 and not self.is_genesis_node:
+                print(f"🔄 RECONNECT SYNC: Connected to {peer_address}, requesting blockchain (have 0 blocks)...")
+                await asyncio.sleep(0.5)  # Brief delay for handshake to complete
+                await self.p2p.broadcast("sync_request", {"current_height": 0})
+        except Exception as e:
+            print(f"⚠️  Error in handle_peer_connected: {e}")
     
     async def handle_sync_request(self, data: dict, peer_id: str, websocket):
         """

@@ -44,12 +44,20 @@ class P2PNetwork:
         # CRITICAL SECURITY: Initialize security manager for mandatory authentication
         self.security_manager = P2PSecurityManager()
         print("🔒 P2P Security Manager initialized - mandatory authentication enabled")
+        
+        # Callback for when peer connects (used for sync-after-reconnect)
+        self.on_peer_connected_callback = None
     
     def register_handler(self, message_type: str, handler):
         self.message_handlers[message_type] = handler
     
     def register_sync_handler(self, handler):
         self.sync_handler = handler
+    
+    def register_on_peer_connected(self, callback):
+        """Register callback for when a peer successfully connects.
+        Used by Node to request sync after reconnection."""
+        self.on_peer_connected_callback = callback
     
     def _get_peer_ip(self, websocket) -> str:
         try:
@@ -470,6 +478,10 @@ class P2PNetwork:
             print(f"✅ P2P: Connected to {peer_address} successfully!")
             
             asyncio.create_task(self.handle_outbound_peer(peer_address, websocket))
+            
+            # CRITICAL: Notify node of successful connection for sync-after-reconnect
+            if self.on_peer_connected_callback:
+                asyncio.create_task(self.on_peer_connected_callback(peer_address))
             
         except asyncio.TimeoutError:
             print(f"⏱️  P2P: Connection to {peer_address} timed out after 5 seconds")
