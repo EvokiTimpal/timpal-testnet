@@ -224,6 +224,11 @@ class Node:
             block = Block.from_dict(data["block"])
             latest = self.ledger.get_latest_block()
             
+            # SYNC DIAGNOSTICS: Track block reception during sync
+            current_height = latest.height if latest else 0
+            if block.height <= 100 or block.height % 500 == 0:
+                print(f"📥 BLOCK RECEIVED: height {block.height} from peer {peer_id[:8]}... (current: {current_height})")
+            
             # PERMANENT FIX: Handle height gaps to prevent deadlock
             # If we receive a future block, trigger sync to backfill missing blocks
             if latest and block.height > latest.height + 1:
@@ -490,6 +495,9 @@ class Node:
             # Send ALL blocks directly to websocket (bypasses peer_id lookup!)
             sent_count = 0
             failed_count = 0
+            batch_size = 100  # Log progress every 100 blocks
+            
+            print(f"📦 SYNC STARTING: Will send {blocks_to_send} blocks in batches of {batch_size}...")
             
             for height in range(start_height, latest.height + 1):
                 block = self.ledger.get_block_by_height(height)
@@ -505,9 +513,22 @@ class Node:
                         sent_count += 1
                     else:
                         failed_count += 1
-                        print(f"⚠️  SYNC FAILED: Block {height} delivery failed to websocket")
+                        if failed_count <= 5:  # Only log first few failures
+                            print(f"⚠️  SYNC FAILED: Block {height} delivery failed")
+                        if failed_count == 5:
+                            print(f"⚠️  (Suppressing further failure logs...)")
+                        # If we get failures, connection may be dead
+                        if failed_count >= 10:
+                            print(f"❌ SYNC ABORTED: Too many failures ({failed_count}), connection likely dead")
+                            break
                     
-                    await asyncio.sleep(0.01)  # Small delay to prevent overwhelming peer
+                    # Progress logging every batch_size blocks
+                    if sent_count % batch_size == 0:
+                        progress = (sent_count / blocks_to_send) * 100
+                        print(f"📦 SYNC PROGRESS: {sent_count}/{blocks_to_send} blocks ({progress:.1f}%)")
+                    
+                    # Slightly longer delay to avoid overwhelming connection
+                    await asyncio.sleep(0.005)
             
             print(f"✅ SYNC COMPLETE: Sent {sent_count}/{blocks_to_send} blocks to peer {peer_id[:8]}... ({failed_count} failed)")
             
