@@ -242,6 +242,29 @@ class Node:
             if latest and block.height <= latest.height:
                 return
             
+            # SYNC FIX: Handle empty chain case (syncing node with no blocks)
+            # When latest is None, we need to accept blocks starting from height 0 or 1
+            if not latest:
+                # Empty chain - accept genesis block (height 0) or first block (height 1) 
+                if block.height == 0 or block.height == 1:
+                    print(f"📦 SYNC: Accepting first block (height {block.height}) on empty chain")
+                    # Validate hash integrity
+                    if block.calculate_hash() != block.block_hash:
+                        print(f"❌ REJECT: Block {block.height} has invalid hash")
+                        return
+                    # Add block to ledger (skip proposer check for sync)
+                    success = self.ledger.add_block(block, skip_proposer_check=True)
+                    if success:
+                        print(f"✅ SYNC: Added block {block.height} to ledger")
+                    else:
+                        print(f"❌ SYNC: Failed to add block {block.height}")
+                    return
+                else:
+                    # Future block on empty chain - queue for later or trigger genesis sync
+                    if block.height <= 100:
+                        print(f"⚠️  SYNC: Received block {block.height} but chain is empty, need block 0/1 first")
+                    return
+            
             # Normal path: process next sequential block
             if latest and block.height == latest.height + 1:
                 if block.previous_hash != latest.block_hash:
