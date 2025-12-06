@@ -178,9 +178,6 @@ class Ledger:
                                       Uses activation_height to determine which validators
                                       were active when the block was originally created.
         """
-        # DEBUG: Log every add_block attempt to diagnose infinite loop
-        print(f"🔍 DEBUG: add_block called for Block {block.height}, current chain has {len(self.blocks)} blocks")
-        
         # CRITICAL SECURITY #1: Prevent duplicate blocks at same height
         if block.height < len(self.blocks):
             print(f"REJECT: Block at height {block.height} already exists (chain has {len(self.blocks)} blocks)")
@@ -641,14 +638,22 @@ class Ledger:
             expected_nonce = self.nonces.get(tx.sender, 0)
             
             if tx.tx_type == "validator_registration":
-                # Apply validator registration transaction with Tendermint-style delay
-                # ACTIVATION DELAY: Validator activates 2 blocks later (prevents race conditions)
-                activation_height = block.height + 2
+                # Apply validator registration transaction
+                # GENESIS BLOCK SPECIAL CASE: Genesis validators are immediately active
+                # NORMAL BLOCKS: Validator activates 2 blocks later (prevents race conditions)
+                if block.height == 0:
+                    # Genesis block: validator is immediately active with 'genesis' status
+                    activation_height = 0
+                    status = 'genesis'
+                else:
+                    # Normal blocks: Tendermint-style delay
+                    activation_height = block.height + 2
+                    status = 'pending'
                 
                 self.validator_registry[tx.sender] = {
                     'public_key': tx.public_key,
                     'device_id': tx.device_id,
-                    'status': 'pending',  # Starts pending, activates at activation_height
+                    'status': status,
                     'registered_at': tx.timestamp,
                     'registration_height': block.height,
                     'activation_height': activation_height,
@@ -657,7 +662,7 @@ class Ledger:
                     'proposer_priority': 0  # Tendermint priority tracking
                 }
                 
-                # Do NOT add to validator set immediately - will activate in 2 blocks
+                # Do NOT add to validator set immediately for non-genesis - will activate in 2 blocks
                 
                 # Update nonce
                 self.nonces[tx.sender] = expected_nonce + 1
@@ -2258,7 +2263,7 @@ class Ledger:
         if not seed_block:
             return []
         
-        epoch_seed = self.vrf_manager.derive_epoch_seed(seed_block.block_hash, current_epoch)
+        epoch_seed = self.vrf_manager.generate_epoch_seed(current_epoch, seed_block.block_hash)
         
         # Get liveness-filtered validators based on current height
         liveness_filtered_validators = self._get_liveness_filtered_validators(current_height)
@@ -3150,34 +3155,6 @@ class Ledger:
         
         print(f"✅ VALID CERT: {len(verified_voters)} voters, {actual_voting_power}/{total_voting_power} power ({actual_voting_power*100//total_voting_power}%)")
         return True
-    
-    def get_ranked_proposers_for_slot(self, slot: int, num_ranks: int = 3) -> List[str]:
-        """
-        Get ranked list of proposers for a slot using VRF.
-        
-        This is used for Time-Sliced Slots: each slot has multiple ranked proposers.
-        Rank 0 = primary (window 0-1s), Rank 1 = fallback 1 (window 1-2s), etc.
-        
-        Args:
-            slot: Slot number (same as height for simplicity)
-            num_ranks: Number of ranked proposers to return (default: 3)
-        
-        Returns:
-            List of validator addresses in VRF order (rank 0, rank 1, rank 2, ...)
-        """
-        # Ensure proposer queue is computed for this slot/height
-        _ = self.select_proposer_vrf_based(slot)
-        
-        # Get cached proposer queue
-        if not hasattr(self, 'proposer_queues'):
-            return []
-        
-        queue = self.proposer_queues.get(slot, [])
-        
-        # Return top num_ranks proposers from queue
-        ranked_proposers = queue[:num_ranks] if len(queue) >= num_ranks else queue
-        
-        return ranked_proposers
     
     def select_liveness_committee(self, height: int) -> List[str]:
         """
