@@ -472,7 +472,8 @@ class Node:
             current_height = self.ledger.get_block_count()
             if current_height == 0 and not self.is_genesis_node:
                 print(f"🔄 POST-HANDSHAKE SYNC: Handshake with {peer_address} complete, requesting blockchain...")
-                await self.p2p.broadcast("sync_request", {"current_height": 0})
+                # Send -1 to indicate "I have no blocks, send me everything including genesis"
+                await self.p2p.broadcast("sync_request", {"current_height": -1})
         except Exception as e:
             print(f"⚠️  Error in handle_peer_connected: {e}")
     
@@ -511,8 +512,14 @@ class Node:
                 return
             
             # Calculate blocks to send
-            start_height = requested_height + 1
-            blocks_to_send = latest.height - requested_height
+            # CRITICAL FIX: When requested_height is -1 (no blocks) or 0, start from block 0 (genesis)
+            # This ensures syncing nodes receive the genesis block first
+            if requested_height < 0:
+                start_height = 0  # Start from genesis
+            else:
+                start_height = requested_height + 1  # Start from next block after what peer has
+            
+            blocks_to_send = latest.height - start_height + 1
             print(f"📤 SYNC RESPONSE: Sending {blocks_to_send} blocks (heights {start_height}-{latest.height}) to peer {peer_id[:8]}...")
             
             # Send ALL blocks directly to websocket (bypasses peer_id lookup!)
@@ -1524,7 +1531,8 @@ class Node:
         # Request sync via P2P WebSocket (not HTTP!)
         # The sync_request will trigger handle_sync_request on peers
         # which sends blocks back via new_block messages
-        await self.p2p.broadcast("sync_request", {"current_height": 0})
+        # Send -1 to indicate "I have no blocks, send me everything including genesis"
+        await self.p2p.broadcast("sync_request", {"current_height": -1})
         
         # Wait for blocks to arrive via P2P
         max_wait_seconds = 30
@@ -1546,7 +1554,8 @@ class Node:
             # Re-broadcast sync request every 10 seconds
             if waited % 10 == 0 and waited > 0:
                 print(f"🔄 Re-requesting sync (waited {waited}s, have {block_count} blocks)...")
-                await self.p2p.broadcast("sync_request", {"current_height": 0})
+                # Send -1 to indicate we still need genesis
+                await self.p2p.broadcast("sync_request", {"current_height": -1})
         
         # Sync timed out
         print(f"⚠️  P2P sync timed out after {max_wait_seconds}s")
