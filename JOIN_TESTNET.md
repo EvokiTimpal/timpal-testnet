@@ -374,36 +374,72 @@ curl http://localhost:9001/api/health
 
 To connect to the TIMPAL testnet from any machine (local network or internet):
 
+**Network Binding:** The P2P server automatically binds to `0.0.0.0` (all network interfaces), so no `--host` flag is needed. Both P2P (WebSocket) and HTTP API are externally reachable by default if your firewall/NAT allows it.
+
 **1. Use the public seed node:**
 ```bash
 python3 run_testnet_node.py --port 9000 --seed ws://timpal.ddns.net:9000
 ```
 
-**2. Port forwarding (for home networks):**
+**2. Requirements for external validators to connect to YOUR node:**
 
-If you want OTHER nodes to connect to YOUR node, you need to forward your P2P port:
+For other validators on the internet to connect to your node, you need ALL of the following:
 
-| Setting | Value |
-|---------|-------|
+| Requirement | Description |
+|-------------|-------------|
+| **Port 9000 TCP open** | Your firewall must allow incoming connections on port 9000 |
+| **Port forwarding** | If behind NAT/router, forward port 9000 to your machine |
+| **Public IP or DDNS** | Your hostname/IP must resolve to your public IP address |
+
+**3. Port forwarding (for home networks):**
+
+If you're running a seed node behind a home router, configure port forwarding:
+
+| Router Setting | Value |
+|----------------|-------|
 | External Port | 9000 (or your chosen port) |
 | Internal Port | 9000 (same as external) |
 | Protocol | TCP |
-| Internal IP | Your computer's local IP |
+| Internal IP | Your computer's local IP (e.g., 192.168.1.100) |
 
-**3. Firewall configuration:**
+**How to find your local IP:**
+```bash
+# Linux/Mac
+ip addr show | grep "inet " | grep -v 127.0.0.1
+
+# Windows (Command Prompt)
+ipconfig | findstr "IPv4"
+```
+
+**4. Firewall configuration:**
 
 Make sure your firewall allows incoming connections on your P2P port:
 
 **Linux (ufw):**
 ```bash
 sudo ufw allow 9000/tcp
+sudo ufw reload
+```
+
+**Linux (iptables):**
+```bash
+sudo iptables -A INPUT -p tcp --dport 9000 -j ACCEPT
 ```
 
 **Windows:**
 - Windows Firewall will prompt you when you start the node
 - Click "Allow access" for both private and public networks
+- Or manually add a rule: Windows Defender Firewall → Advanced Settings → Inbound Rules → New Rule → Port → TCP 9000
 
-**4. Verify connectivity:**
+**5. Dynamic DNS (DDNS) setup:**
+
+If your ISP assigns a dynamic IP, use a DDNS service like No-IP:
+1. Create a free account at https://www.noip.com
+2. Create a hostname (e.g., `yournode.ddns.net`)
+3. Install the No-IP DUC client to keep the hostname updated
+4. Use your DDNS hostname in the `--seed` URL
+
+**6. Verify connectivity:**
 
 After starting your node, check that it's connected to peers:
 ```bash
@@ -411,6 +447,14 @@ curl http://localhost:9001/api/health
 ```
 
 Look for `"peers": X` where X > 0 indicates successful connections.
+
+**Test external connectivity:**
+```bash
+# From another machine, test if the port is reachable
+nc -zv your-public-ip-or-hostname 9000
+
+# Or use an online port checker like https://www.yougetsignal.com/tools/open-ports/
+```
 
 ---
 
@@ -526,6 +570,50 @@ If your node is not syncing blocks:
 2. Verify the seed node URL: `ws://timpal.ddns.net:9000`
 3. Check sync status: `curl http://localhost:9001/api/blockchain/info`
 4. Try restarting the node
+
+## Connection Timeout to Seed Node
+
+If you see this error when trying to connect to a seed node:
+```
+P2P: Attempting to connect to ws://timpal.ddns.net:9000
+Connection timed out
+Possible causes: Node offline, firewall blocking, wrong IP/port
+```
+
+**Troubleshooting steps:**
+
+1. **Check if the seed node is online:**
+   - Contact the seed node operator to confirm it's running
+   - Try pinging the hostname: `ping timpal.ddns.net`
+
+2. **Verify DNS resolution:**
+   ```bash
+   nslookup timpal.ddns.net
+   # or
+   dig timpal.ddns.net
+   ```
+   The IP should match the seed node's public IP.
+
+3. **Test port connectivity:**
+   ```bash
+   nc -zv timpal.ddns.net 9000
+   # or
+   telnet timpal.ddns.net 9000
+   ```
+   If this times out, the port is blocked or the node is offline.
+
+4. **Common causes:**
+   - **Seed node firewall**: Port 9000 TCP not open on the seed node
+   - **Seed node NAT**: Port 9000 not forwarded to the seed node machine
+   - **DDNS not updated**: Dynamic IP changed but DDNS hostname not updated
+   - **Your firewall**: Some corporate/school networks block outgoing WebSocket connections
+   - **Seed node offline**: The genesis node process may have crashed or been stopped
+
+5. **If you're running the seed node:**
+   - Verify the node is running: `ps aux | grep run_testnet_node`
+   - Check firewall: `sudo ufw status` (Linux) or Windows Firewall settings
+   - Verify port forwarding in your router settings
+   - Update your DDNS client if using dynamic IP
 
 ---
 
