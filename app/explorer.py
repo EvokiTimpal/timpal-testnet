@@ -54,6 +54,110 @@ _ledger_cache = None
 _ledger_cache_time = 0
 CACHE_TTL = 5
 
+_stats_cache: Dict[str, Any] = {}
+_stats_cache_height = -1
+
+_validator_stats_cache: Dict[str, Any] = {}
+_validator_stats_cache_height = -1
+
+
+def get_cached_validator_stats(ledger: Ledger) -> Dict[str, Dict[str, Any]]:
+    """
+    Get cached validator statistics with height-based invalidation.
+    
+    STABILITY OPTIMIZATION: Instead of iterating through all blocks for each validator
+    (O(v*b) complexity), we compute all validator stats in a single pass (O(b) complexity)
+    and cache the results. This dramatically reduces CPU usage for the validators dashboard.
+    """
+    global _validator_stats_cache, _validator_stats_cache_height
+    
+    current_height = ledger.get_block_count() - 1
+    
+    if current_height != _validator_stats_cache_height or not _validator_stats_cache:
+        validator_stats: Dict[str, Dict[str, Any]] = {}
+        
+        for block in ledger.blocks:
+            proposer = block.proposer
+            if proposer:
+                if proposer not in validator_stats:
+                    validator_stats[proposer] = {
+                        'blocks_proposed': 0,
+                        'total_rewards': 0,
+                        'last_block_height': -1
+                    }
+                validator_stats[proposer]['blocks_proposed'] += 1
+                validator_stats[proposer]['last_block_height'] = block.height
+            
+            if block.reward_allocations:
+                for address, reward in block.reward_allocations.items():
+                    if address not in validator_stats:
+                        validator_stats[address] = {
+                            'blocks_proposed': 0,
+                            'total_rewards': 0,
+                            'last_block_height': -1
+                        }
+                    validator_stats[address]['total_rewards'] += reward
+        
+        _validator_stats_cache = validator_stats
+        _validator_stats_cache_height = current_height
+    
+    return _validator_stats_cache
+
+
+def get_cached_stats(ledger: Ledger) -> Dict[str, Any]:
+    """
+    Get cached blockchain statistics with height-based invalidation.
+    
+    STABILITY OPTIMIZATION: Instead of scanning all blocks on every request,
+    we cache computed stats and only recompute when block height changes.
+    This reduces CPU usage from O(n*m) to O(1) for most requests.
+    """
+    global _stats_cache, _stats_cache_height
+    
+    current_height = ledger.get_block_count() - 1
+    
+    if current_height != _stats_cache_height or not _stats_cache:
+        transfer_count = 0
+        total_transactions = 0
+        total_fees = 0
+        active_addresses: set = set()
+        tx_by_type: Dict[str, int] = {
+            'transfer': 0,
+            'validator_registration': 0,
+            'validator_heartbeat': 0,
+            'epoch_attestation': 0,
+            'genesis_reward': 0
+        }
+        
+        for block in ledger.blocks:
+            for tx in block.transactions:
+                tx_type = tx.tx_type
+                if tx_type in tx_by_type:
+                    tx_by_type[tx_type] += 1
+                
+                if tx_type == 'transfer':
+                    transfer_count += 1
+                
+                if tx_type != 'validator_heartbeat':
+                    total_transactions += 1
+                
+                total_fees += tx.fee
+                active_addresses.add(tx.sender)
+                if tx.recipient:
+                    active_addresses.add(tx.recipient)
+        
+        _stats_cache = {
+            'transfer_count': transfer_count,
+            'total_transactions': total_transactions,
+            'total_fees': total_fees,
+            'active_addresses_count': len(active_addresses),
+            'tx_by_type': tx_by_type,
+            'height': current_height
+        }
+        _stats_cache_height = current_height
+    
+    return _stats_cache
+
 
 def get_ledger() -> Ledger:
     """Get ledger instance with 5-second caching for performance"""
@@ -1488,23 +1592,11 @@ async def get_address(request: Request, address: str):
 @app.get("/stats")
 @limiter.limit("30/minute")
 async def get_stats(request: Request):
-    """Get blockchain statistics"""
+    """Get blockchain statistics (optimized with caching)"""
     ledger = get_ledger()
     latest_block = ledger.get_latest_block()
     
-    # Count only real TMPL transfer transactions (exclude heartbeats and registrations)
-    total_transactions = sum(1 for block in ledger.blocks for tx in block.transactions if tx.tx_type == "transfer")
-    
-    active_addresses = set()
-    for block in ledger.blocks:
-        for tx in block.transactions:
-            active_addresses.add(tx.sender)
-            active_addresses.add(tx.recipient)
-    
-    total_fees = 0
-    for block in ledger.blocks:
-        for tx in block.transactions:
-            total_fees += tx.fee
+    cached = get_cached_stats(ledger)
     
     phase1_blocks = config.PHASE1_BLOCKS
     current_phase = 1 if latest_block and latest_block.height < phase1_blocks else 2
@@ -1512,15 +1604,15 @@ async def get_stats(request: Request):
     return {
         "chain_height": latest_block.height if latest_block else 0,
         "total_blocks": len(ledger.blocks),
-        "total_transactions": total_transactions,
+        "total_transactions": cached['transfer_count'],
         "total_supply": ledger.total_emitted_pals,
         "total_supply_tmpl": format_pals(ledger.total_emitted_pals),
         "max_supply": config.MAX_SUPPLY_PALS,
         "max_supply_tmpl": format_pals(config.MAX_SUPPLY_PALS),
         "percentage_mined": (ledger.total_emitted_pals / config.MAX_SUPPLY_PALS) * 100,
-        "active_addresses": len(active_addresses),
-        "total_fees_collected": total_fees,
-        "total_fees_tmpl": format_pals(total_fees),
+        "active_addresses": cached['active_addresses_count'],
+        "total_fees_collected": cached['total_fees'],
+        "total_fees_tmpl": format_pals(cached['total_fees']),
         "current_phase": current_phase,
         "block_time": config.BLOCK_TIME,
         "validator_count": ledger.get_validator_count()
@@ -1530,31 +1622,30 @@ async def get_stats(request: Request):
 @app.get("/validators")
 @limiter.limit("30/minute")
 async def get_validators(request: Request):
-    """Get all registered validators (dynamic validator set)"""
+    """Get all registered validators (dynamic validator set) - optimized"""
     ledger = get_ledger()
     validators = []
     
-    # Get current height for liveness detection
     current_height = ledger.get_block_count() - 1
-    LIVENESS_WINDOW = 100  # Consider validator offline if no blocks proposed in last 100 blocks (~5 minutes)
+    LIVENESS_WINDOW = 100
     
-    # Iterate through ALL registered validators in the ledger
+    cached_validator_stats = get_cached_validator_stats(ledger)
+    
     for address, validator_data in ledger.validator_registry.items():
-        # Get validator info (handles both old and new format)
         info = ledger.get_validator_info(address)
         
         if info:
             balance = ledger.get_balance(address)
-            block_count = sum(1 for block in ledger.blocks if block.proposer == address)
             
-            # LIVENESS DETECTION: Check if validator proposed a block recently
-            last_block_height = -1
-            for block in reversed(ledger.blocks):
-                if block.proposer == address:
-                    last_block_height = block.height
-                    break
+            stats = cached_validator_stats.get(address, {
+                'blocks_proposed': 0,
+                'total_rewards': 0,
+                'last_block_height': -1
+            })
             
-            # Determine real-time online/offline status
+            block_count = stats['blocks_proposed']
+            last_block_height = stats['last_block_height']
+            
             if current_height < 10:
                 display_status = "active"
             elif last_block_height >= 0 and (current_height - last_block_height) <= LIVENESS_WINDOW:
@@ -1709,11 +1800,13 @@ async def search(request: Request, query: str):
 
 @app.get("/stream")
 async def stream(request: Request):
-    """Server-Sent Events (SSE) endpoint for real-time blockchain updates"""
+    """Server-Sent Events (SSE) endpoint for real-time blockchain updates (optimized)"""
     async def event_generator():
         last_height = 0
+        consecutive_errors = 0
+        max_consecutive_errors = 5
+        
         while True:
-            # Check if client disconnected
             if await request.is_disconnected():
                 break
             
@@ -1722,29 +1815,31 @@ async def stream(request: Request):
                 latest_block = ledger.get_latest_block()
                 current_height = latest_block.height if latest_block else 0
                 
-                # Only send update if block height changed
                 if current_height != last_height:
                     last_height = current_height
+                    consecutive_errors = 0
                     
-                    # Count only real TMPL transfer transactions (exclude heartbeats and registrations)
-                    total_transactions = sum(1 for block in ledger.blocks for tx in block.transactions if tx.tx_type == "transfer")
+                    cached = get_cached_stats(ledger)
                     
                     data = {
                         "latest_block": current_height,
                         "total_supply_tmpl": format_pals(ledger.total_emitted_pals),
                         "validator_count": ledger.get_validator_count(),
-                        "total_transactions": total_transactions,
+                        "total_transactions": cached['transfer_count'],
                         "timestamp": time.time()
                     }
                     
                     yield f"data: {json.dumps(data)}\n\n"
                 
-                # Wait 2 seconds before checking again
                 await asyncio.sleep(2)
                 
             except Exception as e:
-                print(f"SSE Error: {e}")
-                break
+                consecutive_errors += 1
+                print(f"SSE Error ({consecutive_errors}/{max_consecutive_errors}): {e}")
+                if consecutive_errors >= max_consecutive_errors:
+                    print("SSE: Too many consecutive errors, closing connection")
+                    break
+                await asyncio.sleep(1)
     
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -1752,45 +1847,36 @@ async def stream(request: Request):
 @app.get("/validators-dashboard", response_class=HTMLResponse)
 @limiter.limit("20/minute")
 async def validators_dashboard(request: Request):
-    """Enhanced validator dashboard with detailed stats and leaderboard"""
+    """Enhanced validator dashboard with detailed stats and leaderboard (optimized)"""
     ledger = get_ledger()
     validators = []
     
-    # Get current height for liveness detection
     current_height = ledger.get_block_count() - 1
-    LIVENESS_WINDOW = 100  # Consider validator offline if no blocks proposed in last 100 blocks (~5 minutes)
+    LIVENESS_WINDOW = 100
     
-    # Get all validators with detailed stats
+    cached_validator_stats = get_cached_validator_stats(ledger)
+    
     for address, validator_data in ledger.validator_registry.items():
         info = ledger.get_validator_info(address)
         
         if info:
             balance = ledger.get_balance(address)
-            block_count = sum(1 for block in ledger.blocks if block.proposer == address)
             
-            # Calculate total rewards earned
-            total_rewards = 0
-            for block in ledger.blocks:
-                if block.reward_allocations and address in block.reward_allocations:
-                    total_rewards += block.reward_allocations[address]
+            stats = cached_validator_stats.get(address, {
+                'blocks_proposed': 0,
+                'total_rewards': 0,
+                'last_block_height': -1
+            })
             
-            # LIVENESS DETECTION: Check if validator proposed a block recently
-            # Find the most recent block proposed by this validator
-            last_block_height = -1
-            for block in reversed(ledger.blocks):
-                if block.proposer == address:
-                    last_block_height = block.height
-                    break
+            block_count = stats['blocks_proposed']
+            total_rewards = stats['total_rewards']
+            last_block_height = stats['last_block_height']
             
-            # Determine real-time online/offline status
             if current_height < 10:
-                # Bootstrap period - all registered validators shown as active
                 display_status = "active"
             elif last_block_height >= 0 and (current_height - last_block_height) <= LIVENESS_WINDOW:
-                # Proposed a block recently - ONLINE
                 display_status = "active"
             else:
-                # No recent blocks - OFFLINE
                 display_status = "offline"
             
             validators.append({
@@ -1806,7 +1892,6 @@ async def validators_dashboard(request: Request):
                 "device_id_preview": info.get('device_id', 'N/A')[:32] + '...' if info.get('device_id') and len(info.get('device_id', '')) > 32 else info.get('device_id', 'N/A')
             })
     
-    # Sort by blocks proposed (leaderboard)
     validators.sort(key=lambda v: v['blocks_proposed'], reverse=True)
     
     # Calculate stats
@@ -2699,20 +2784,34 @@ curl http://localhost:8080/search/tmpl6065afd538da959a3600d5cf9f0b8b1c74c2e8e519
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Run blockchain verification on startup using lifespan handler"""
+    import glob
+    
     print("🔍 Running blockchain integrity check...")
-    ledger = Ledger(data_dir="testnet_data_node_9000/ledger", use_production_storage=False)
     
-    if ledger.verify_chain():
-        print("✅ Blockchain integrity verified - all blocks valid")
-    else:
-        print("❌ WARNING: Blockchain integrity check failed!")
+    data_dir = os.getenv("EXPLORER_DATA_DIR")
+    if not data_dir:
+        node_dirs = glob.glob("testnet_data_node_*/ledger")
+        if node_dirs:
+            data_dir = sorted(node_dirs, key=lambda x: os.path.getmtime(x), reverse=True)[0]
+        else:
+            data_dir = "testnet_data_node_9000/ledger"
     
-    emitted_tmpl = ledger.total_emitted_pals / config.PALS_PER_TMPL
-    print(f"📊 Loaded {len(ledger.blocks)} blocks, {emitted_tmpl:,.8f} {config.SYMBOL} emitted")
+    try:
+        ledger = Ledger(data_dir=data_dir, use_production_storage=False)
+        
+        if ledger.verify_chain():
+            print("✅ Blockchain integrity verified - all blocks valid")
+        else:
+            print("❌ WARNING: Blockchain integrity check failed!")
+        
+        emitted_tmpl = ledger.total_emitted_pals / config.PALS_PER_TMPL
+        print(f"📊 Loaded {len(ledger.blocks)} blocks, {emitted_tmpl:,.8f} {config.SYMBOL} emitted")
+    except Exception as e:
+        print(f"⚠️  Could not verify blockchain: {e}")
+    
     print(f"🔒 Security: Rate limiting enabled, CORS restricted to localhost")
-    print(f"⚡ Performance: Ledger caching enabled ({CACHE_TTL}s TTL)")
+    print(f"⚡ Performance: Ledger caching enabled ({CACHE_TTL}s TTL), stats caching enabled")
     yield
-    # Cleanup code (if any) goes here
 
 # Update app to use lifespan
 app.router.lifespan_context = lifespan
