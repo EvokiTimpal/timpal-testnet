@@ -936,18 +936,24 @@ class Node:
                 # (c) never goes into the future (clock skew safety)
                 now = time.time()
                 
-                # Start with max(scheduled_time, window_start + epsilon) to ensure we're in the window
-                candidate = max(scheduled_time, window_start + EPS)
-                # Cap at window_end and current time
-                candidate = min(candidate, window_end - EPS, now)
-                
-                # Safety check: if window already passed (rare race condition), skip this round
-                if candidate < window_start or candidate >= window_end:
-                    print(f"⚠️  Window already passed for slot {current_slot} rank {my_rank}, skipping")
-                    await asyncio.sleep(0.05)
-                    continue
-                
-                block_timestamp = candidate
+                # BOOTSTRAP EXCEPTION: First 10 blocks use current time (window validation relaxed)
+                BOOTSTRAP_HEIGHT = 10
+                if next_height <= BOOTSTRAP_HEIGHT:
+                    block_timestamp = now
+                    print(f"🔧 BOOTSTRAP: Using current time for block {next_height} (grace period)")
+                else:
+                    # Start with max(scheduled_time, window_start + epsilon) to ensure we're in the window
+                    candidate = max(scheduled_time, window_start + EPS)
+                    # Cap at window_end and current time
+                    candidate = min(candidate, window_end - EPS, now)
+                    
+                    # Safety check: if window already passed (rare race condition), skip this round
+                    if candidate < window_start or candidate >= window_end:
+                        print(f"⚠️  Window already passed for slot {current_slot} rank {my_rank}, skipping")
+                        await asyncio.sleep(0.05)
+                        continue
+                    
+                    block_timestamp = candidate
                 
                 # Timing diagnostic to track skew reduction after fix
                 scheduled_vs_now = now - scheduled_time

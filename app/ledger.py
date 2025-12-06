@@ -234,6 +234,8 @@ class Ledger:
             # TIME-SLICED SLOTS VALIDATION: Ensure block timestamp is within assigned window
             # This prevents race conditions when offline validators come back online
             # Only the correct (slot, rank) can propose in their assigned time window
+            # BOOTSTRAP EXCEPTION: Skip for first 10 blocks to handle delayed genesis startup
+            BOOTSTRAP_HEIGHT = 10
             if not skip_proposer_check and hasattr(block, 'slot') and hasattr(block, 'rank'):
                 from time_slots import validate_block_window
                 
@@ -245,8 +247,11 @@ class Ledger:
                 
                 genesis_timestamp = genesis_block.timestamp
                 
-                # Validate block timestamp is within correct window for (slot, rank)
-                if not validate_block_window(block.timestamp, genesis_timestamp, block.slot, block.rank):
+                # BOOTSTRAP: Skip strict window validation for first N blocks
+                # This allows the network to bootstrap even if genesis timestamp is stale
+                if block.height <= BOOTSTRAP_HEIGHT:
+                    print(f"🔧 BOOTSTRAP: Skipping window validation for block {block.height} (grace period)")
+                elif not validate_block_window(block.timestamp, genesis_timestamp, block.slot, block.rank):
                     print(f"REJECT: Block timestamp {block.timestamp} outside assigned window")
                     print(f"  Slot: {block.slot}, Rank: {block.rank}")
                     return False
