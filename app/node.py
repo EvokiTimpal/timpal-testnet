@@ -641,17 +641,21 @@ class Node:
                     else:
                         # No port specified (Cloudflare Tunnel style)
                         # Try multiple patterns in order of likelihood:
-                        # 1. api. subdomain (recommended Cloudflare Tunnel setup)
-                        # 2. Same hostname (if tunnel routes both ws and http)
-                        # 3. Explicit port 9001
+                        # 1. api. subdomain with HTTP (Cloudflare Tunnel often uses HTTP internally)
+                        # 2. api. subdomain with HTTPS
+                        # 3. Same hostname with HTTPS
+                        # 4. Explicit port 9001
                         
-                        # Pattern 1: api. subdomain (e.g., wss://seed.timpal.org -> https://api.seed.timpal.org)
+                        # Pattern 1: api. subdomain with HTTP (most common Cloudflare Tunnel setup)
+                        http_urls.append(f"http://api.{host_port}")
+                        
+                        # Pattern 2: api. subdomain with HTTPS
                         http_urls.append(f"https://api.{host_port}")
                         
-                        # Pattern 2: Same hostname (if tunnel routes both protocols)
+                        # Pattern 3: Same hostname with HTTPS (if tunnel routes both protocols)
                         http_urls.append(f"https://{host_port}")
                         
-                        # Pattern 3: Explicit port (fallback)
+                        # Pattern 4: Explicit port (fallback)
                         http_urls.append(f"https://{host_port}:9001")
                         
                 elif seed.startswith('ws://'):

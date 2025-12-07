@@ -649,7 +649,24 @@ class TestnetNode:
             # Build HTTP URLs from seed nodes
             http_urls = []
             for seed in self.seed_nodes:
-                if seed.startswith('ws://'):
+                if seed.startswith('wss://'):
+                    # Secure WebSocket -> HTTP/HTTPS (Cloudflare Tunnel style)
+                    host_port = seed.replace('wss://', '').replace('/', '')
+                    if ':' in host_port:
+                        # wss://host:port -> https://host:port+1
+                        host, port_str = host_port.rsplit(':', 1)
+                        try:
+                            http_port = int(port_str) + 1
+                            http_urls.append(f"https://{host}:{http_port}")
+                        except ValueError:
+                            pass
+                    else:
+                        # No port specified (Cloudflare Tunnel style)
+                        # Try api. subdomain with HTTP first (most common setup)
+                        http_urls.append(f"http://api.{host_port}")
+                        http_urls.append(f"https://api.{host_port}")
+                        http_urls.append(f"https://{host_port}")
+                elif seed.startswith('ws://'):
                     host_port = seed.replace('ws://', '').replace('/', '')
                     if ':' in host_port:
                         host, port_str = host_port.rsplit(':', 1)
