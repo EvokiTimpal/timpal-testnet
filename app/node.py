@@ -615,6 +615,7 @@ class Node:
         - ws://host:port -> http://host:port+1
         - wss://host:port -> https://host:port+1
         - wss://host -> https://host (Cloudflare Tunnel style, same port)
+        - wss://seed.example.org -> https://api.seed.example.org (api. subdomain pattern)
         
         Returns:
             List of HTTP URLs for API access
@@ -639,9 +640,19 @@ class Node:
                         http_urls.append(f"https://{host}:{http_port}")
                     else:
                         # No port specified (Cloudflare Tunnel style)
-                        # Try both: same hostname (if tunnel routes both) and explicit port
+                        # Try multiple patterns in order of likelihood:
+                        # 1. api. subdomain (recommended Cloudflare Tunnel setup)
+                        # 2. Same hostname (if tunnel routes both ws and http)
+                        # 3. Explicit port 9001
+                        
+                        # Pattern 1: api. subdomain (e.g., wss://seed.timpal.org -> https://api.seed.timpal.org)
+                        http_urls.append(f"https://api.{host_port}")
+                        
+                        # Pattern 2: Same hostname (if tunnel routes both protocols)
                         http_urls.append(f"https://{host_port}")
-                        http_urls.append(f"https://{host_port}:9001")  # Common HTTP API port
+                        
+                        # Pattern 3: Explicit port (fallback)
+                        http_urls.append(f"https://{host_port}:9001")
                         
                 elif seed.startswith('ws://'):
                     # Plain WebSocket -> HTTP
