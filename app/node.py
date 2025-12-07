@@ -1764,8 +1764,23 @@ class Node:
         # CRITICAL FIX: Create fresh transaction with new timestamp to avoid duplicate hash
         if self.pending_validator_registration:
             print(f"🔄 Preparing to broadcast validator registration...")
-            print(f"   Current P2P connections: {len(self.p2p.peers)}")
-            await asyncio.sleep(2)  # Wait for P2P connections to establish
+            
+            # CRITICAL FIX: Wait for P2P connections before broadcasting
+            # Without peers, the broadcast goes nowhere and registration never happens
+            max_wait_for_peers = 30  # seconds
+            wait_interval = 2
+            waited = 0
+            while len(self.p2p.peers) == 0 and waited < max_wait_for_peers:
+                print(f"   Waiting for P2P connections... ({waited}s/{max_wait_for_peers}s)")
+                await asyncio.sleep(wait_interval)
+                waited += wait_interval
+            
+            peer_count = len(self.p2p.peers)
+            print(f"   P2P connections ready: {peer_count} peer(s)")
+            
+            if peer_count == 0:
+                print(f"   ⚠️  No peers connected after {max_wait_for_peers}s - will broadcast anyway")
+                print(f"   Registration may need to be retried manually")
             
             # CRITICAL: Regenerate registration with fresh timestamp to ensure unique tx_hash
             # This prevents duplicate-hash rejection if previous broadcast wasn't mined

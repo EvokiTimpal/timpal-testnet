@@ -5,6 +5,12 @@ import time
 
 
 class Mempool:
+    # Transaction types allowed in mempool
+    # - transfer: User money transfers (highest priority)
+    # - validator_registration: New validator registrations (must be on-chain)
+    # Excluded: heartbeats, attestations (handled by their own systems, would flood mempool)
+    ALLOWED_TX_TYPES = {"transfer", "validator_registration"}
+    
     def __init__(self, max_tx_per_address: int = 10, max_total_tx: int = 10000):
         self.pending_transactions: Dict[str, Transaction] = {}
         self.tx_count_by_address: Dict[str, int] = defaultdict(int)
@@ -16,15 +22,13 @@ class Mempool:
         """
         Add transaction to mempool.
         
-        CRITICAL: Only "transfer" transactions belong in the mempool.
-        Other transaction types (validator_registration, heartbeat, attestation, etc.)
-        are handled directly by their respective systems and should NOT be counted
-        as pending transactions.
+        CRITICAL: Only user money transfers and validator_registration belong in the mempool.
+        Heartbeats and attestations are handled by their own systems and should not be
+        queued as pending transactions (they would flood the mempool).
         """
-        # ONLY accept transfer transactions in mempool
-        # Validator registrations, heartbeats, attestations are NOT transactions
-        if tx.tx_type != "transfer":
-            return False  # Silently reject non-transfer transactions
+        # Only accept allowed transaction types in mempool
+        if tx.tx_type not in self.ALLOWED_TX_TYPES:
+            return False  # Reject heartbeats, attestations, etc.
         
         if tx.tx_hash in self.pending_transactions:
             return False
