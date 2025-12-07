@@ -783,7 +783,13 @@ class Node:
             # PROACTIVE CATCH-UP: Before attempting to create blocks, check if we're behind
             # This prevents deadlock where nodes at different heights all skip their turns
             # because they're waiting for blocks from other validators who are also behind
-            max_peer_height = await self._get_max_peer_height()
+            # 
+            # CRITICAL FIX: Bootstrap nodes (no seeds) skip catch-up entirely
+            # They are the source of truth and should never pause for "higher peers"
+            if is_bootstrap:
+                max_peer_height = 0  # Bootstrap node is always at head
+            else:
+                max_peer_height = await self._get_max_peer_height()
             local_height = latest_block.height
             
             # STAGE 3: Mark as not synced if we fall too far behind
@@ -1695,6 +1701,78 @@ class Node:
             print("   If no blocks arrive, check seed node connectivity")
     
     
+    async def _broadcast_validator_registration(self):
+        """
+        Broadcast validator registration transaction to the network.
+        
+        CRITICAL FIX: This runs as a concurrent task alongside P2P server startup.
+        This allows the P2P server to start and establish connections while we wait.
+        
+        Uses get_peer_count() which includes BOTH inbound and outbound peers,
+        since outbound connections (to seeds) are what matter for new validators.
+        """
+        print(f"🔄 Preparing to broadcast validator registration...")
+        
+        # Wait for P2P connections (either inbound or outbound)
+        # CRITICAL FIX: Use get_peer_count() which counts BOTH inbound and outbound peers
+        # The previous code only checked self.p2p.peers (inbound), but outbound connections
+        # to seeds are stored in self.p2p.outbound_peers
+        max_wait_for_peers = 30  # seconds
+        wait_interval = 2
+        waited = 0
+        while self.p2p.get_peer_count() == 0 and waited < max_wait_for_peers:
+            print(f"   Waiting for P2P connections... ({waited}s/{max_wait_for_peers}s)")
+            await asyncio.sleep(wait_interval)
+            waited += wait_interval
+        
+        peer_count = self.p2p.get_peer_count()
+        print(f"   P2P connections ready: {peer_count} peer(s) (inbound: {len(self.p2p.peers)}, outbound: {len(self.p2p.outbound_peers)})")
+        
+        if peer_count == 0:
+            print(f"   ⚠️  No peers connected after {max_wait_for_peers}s - will broadcast anyway")
+            print(f"   Registration may need to be retried manually")
+        
+        # CRITICAL: Regenerate registration with fresh timestamp to ensure unique tx_hash
+        # This prevents duplicate-hash rejection if previous broadcast wasn't mined
+        device_hash = hashlib.sha256(self.device_id.encode()).hexdigest()
+        nonce = self.ledger.get_nonce(self.reward_address)
+        
+        print(f"   Regenerating registration with fresh timestamp...")
+        print(f"   Address: {self.reward_address[:20]}...")
+        print(f"   Nonce: {nonce}")
+        
+        fresh_reg_tx = Transaction.create_validator_registration(
+            sender=self.reward_address,
+            public_key=self.public_key,
+            device_id=device_hash,
+            timestamp=time.time(),  # FRESH timestamp = unique hash
+            nonce=nonce
+        )
+        fresh_reg_tx.sign(self.private_key)
+        
+        print(f"   TX Hash: {fresh_reg_tx.tx_hash[:32]}...")
+        print(f"   Signature verified: {fresh_reg_tx.verify()}")
+        
+        # Add to our own mempool
+        added = self.mempool.add_transaction(fresh_reg_tx)
+        print(f"   Added to local mempool: {added}")
+        if not added:
+            print(f"   ⚠️  Mempool rejected - checking why...")
+            print(f"   Current mempool size: {len(self.mempool.pending_transactions)}")
+            print(f"   TX already in mempool: {fresh_reg_tx.tx_hash in self.mempool.pending_transactions}")
+        
+        # Broadcast to network
+        print(f"   Broadcasting to {peer_count} peer(s)...")
+        await self.p2p.broadcast("new_transaction", {
+            "transaction": fresh_reg_tx.to_dict()
+        })
+        
+        print(f"📡 Validator registration broadcast to network!")
+        print(f"   TX Hash: {fresh_reg_tx.tx_hash[:32]}...")
+        print(f"   Waiting for inclusion in next block...")
+        
+        self.pending_validator_registration = None  # Clear after broadcasting
+
     async def start(self):
         self.is_running = True
         
@@ -1760,68 +1838,11 @@ class Node:
                 print(f"\n✅ POST-SYNC: Already registered as validator: {self.reward_address}")
                 print(f"   Total validators on chain: {self.ledger.get_validator_count()}")
         
-        # Broadcast pending validator registration transaction (if any)
-        # CRITICAL FIX: Create fresh transaction with new timestamp to avoid duplicate hash
+        # Start registration broadcast as a concurrent task so it runs alongside P2P server
+        # This allows the P2P server to start and accept connections while we wait for peers
+        registration_task = None
         if self.pending_validator_registration:
-            print(f"🔄 Preparing to broadcast validator registration...")
-            
-            # CRITICAL FIX: Wait for P2P connections before broadcasting
-            # Without peers, the broadcast goes nowhere and registration never happens
-            max_wait_for_peers = 30  # seconds
-            wait_interval = 2
-            waited = 0
-            while len(self.p2p.peers) == 0 and waited < max_wait_for_peers:
-                print(f"   Waiting for P2P connections... ({waited}s/{max_wait_for_peers}s)")
-                await asyncio.sleep(wait_interval)
-                waited += wait_interval
-            
-            peer_count = len(self.p2p.peers)
-            print(f"   P2P connections ready: {peer_count} peer(s)")
-            
-            if peer_count == 0:
-                print(f"   ⚠️  No peers connected after {max_wait_for_peers}s - will broadcast anyway")
-                print(f"   Registration may need to be retried manually")
-            
-            # CRITICAL: Regenerate registration with fresh timestamp to ensure unique tx_hash
-            # This prevents duplicate-hash rejection if previous broadcast wasn't mined
-            device_hash = hashlib.sha256(self.device_id.encode()).hexdigest()
-            nonce = self.ledger.get_nonce(self.reward_address)
-            
-            print(f"   Regenerating registration with fresh timestamp...")
-            print(f"   Address: {self.reward_address[:20]}...")
-            print(f"   Nonce: {nonce}")
-            
-            fresh_reg_tx = Transaction.create_validator_registration(
-                sender=self.reward_address,
-                public_key=self.public_key,
-                device_id=device_hash,
-                timestamp=time.time(),  # FRESH timestamp = unique hash
-                nonce=nonce
-            )
-            fresh_reg_tx.sign(self.private_key)
-            
-            print(f"   TX Hash: {fresh_reg_tx.tx_hash[:32]}...")
-            print(f"   Signature verified: {fresh_reg_tx.verify()}")
-            
-            # Add to our own mempool
-            added = self.mempool.add_transaction(fresh_reg_tx)
-            print(f"   Added to local mempool: {added}")
-            if not added:
-                print(f"   ⚠️  Mempool rejected - checking why...")
-                print(f"   Current mempool size: {len(self.mempool.pending_transactions)}")
-                print(f"   TX already in mempool: {fresh_reg_tx.tx_hash in self.mempool.pending_transactions}")
-            
-            # Broadcast to network
-            print(f"   Broadcasting to {len(self.p2p.peers)} peer(s)...")
-            await self.p2p.broadcast("new_transaction", {
-                "transaction": fresh_reg_tx.to_dict()
-            })
-            
-            print(f"📡 Validator registration broadcast to network!")
-            print(f"   TX Hash: {fresh_reg_tx.tx_hash[:32]}...")
-            print(f"   Waiting for inclusion in next block...")
-            
-            self.pending_validator_registration = None  # Clear after broadcasting
+            registration_task = asyncio.create_task(self._broadcast_validator_registration())
         
         await asyncio.gather(
             self.mine_blocks(),
