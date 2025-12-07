@@ -287,13 +287,14 @@ class Node:
                 # CRITICAL FIX: Skip proposer validation during bootstrap period (blocks ≤10)
                 # This allows syncing nodes to accept bootstrap blocks from not-yet-registered validators
                 # Without this, nodes miss validator_registration transactions and have incomplete validator sets
-                # DYNAMIC FALLBACK: Continue bootstrap if no active validators exist (prevents deadlock)
-                active_validators_check = self.ledger.get_active_validators()
-                is_bootstrap_block = block.height <= 10 or len(active_validators_check) == 0
+                # DYNAMIC FALLBACK: Continue bootstrap if validator_set is empty (prevents deadlock on fresh sync)
+                # NOTE: Use get_validator_set() not get_active_validators() - we care about "do I know my
+                # validator set yet?" not "are validators currently online by liveness metrics?"
+                current_validators = self.ledger.get_validator_set()
+                is_bootstrap_block = block.height <= 10 or len(current_validators) == 0
                 
                 if not is_bootstrap_block:
                     # After bootstrap: enforce proposer is registered validator
-                    current_validators = self.ledger.get_validator_set()
                     
                     if proposer_address not in current_validators:
                         print(f"❌ REJECT Block {block.height}: Proposer {proposer_address[:20]}... not in validator set")
