@@ -638,6 +638,12 @@ class Ledger:
                     'proposer_priority': 0
                 }
                 
+                # CRITICAL FIX: Also add to validator_set for consensus membership checks
+                # Without this, syncing nodes have genesis in registry but not in validator_set,
+                # causing "Proposer not in validator set" rejections at block 11+
+                if block.proposer not in self.validator_set:
+                    self.validator_set.append(block.proposer)
+                
                 print(f"▶️  GENESIS: Auto-registered genesis validator {block.proposer[:10]}... from block 0")
         
         # Add finality checkpoint if at checkpoint interval
@@ -673,7 +679,11 @@ class Ledger:
                     'proposer_priority': 0  # Tendermint priority tracking
                 }
                 
-                # Do NOT add to validator set immediately for non-genesis - will activate in 2 blocks
+                # CRITICAL FIX: Genesis validators (status='genesis') are immediately active
+                # and must be added to validator_set for consensus membership checks
+                if status == 'genesis' and tx.sender not in self.validator_set:
+                    self.validator_set.append(tx.sender)
+                # Non-genesis validators: Do NOT add to validator set immediately - will activate in 2 blocks
                 
                 # Update nonce
                 self.nonces[tx.sender] = expected_nonce + 1
