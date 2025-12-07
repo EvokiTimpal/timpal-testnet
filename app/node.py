@@ -488,8 +488,11 @@ class Node:
         """
         Handle blockchain sync request from a specific peer.
         
-        CRITICAL FIX: Use send_to_websocket() with direct websocket reference.
-        This bypasses peer_id dictionary lookups that fail during connection churn.
+        OPTIMIZED FOR PROXIED WEBSOCKET (Cloudflare Tunnel):
+        - Smaller batch size (20 blocks) to avoid overwhelming proxied connections
+        - Longer delays between blocks to prevent buffer overflow
+        - More tolerant of failures (connection may be slow, not dead)
+        - Ping keepalives more frequently
         
         Args:
             data: Sync request data containing current_height
@@ -529,12 +532,18 @@ class Node:
             blocks_to_send = latest.height - start_height + 1
             print(f"📤 SYNC RESPONSE: Sending {blocks_to_send} blocks (heights {start_height}-{latest.height}) to peer {peer_id[:8]}...")
             
-            # Send ALL blocks directly to websocket (bypasses peer_id lookup!)
+            # CLOUDFLARE TUNNEL OPTIMIZATION:
+            # - Smaller batches (20 blocks) to avoid overwhelming proxied connections
+            # - More tolerant of failures (25 allowed vs 10 before)
+            # - Longer delays between blocks
             sent_count = 0
             failed_count = 0
-            batch_size = 100  # Log progress every 100 blocks
+            consecutive_failures = 0
+            batch_size = 20  # Reduced from 100 for proxied WebSocket friendliness
+            max_consecutive_failures = 5  # Abort only on consecutive failures
+            max_total_failures = 25  # More tolerant of intermittent failures
             
-            print(f"📦 SYNC STARTING: Will send {blocks_to_send} blocks in batches of {batch_size}...")
+            print(f"📦 SYNC STARTING: Will send {blocks_to_send} blocks (batch logging every {batch_size})...")
             
             for height in range(start_height, latest.height + 1):
                 block = self.ledger.get_block_by_height(height)
@@ -548,57 +557,120 @@ class Node:
                     
                     if success:
                         sent_count += 1
+                        consecutive_failures = 0  # Reset on success
                     else:
                         failed_count += 1
+                        consecutive_failures += 1
                         if failed_count <= 5:  # Only log first few failures
-                            print(f"⚠️  SYNC FAILED: Block {height} delivery failed")
+                            print(f"⚠️  SYNC FAILED: Block {height} delivery failed (consecutive: {consecutive_failures})")
                         if failed_count == 5:
                             print(f"⚠️  (Suppressing further failure logs...)")
-                        # If we get failures, connection may be dead
-                        if failed_count >= 10:
-                            print(f"❌ SYNC ABORTED: Too many failures ({failed_count}), connection likely dead")
+                        
+                        # Abort on consecutive failures (connection likely dead)
+                        if consecutive_failures >= max_consecutive_failures:
+                            print(f"❌ SYNC ABORTED: {consecutive_failures} consecutive failures, connection likely dead")
+                            print(f"   Peer can re-request sync from height {start_height + sent_count - 1}")
                             break
+                        
+                        # Abort on too many total failures
+                        if failed_count >= max_total_failures:
+                            print(f"❌ SYNC ABORTED: Too many total failures ({failed_count})")
+                            break
+                        
+                        # Wait longer after failure before retrying
+                        await asyncio.sleep(0.1)
                     
                     # Progress logging every batch_size blocks
-                    if sent_count % batch_size == 0:
+                    if sent_count > 0 and sent_count % batch_size == 0:
                         progress = (sent_count / blocks_to_send) * 100
                         print(f"📦 SYNC PROGRESS: {sent_count}/{blocks_to_send} blocks ({progress:.1f}%)")
                     
-                    # KEEPALIVE: Send ping every 500 blocks to prevent connection timeout
-                    if sent_count % 500 == 0:
+                    # KEEPALIVE: Send ping every 50 blocks to prevent connection timeout
+                    # More frequent than before (was 500) for proxied connections
+                    if sent_count > 0 and sent_count % 50 == 0:
                         try:
                             await websocket.ping()
                         except Exception:
                             pass  # Ignore ping errors, block send will fail if connection is dead
                     
-                    # Slightly longer delay to avoid overwhelming connection
-                    await asyncio.sleep(0.002)  # Faster to complete sync before timeout
+                    # Longer delay to avoid overwhelming proxied connections
+                    # 10ms delay = ~100 blocks/second max throughput
+                    await asyncio.sleep(0.01)
             
-            print(f"✅ SYNC COMPLETE: Sent {sent_count}/{blocks_to_send} blocks to peer {peer_id[:8]}... ({failed_count} failed)")
+            if sent_count > 0:
+                print(f"✅ SYNC COMPLETE: Sent {sent_count}/{blocks_to_send} blocks to peer {peer_id[:8]}... ({failed_count} failed)")
+            else:
+                print(f"❌ SYNC FAILED: Could not send any blocks to peer {peer_id[:8]}...")
             
         except Exception as e:
             print(f"❌ SYNC ERROR: Exception in handle_sync_request - {e}")
             import traceback
             traceback.print_exc()
     
+    def _get_http_urls_from_seeds(self) -> list:
+        """
+        Convert WebSocket seed URLs to HTTP API URLs.
+        
+        Supports:
+        - ws://host:port -> http://host:port+1
+        - wss://host:port -> https://host:port+1
+        - wss://host -> https://host (Cloudflare Tunnel style, same port)
+        
+        Returns:
+            List of HTTP URLs for API access
+        """
+        http_urls = []
+        
+        # Add explicit HTTP seeds from config if available
+        if hasattr(config, 'HTTP_SEEDS') and config.HTTP_SEEDS:
+            http_urls.extend(config.HTTP_SEEDS)
+        
+        # Convert WebSocket seeds to HTTP
+        for seed in self.p2p.seed_nodes:
+            try:
+                if seed.startswith('wss://'):
+                    # Secure WebSocket -> HTTPS
+                    # wss://host:port -> https://host:port+1
+                    # wss://host -> https://host (Cloudflare Tunnel, same hostname)
+                    host_port = seed.replace('wss://', '').replace('/', '')
+                    if ':' in host_port:
+                        host, port_str = host_port.rsplit(':', 1)
+                        http_port = int(port_str) + 1
+                        http_urls.append(f"https://{host}:{http_port}")
+                    else:
+                        # No port specified (Cloudflare Tunnel style)
+                        # Try both: same hostname (if tunnel routes both) and explicit port
+                        http_urls.append(f"https://{host_port}")
+                        http_urls.append(f"https://{host_port}:9001")  # Common HTTP API port
+                        
+                elif seed.startswith('ws://'):
+                    # Plain WebSocket -> HTTP
+                    host_port = seed.replace('ws://', '').replace('/', '')
+                    if ':' in host_port:
+                        host, port_str = host_port.rsplit(':', 1)
+                        http_port = int(port_str) + 1
+                        http_urls.append(f"http://{host}:{http_port}")
+            except (ValueError, IndexError):
+                continue
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_urls = []
+        for url in http_urls:
+            if url not in seen:
+                seen.add(url)
+                unique_urls.append(url)
+        
+        return unique_urls
+    
     async def _get_max_peer_height(self) -> int:
         """
         Query all peers via HTTP API to get maximum height in the network.
         This enables proactive catch-up when node falls behind.
-        """
-        peer_http_urls = []
         
-        # Build HTTP URLs from P2P seed nodes
-        for seed in self.p2p.seed_nodes:
-            if seed.startswith('ws://'):
-                host_port = seed.replace('ws://', '').replace('/', '')
-                if ':' in host_port:
-                    host, port_str = host_port.rsplit(':', 1)
-                    try:
-                        http_port = int(port_str) + 1
-                        peer_http_urls.append(f"http://{host}:{http_port}")
-                    except ValueError:
-                        pass
+        Supports both ws:// and wss:// seed nodes.
+        """
+        peer_http_urls = self._get_http_urls_from_seeds()
         
         max_height = 0
         for peer_url in peer_http_urls:
@@ -606,7 +678,7 @@ class Node:
                 async with aiohttp.ClientSession() as session:
                     async with session.get(
                         f"{peer_url}/api/health",
-                        timeout=aiohttp.ClientTimeout(total=2)
+                        timeout=aiohttp.ClientTimeout(total=5)
                     ) as resp:
                         if resp.status == 200:
                             data = await resp.json()
@@ -1272,27 +1344,8 @@ class Node:
         print(f"📊 Target Range: blocks {start_height} → {end_height} ({end_height - start_height + 1} blocks)")
         print(f"🔒 Current Chain Height: {len(self.ledger.blocks) - 1}")
         
-        # Build list of HTTP endpoints to try
-        peer_http_urls = []
-        
-        # PRIORITY 1: Use explicit HTTP_SEEDS from config (most reliable)
-        if hasattr(config, 'HTTP_SEEDS') and config.HTTP_SEEDS:
-            peer_http_urls.extend(config.HTTP_SEEDS)
-            print(f"📡 Using {len(config.HTTP_SEEDS)} HTTP seed(s) from config")
-        
-        # PRIORITY 2: Convert WS seed nodes to HTTP (fallback)
-        for seed in self.p2p.seed_nodes:
-            if seed.startswith('ws://'):
-                host_port = seed.replace('ws://', '').replace('/', '')
-                if ':' in host_port:
-                    host, port_str = host_port.rsplit(':', 1)
-                    try:
-                        http_port = int(port_str) + 1
-                        http_url = f"http://{host}:{http_port}"
-                        if http_url not in peer_http_urls:  # Avoid duplicates
-                            peer_http_urls.append(http_url)
-                    except ValueError:
-                        pass
+        # Build list of HTTP endpoints to try (supports ws://, wss://, and explicit HTTP_SEEDS)
+        peer_http_urls = self._get_http_urls_from_seeds()
         
         if not peer_http_urls:
             print(f"❌ SYNC FAILED: No peer HTTP endpoints available")
@@ -1506,7 +1559,12 @@ class Node:
     
     async def bootstrap_or_sync(self):
         """
-        P2P WebSocket sync - syncs blockchain over WebSocket connection.
+        Robust blockchain sync with HTTP-first strategy.
+        
+        SYNC STRATEGY (optimized for Cloudflare Tunnel / proxied WebSocket):
+        1. Try HTTP batch sync first (most reliable for historical blocks)
+        2. Fall back to P2P WebSocket sync if HTTP fails
+        3. Use P2P only for live head blocks after initial sync
         
         CRITICAL ANTI-FORK RULE:
         - Only nodes started with --genesis flag can create block 0
@@ -1546,18 +1604,41 @@ class Node:
             # Do NOT create genesis - wait for peers
             return
         
-        print(f"📡 Connected to {peer_count} peer(s), requesting blockchain via P2P...")
+        print(f"📡 Connected to {peer_count} peer(s), starting sync...")
         
-        # Request sync via P2P WebSocket (not HTTP!)
-        # The sync_request will trigger handle_sync_request on peers
-        # which sends blocks back via new_block messages
+        # STRATEGY 1: HTTP batch sync (preferred for historical blocks)
+        # More reliable over proxied connections (Cloudflare Tunnel, etc.)
+        http_urls = self._get_http_urls_from_seeds()
+        if http_urls:
+            print(f"🌐 HTTP SYNC: Trying HTTP batch sync from {len(http_urls)} endpoint(s)...")
+            for url in http_urls:
+                print(f"   - {url}")
+            
+            http_success = await self.http_batch_sync(http_urls)
+            if http_success:
+                block_count = self.ledger.get_block_count()
+                print(f"✅ HTTP sync successful! Synced {block_count} blocks")
+                self.synced = True
+                return
+            else:
+                print(f"⚠️  HTTP sync failed, falling back to P2P WebSocket sync...")
+        else:
+            print(f"⚠️  No HTTP endpoints available, using P2P WebSocket sync...")
+        
+        # STRATEGY 2: P2P WebSocket sync (fallback)
+        # Less reliable over proxied connections but works for direct connections
+        print(f"📡 P2P SYNC: Requesting blockchain via WebSocket...")
+        
+        # Request sync via P2P WebSocket
         # Send -1 to indicate "I have no blocks, send me everything including genesis"
         await self.p2p.broadcast("sync_request", {"current_height": -1})
         
         # Wait for blocks to arrive via P2P
-        max_wait_seconds = 30
-        check_interval = 1
+        max_wait_seconds = 60  # Increased timeout for proxied connections
+        check_interval = 2
         waited = 0
+        last_block_count = 0
+        stall_count = 0
         
         print(f"⏳ Waiting for blocks from peers (up to {max_wait_seconds}s)...")
         
@@ -1566,21 +1647,36 @@ class Node:
             waited += check_interval
             
             block_count = self.ledger.get_block_count()
-            if block_count > 0:
-                print(f"✅ P2P sync successful! Received {block_count} blocks")
+            
+            # Check if we're making progress
+            if block_count > last_block_count:
+                print(f"📦 P2P SYNC PROGRESS: Received {block_count} blocks...")
+                last_block_count = block_count
+                stall_count = 0
+            else:
+                stall_count += 1
+            
+            # If we have blocks and sync has stalled, we might be done
+            if block_count > 0 and stall_count >= 3:
+                print(f"✅ P2P sync complete! Received {block_count} blocks (sync stalled, assuming complete)")
                 self.synced = True
                 return
             
-            # Re-broadcast sync request every 10 seconds
-            if waited % 10 == 0 and waited > 0:
-                print(f"🔄 Re-requesting sync (waited {waited}s, have {block_count} blocks)...")
-                # Send -1 to indicate we still need genesis
-                await self.p2p.broadcast("sync_request", {"current_height": -1})
+            # Re-broadcast sync request every 15 seconds if no progress
+            if waited % 15 == 0 and waited > 0 and stall_count > 0:
+                print(f"🔄 Re-requesting sync (waited {waited}s, have {block_count} blocks, stalled {stall_count}x)...")
+                current_height = block_count - 1 if block_count > 0 else -1
+                await self.p2p.broadcast("sync_request", {"current_height": current_height})
         
-        # Sync timed out
-        print(f"⚠️  P2P sync timed out after {max_wait_seconds}s")
-        print("   Blocks may still arrive - node will continue running")
-        print("   If no blocks arrive, check seed node connectivity")
+        # Check final state
+        final_block_count = self.ledger.get_block_count()
+        if final_block_count > 0:
+            print(f"✅ P2P sync finished with {final_block_count} blocks (timeout reached)")
+            self.synced = True
+        else:
+            print(f"⚠️  Sync timed out after {max_wait_seconds}s with no blocks")
+            print("   Blocks may still arrive - node will continue running")
+            print("   If no blocks arrive, check seed node connectivity")
     
     
     async def start(self):
