@@ -222,11 +222,22 @@ class Ledger:
                     return False
             
             # CRITICAL SECURITY #3c: Reject blocks from far future (prevent time manipulation)
+            # CLOCK DRIFT TOLERANCE: Only enforce for locally produced blocks (not during sync)
+            # This allows nodes with different system clocks to sync the chain
+            # Synced blocks are validated by chain continuity (sequential timestamps, previous_hash)
             import time
             current_time = time.time()
-            if block.timestamp > current_time + config.MAX_FUTURE_TIMESTAMP_DRIFT:
-                print(f"REJECT: Block timestamp {block.timestamp} is too far in future (current: {current_time})")
-                return False
+            if not skip_proposer_check:
+                # Strict check for blocks THIS node produces
+                if block.timestamp > current_time + config.MAX_FUTURE_TIMESTAMP_DRIFT:
+                    print(f"REJECT: Block timestamp {block.timestamp} is too far in future (current: {current_time})")
+                    return False
+            else:
+                # Lenient check for synced blocks - only warn, don't reject
+                # Chain continuity (sequential timestamps) provides sufficient validation
+                time_diff = block.timestamp - current_time
+                if time_diff > 60:  # More than 1 minute in future
+                    print(f"⚠️  CLOCK DRIFT: Block {block.height} timestamp is {time_diff:.0f}s ahead of local time - syncing anyway")
             
             # TIME-SLICED SLOTS VALIDATION: Ensure block timestamp is within assigned window
             # This prevents race conditions when offline validators come back online

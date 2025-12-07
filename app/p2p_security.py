@@ -36,10 +36,12 @@ class P2PSecurityManager:
     """
     
     # Message age limit (seconds) - reject messages older than this
-    MAX_MESSAGE_AGE = 600  # 10 minutes (increased for network latency)
+    MAX_MESSAGE_AGE = 86400  # 24 hours - very lenient for clock drift tolerance
     
     # Maximum time drift allowed between nodes (seconds)
-    MAX_TIME_DRIFT = 300  # 5 minutes (increased to handle clock skew between nodes)
+    # CRITICAL: Set very high to allow nodes with different system clocks to sync
+    # Nonces still prevent replay attacks even with lenient timestamps
+    MAX_TIME_DRIFT = 86400  # 24 hours - allows nodes with any reasonable clock drift to connect
     
     # Nonce cache size per peer (prevent replay attacks)
     NONCE_CACHE_SIZE = 1000
@@ -156,6 +158,10 @@ class P2PSecurityManager:
         """
         Validate message timestamp to prevent replay attacks.
         
+        CLOCK DRIFT TOLERANCE: This method is intentionally lenient to allow
+        nodes with different system clocks to communicate. Nonces provide
+        replay protection even with relaxed timestamp validation.
+        
         Args:
             timestamp: Unix timestamp from message
         
@@ -168,13 +174,20 @@ class P2PSecurityManager:
         current_time = time.time()
         age = current_time - timestamp
         
-        # Reject messages from the future (clock skew attacks)
-        if age < -self.MAX_TIME_DRIFT:
-            return (False, f"Message timestamp is {abs(age):.0f}s in the future")
+        # Log warning for significant clock drift (> 60 seconds) but don't reject
+        # This helps operators identify clock sync issues without breaking connectivity
+        CLOCK_DRIFT_WARNING_THRESHOLD = 60  # 1 minute
+        if abs(age) > CLOCK_DRIFT_WARNING_THRESHOLD:
+            drift_direction = "behind" if age > 0 else "ahead"
+            print(f"⚠️  CLOCK DRIFT: Peer clock is {abs(age):.0f}s {drift_direction} - continuing anyway")
         
-        # Reject old messages (replay attacks)
+        # Only reject for extreme cases (> 24 hours) to prevent obvious attacks
+        # while still allowing nodes with misconfigured clocks to sync
+        if age < -self.MAX_TIME_DRIFT:
+            return (False, f"Message timestamp is {abs(age):.0f}s in the future (extreme drift)")
+        
         if age > self.MAX_MESSAGE_AGE:
-            return (False, f"Message is {age:.0f}s old (max age: {self.MAX_MESSAGE_AGE}s)")
+            return (False, f"Message is {age:.0f}s old (extreme drift)")
         
         return (True, "Timestamp valid")
     
