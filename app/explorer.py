@@ -1627,7 +1627,7 @@ async def get_validators(request: Request):
     validators = []
     
     current_height = ledger.get_block_count() - 1
-    LIVENESS_WINDOW = 100
+    LIVENESS_WINDOW = 30  # ~90 seconds at 3s/block - matches ledger grace period
     
     cached_validator_stats = get_cached_validator_stats(ledger)
     
@@ -1852,7 +1852,7 @@ async def validators_dashboard(request: Request):
     validators = []
     
     current_height = ledger.get_block_count() - 1
-    LIVENESS_WINDOW = 100
+    LIVENESS_WINDOW = 30  # ~90 seconds at 3s/block - matches ledger grace period
     
     cached_validator_stats = get_cached_validator_stats(ledger)
     
@@ -2345,7 +2345,7 @@ async def network_visualization(request: Request):
     
     # Get current height for liveness detection (same logic as leaderboard)
     current_height = ledger.get_block_count() - 1
-    LIVENESS_WINDOW = 100  # Consider validator offline if no blocks proposed in last 100 blocks
+    LIVENESS_WINDOW = 30  # ~90 seconds at 3s/block - matches ledger grace period
     
     for idx, (address, validator_data) in enumerate(ledger.validator_registry.items()):
         info = ledger.get_validator_info(address)
