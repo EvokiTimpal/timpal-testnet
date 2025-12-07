@@ -1765,10 +1765,13 @@ class Ledger:
         online_validators.update(recent_proposers)
         
         # SOURCE 2: Newly registered validators (grace period)
-        # Dynamic grace: max(100 blocks, 2 × validator count)
-        # Ensures new validators get at least 2 full proposer rotations
-        MIN_GRACE_BLOCKS = 100
+        # Dynamic grace: max(30 blocks, 2 × validator count), capped at 50
+        # Ensures new validators get time to prove liveness, but not too long
+        # 30 blocks = ~90 seconds at 3s/block - enough to sync and propose
+        MIN_GRACE_BLOCKS = 30
+        MAX_GRACE_BLOCKS = 50
         grace_window = max(MIN_GRACE_BLOCKS, 2 * active_validator_count)
+        grace_window = min(grace_window, MAX_GRACE_BLOCKS)
         
         for addr, data in self.validator_registry.items():
             if addr == "genesis":
