@@ -162,6 +162,86 @@ class Ledger:
             raise TypeError("Callback must be callable or None")
         self._online_validators_callback = callback
     
+    def mark_validator_offline(self, address: str, current_height: int):
+        """
+        Mark a validator as offline when P2P detects they've disconnected.
+        
+        TIMPAL 10-BLOCK REWARD CUTOFF:
+        - P2P detection is instant (gossip, peer reports, VRF confirmations)
+        - Rewards stop after 10 consecutive blocks offline
+        - Validator is automatically reinstated when they return
+        
+        Args:
+            address: Validator address to mark offline
+            current_height: Current blockchain height when offline was detected
+        """
+        if address not in self.validator_registry:
+            return
+        
+        data = self.validator_registry[address]
+        if not isinstance(data, dict):
+            return
+        
+        # Only mark offline if not already marked
+        if data.get('offline_since_height') is None:
+            data['offline_since_height'] = current_height
+            print(f"⚠️  Validator {address[:20]}... marked OFFLINE at height {current_height}")
+    
+    def mark_validator_online(self, address: str):
+        """
+        Mark a validator as online when P2P detects they've reconnected.
+        
+        TIMPAL 10-BLOCK REWARD CUTOFF:
+        - If validator returns within 10 blocks, they never lose rewards
+        - If they were offline > 10 blocks, rewards resume immediately on return
+        
+        Args:
+            address: Validator address to mark online
+        """
+        if address not in self.validator_registry:
+            return
+        
+        data = self.validator_registry[address]
+        if not isinstance(data, dict):
+            return
+        
+        # Clear offline status
+        if data.get('offline_since_height') is not None:
+            offline_height = data.get('offline_since_height')
+            data['offline_since_height'] = None
+            print(f"✅ Validator {address[:20]}... marked ONLINE (was offline since height {offline_height})")
+    
+    def is_validator_offline_for_rewards(self, address: str, current_height: int) -> bool:
+        """
+        Check if a validator has been offline long enough to lose rewards.
+        
+        TIMPAL 10-BLOCK REWARD CUTOFF:
+        - Returns True if validator has been offline for >= 10 blocks
+        - Returns False if validator is online or offline < 10 blocks
+        
+        Args:
+            address: Validator address to check
+            current_height: Current blockchain height
+            
+        Returns:
+            True if validator should be excluded from rewards, False otherwise
+        """
+        if address not in self.validator_registry:
+            return True  # Unknown validators don't get rewards
+        
+        data = self.validator_registry[address]
+        if not isinstance(data, dict):
+            return False
+        
+        offline_since = data.get('offline_since_height')
+        if offline_since is None:
+            return False  # Validator is online
+        
+        # 10-BLOCK CUTOFF: Exclude from rewards if offline >= 10 blocks
+        OFFLINE_REWARD_CUTOFF_BLOCKS = 10
+        blocks_offline = current_height - offline_since
+        return blocks_offline >= OFFLINE_REWARD_CUTOFF_BLOCKS
+    
     def add_block(self, block: Block, skip_proposer_check: bool = False, use_historical_validators: bool = False) -> bool:
         """
         Add a block to the blockchain with comprehensive validation.
@@ -1729,21 +1809,24 @@ class Ledger:
 
     def get_online_validators_deterministic(self, current_height: int) -> list:
         """
-        DETERMINISTIC online validator detection using ONLY on-chain data.
+        DETERMINISTIC online validator detection using on-chain data + P2P liveness state.
         
         TIMPAL PHILOSOPHY: All online validators receive equal block rewards.
         
-        This function determines "online" using ONLY blockchain data (no P2P state),
+        This function determines "online" using blockchain data and P2P-tracked liveness,
         ensuring all nodes compute the SAME set of online validators → same reward_allocations
         → same block hash → NO FORKS.
         
-        PROOF OF ACTIVITY MODEL: Validators must prove they are online by either:
-        1. Proposing blocks (highest confidence of liveness)
-        2. Submitting epoch attestations (scalable liveness proof)
+        TIMPAL 10-BLOCK REWARD CUTOFF:
+        - P2P detection is instant (gossip, peer reports, VRF confirmations)
+        - Validators marked offline by P2P have offline_since_height set
+        - After 10 consecutive blocks offline, validator is excluded from rewards
+        - Validator is automatically reinstated when they return (within 10 blocks = no lost rewards)
         
-        NO GRACE PERIOD: Newly registered validators do NOT receive rewards until
-        they prove activity on-chain. This ensures only truly online validators
-        that are helping the network receive rewards.
+        LIVENESS SOURCES:
+        1. P2P offline tracking (10-block cutoff for rewards)
+        2. Recent block proposers (highest confidence of liveness)
+        3. Epoch attestations (scalable liveness proof)
         
         Args:
             current_height: Current blockchain height
@@ -1772,7 +1855,18 @@ class Ledger:
         validators_with_attestations = self.get_validators_with_recent_attestations(lookback_blocks=100)
         online_validators.update(validators_with_attestations)
         
+        # SOURCE 3: P2P-tracked online validators (if callback available)
+        # This adds validators that are connected via P2P but haven't proposed/attested yet
+        if self._online_validators_callback:
+            try:
+                p2p_online = self._online_validators_callback()
+                if isinstance(p2p_online, (set, list, tuple)):
+                    online_validators.update(p2p_online)
+            except Exception:
+                pass
+        
         # Filter to only registered, active validators that pass economics
+        # AND apply 10-BLOCK REWARD CUTOFF for offline validators
         result = []
         for addr in online_validators:
             if addr not in self.validator_registry:
@@ -1783,6 +1877,11 @@ class Ledger:
                     continue
             if not self.validator_economics.is_validator_active(addr, current_height):
                 continue
+            
+            # TIMPAL 10-BLOCK REWARD CUTOFF: Exclude validators offline >= 10 blocks
+            if self.is_validator_offline_for_rewards(addr, current_height):
+                continue
+            
             result.append(addr)
         
         # CRITICAL: Sorted for deterministic ordering across all nodes

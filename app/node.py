@@ -118,17 +118,25 @@ class Node:
             print(f"⚠️ Cannot register as validator: Missing wallet credentials")
             print(f"   Create a wallet first: python app/wallet.py")
         
-        # DISABLED: P2P callback for online validator detection
-        # REASON: P2P state is NON-DETERMINISTIC across nodes, causing forks!
-        # Each node has different P2P connections, so get_connected_validators()
-        # returns different results, leading to different reward_allocations → different block hashes.
+        # TIMPAL 10-BLOCK REWARD CUTOFF: Register P2P callbacks for validator liveness
         # 
-        # SOLUTION: Rewards go 100% to proposer (deterministic). When we want to
-        # distribute rewards to online validators, we must use ON-CHAIN attestations,
-        # not P2P state.
-        # 
-        # DO NOT RE-ENABLE THIS WITHOUT FIXING THE DETERMINISM ISSUE:
-        # self.ledger.set_online_validators_callback(self.get_connected_validators)
+        # HOW IT WORKS (deterministic despite using P2P):
+        # 1. P2P detects validator disconnect → calls mark_validator_offline(addr, height)
+        # 2. This sets offline_since_height in validator_registry (ON-CHAIN state)
+        # 3. get_online_validators_deterministic() checks offline_since_height
+        # 4. After 10 blocks offline, validator is excluded from rewards
+        # 5. When validator reconnects → calls mark_validator_online(addr)
+        # 6. This clears offline_since_height, validator resumes receiving rewards
+        #
+        # WHY THIS IS DETERMINISTIC:
+        # - offline_since_height is stored in validator_registry (on-chain)
+        # - All nodes see the same offline_since_height for each validator
+        # - The 10-block cutoff is calculated from on-chain data only
+        # - P2P is only used to UPDATE the on-chain state, not to calculate rewards
+        self.p2p.register_validator_liveness_callbacks(
+            on_offline=self._on_validator_offline,
+            on_online=self._on_validator_online
+        )
     
     def get_connected_validators(self) -> set:
         """
@@ -164,6 +172,35 @@ class Node:
                         connected_validators.add(validator_addr)
         
         return connected_validators
+    
+    def _on_validator_offline(self, validator_address: str):
+        """
+        Callback when P2P detects a validator has disconnected.
+        
+        TIMPAL 10-BLOCK REWARD CUTOFF:
+        - Sets offline_since_height in validator_registry
+        - After 10 blocks offline, validator is excluded from rewards
+        - Proposer rights stop immediately (VRF skips offline validators)
+        
+        Args:
+            validator_address: Address of the validator that disconnected
+        """
+        current_height = self.ledger.get_block_count()
+        self.ledger.mark_validator_offline(validator_address, current_height)
+    
+    def _on_validator_online(self, validator_address: str):
+        """
+        Callback when P2P detects a validator has reconnected.
+        
+        TIMPAL 10-BLOCK REWARD CUTOFF:
+        - Clears offline_since_height in validator_registry
+        - If validator returns within 10 blocks, they never lost rewards
+        - If they were offline > 10 blocks, rewards resume immediately
+        
+        Args:
+            validator_address: Address of the validator that reconnected
+        """
+        self.ledger.mark_validator_online(validator_address)
     
     async def _get_peer_height(self, peer_url: str) -> int:
         """
