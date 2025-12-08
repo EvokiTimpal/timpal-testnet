@@ -1737,10 +1737,13 @@ class Ledger:
         ensuring all nodes compute the SAME set of online validators → same reward_allocations
         → same block hash → NO FORKS.
         
-        On-chain liveness sources (all deterministic):
-        1. RECENT PROPOSERS: Validators who proposed blocks in last N blocks
-        2. NEWLY REGISTERED: Validators within grace period after registration  
-        3. ATTESTATION HOLDERS: Validators with recent epoch attestations
+        PROOF OF ACTIVITY MODEL: Validators must prove they are online by either:
+        1. Proposing blocks (highest confidence of liveness)
+        2. Submitting epoch attestations (scalable liveness proof)
+        
+        NO GRACE PERIOD: Newly registered validators do NOT receive rewards until
+        they prove activity on-chain. This ensures only truly online validators
+        that are helping the network receive rewards.
         
         Args:
             current_height: Current blockchain height
@@ -1764,33 +1767,8 @@ class Ledger:
         recent_proposers = self._get_recently_active_validators(current_height, lookback_blocks=proposer_lookback)
         online_validators.update(recent_proposers)
         
-        # SOURCE 2: Newly registered validators (grace period)
-        # Dynamic grace: max(30 blocks, 2 × validator count), capped at 50
-        # Ensures new validators get time to prove liveness, but not too long
-        # 30 blocks = ~90 seconds at 3s/block - enough to sync and propose
-        MIN_GRACE_BLOCKS = 30
-        MAX_GRACE_BLOCKS = 50
-        grace_window = max(MIN_GRACE_BLOCKS, 2 * active_validator_count)
-        grace_window = min(grace_window, MAX_GRACE_BLOCKS)
-        
-        for addr, data in self.validator_registry.items():
-            if addr == "genesis":
-                continue
-            if not isinstance(data, dict):
-                continue
-            if data.get('status') not in ('active', 'genesis'):
-                continue
-                
-            activation_height = data.get('activation_height', 0)
-            
-            # Include if within grace window
-            if activation_height > 0 and current_height - activation_height < grace_window:
-                online_validators.add(addr)
-            # Genesis validators: include if chain is still early
-            elif activation_height == 0 and current_height < grace_window:
-                online_validators.add(addr)
-        
-        # SOURCE 3: Attestation holders (epoch-based liveness proof)
+        # SOURCE 2: Attestation holders (epoch-based liveness proof)
+        # Validators must submit attestations each epoch to prove they're online and synced
         validators_with_attestations = self.get_validators_with_recent_attestations(lookback_blocks=100)
         online_validators.update(validators_with_attestations)
         
