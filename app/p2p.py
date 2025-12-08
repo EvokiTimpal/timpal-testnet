@@ -47,6 +47,14 @@ class P2PNetwork:
         
         # Callback for when peer connects (used for sync-after-reconnect)
         self.on_peer_connected_callback = None
+        
+        # TIMPAL 10-BLOCK REWARD CUTOFF: Track peer-to-validator mapping
+        # Maps peer_id -> validator_address for liveness tracking
+        self.peer_validator_addresses: Dict[str, str] = {}
+        
+        # Callbacks for validator liveness tracking
+        self.on_validator_offline_callback = None  # Called when validator disconnects
+        self.on_validator_online_callback = None   # Called when validator reconnects
     
     def register_handler(self, message_type: str, handler):
         self.message_handlers[message_type] = handler
@@ -58,6 +66,19 @@ class P2PNetwork:
         """Register callback for when a peer successfully connects.
         Used by Node to request sync after reconnection."""
         self.on_peer_connected_callback = callback
+    
+    def register_validator_liveness_callbacks(self, on_offline, on_online):
+        """
+        Register callbacks for validator liveness tracking.
+        
+        TIMPAL 10-BLOCK REWARD CUTOFF:
+        - on_offline(validator_address): Called when a validator disconnects
+        - on_online(validator_address): Called when a validator reconnects
+        
+        These callbacks allow the ledger to track offline_since_height for each validator.
+        """
+        self.on_validator_offline_callback = on_offline
+        self.on_validator_online_callback = on_online
     
     def _get_peer_ip(self, websocket) -> str:
         try:
@@ -147,6 +168,16 @@ class P2PNetwork:
         except websockets.exceptions.ConnectionClosed:
             print(f"🔌 P2P: Connection closed from {peer_ip} (peer_id: {peer_id[:8]}...)")
         finally:
+            # TIMPAL 10-BLOCK REWARD CUTOFF: Notify ledger when validator disconnects
+            if peer_id in self.peer_validator_addresses:
+                validator_addr = self.peer_validator_addresses[peer_id]
+                del self.peer_validator_addresses[peer_id]
+                if self.on_validator_offline_callback:
+                    try:
+                        self.on_validator_offline_callback(validator_addr)
+                    except Exception as e:
+                        print(f"⚠️  Error in validator offline callback: {e}")
+            
             if peer_id in self.peers:
                 del self.peers[peer_id]
             if peer_id in self.peer_ips:
@@ -202,6 +233,20 @@ class P2PNetwork:
             # Process authenticated message
             if message_type == "announce_node":
                 device_id = data.get("device_id")
+                reward_address = data.get("reward_address")
+                
+                # TIMPAL 10-BLOCK REWARD CUTOFF: Track peer-to-validator mapping
+                if reward_address:
+                    old_addr = self.peer_validator_addresses.get(peer_id)
+                    if old_addr != reward_address:
+                        self.peer_validator_addresses[peer_id] = reward_address
+                        # Notify ledger that this validator is online
+                        if self.on_validator_online_callback:
+                            try:
+                                self.on_validator_online_callback(reward_address)
+                            except Exception as e:
+                                print(f"⚠️  Error in validator online callback: {e}")
+                
                 if device_id and device_id not in self.known_device_ids:
                     self.known_device_ids.add(device_id)
                     print(f"🤝 P2P: Completed handshake with peer {peer_id[:8]}... (device: {device_id[:16]}...)")
@@ -518,6 +563,16 @@ class P2PNetwork:
             print(f"⚠️  P2P: Unexpected error in outbound connection to {peer_address}")
             print(f"   Error: {type(e).__name__}: {e}")
         finally:
+            # TIMPAL 10-BLOCK REWARD CUTOFF: Notify ledger when validator disconnects
+            if peer_address in self.peer_validator_addresses:
+                validator_addr = self.peer_validator_addresses[peer_address]
+                del self.peer_validator_addresses[peer_address]
+                if self.on_validator_offline_callback:
+                    try:
+                        self.on_validator_offline_callback(validator_addr)
+                    except Exception as e:
+                        print(f"⚠️  Error in validator offline callback: {e}")
+            
             if peer_address in self.outbound_peers:
                 del self.outbound_peers[peer_address]
                 print(f"🔗 P2P: Removed outbound peer {peer_address} from active connections")
