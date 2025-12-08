@@ -55,6 +55,10 @@ class P2PNetwork:
         # Callbacks for validator liveness tracking
         self.on_validator_offline_callback = None  # Called when validator disconnects
         self.on_validator_online_callback = None   # Called when validator reconnects
+        
+        # TIMPAL 10-BLOCK REWARD CUTOFF: Store reward_address for handshake
+        # This is set by Node after P2P initialization
+        self.reward_address: Optional[str] = None
     
     def register_handler(self, message_type: str, handler):
         self.message_handlers[message_type] = handler
@@ -171,12 +175,18 @@ class P2PNetwork:
             # TIMPAL 10-BLOCK REWARD CUTOFF: Notify ledger when validator disconnects
             if peer_id in self.peer_validator_addresses:
                 validator_addr = self.peer_validator_addresses[peer_id]
+                print(f"🔴 P2P LIVENESS: Peer {peer_id[:8]}... disconnected, validator: {validator_addr[:20]}...")
                 del self.peer_validator_addresses[peer_id]
                 if self.on_validator_offline_callback:
+                    print(f"🔴 P2P LIVENESS: Calling on_validator_offline_callback for {validator_addr[:20]}...")
                     try:
                         self.on_validator_offline_callback(validator_addr)
                     except Exception as e:
                         print(f"⚠️  Error in validator offline callback: {e}")
+                else:
+                    print(f"⚠️  P2P LIVENESS: No on_validator_offline_callback registered!")
+            else:
+                print(f"🔌 P2P LIVENESS: Peer {peer_id[:8]}... disconnected but no validator mapping found")
             
             if peer_id in self.peers:
                 del self.peers[peer_id]
@@ -240,12 +250,16 @@ class P2PNetwork:
                     old_addr = self.peer_validator_addresses.get(peer_id)
                     if old_addr != reward_address:
                         self.peer_validator_addresses[peer_id] = reward_address
+                        print(f"🔗 P2P LIVENESS: Stored peer-to-validator mapping: {peer_id[:8]}... -> {reward_address[:20]}...")
+                        print(f"🔗 P2P LIVENESS: Current peer_validator_addresses count: {len(self.peer_validator_addresses)}")
                         # Notify ledger that this validator is online
                         if self.on_validator_online_callback:
                             try:
                                 self.on_validator_online_callback(reward_address)
                             except Exception as e:
                                 print(f"⚠️  Error in validator online callback: {e}")
+                        else:
+                            print(f"⚠️  P2P LIVENESS: No on_validator_online_callback registered!")
                 
                 if device_id and device_id not in self.known_device_ids:
                     self.known_device_ids.add(device_id)
@@ -514,6 +528,12 @@ class P2PNetwork:
                 "type": "announce_node",
                 "device_id": self.device_id
             }
+            
+            # TIMPAL 10-BLOCK REWARD CUTOFF: Include reward_address in handshake
+            # This allows the receiving node to track peer-to-validator mapping
+            # for liveness detection (offline_since_height tracking)
+            if self.reward_address:
+                announce_msg["reward_address"] = self.reward_address
             
             # Add security fields (timestamp, nonce) via security manager
             announce_msg = self.security_manager.create_secure_message(announce_msg)

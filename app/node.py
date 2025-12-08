@@ -42,6 +42,11 @@ class Node:
         seed_nodes = [node for node in config.SEED_NODES if node != f"ws://localhost:{p2p_port}"]
         self.p2p = P2PNetwork(self.device_id, port=p2p_port, seed_nodes=seed_nodes, private_key=private_key, public_key=public_key, testnet_mode=testnet_mode)
         
+        # TIMPAL 10-BLOCK REWARD CUTOFF: Set reward_address on P2P for handshake
+        # This allows the P2P layer to include reward_address in the initial handshake
+        # so the receiving node can track peer-to-validator mapping for liveness detection
+        self.p2p.reward_address = self.reward_address
+        
         self.is_running = False
         self.genesis_address = genesis_address or f"tmpl{'0' * 44}"
         self.p2p_port = p2p_port
@@ -137,6 +142,7 @@ class Node:
             on_offline=self._on_validator_offline,
             on_online=self._on_validator_online
         )
+        print(f"🔗 LIVENESS: Registered P2P callbacks for validator liveness tracking")
     
     def get_connected_validators(self) -> set:
         """
@@ -186,6 +192,7 @@ class Node:
             validator_address: Address of the validator that disconnected
         """
         current_height = self.ledger.get_block_count()
+        print(f"🔴 LIVENESS CALLBACK: _on_validator_offline called for {validator_address[:20]}... at height {current_height}")
         self.ledger.mark_validator_offline(validator_address, current_height)
     
     def _on_validator_online(self, validator_address: str):
@@ -200,6 +207,7 @@ class Node:
         Args:
             validator_address: Address of the validator that reconnected
         """
+        print(f"🟢 LIVENESS CALLBACK: _on_validator_online called for {validator_address[:20]}...")
         self.ledger.mark_validator_online(validator_address)
     
     async def _get_peer_height(self, peer_url: str) -> int:
@@ -935,48 +943,61 @@ class Node:
                     print(f"⚠️  No active validators at height {next_height}, waiting...")
                 continue
             
-            # Check if I'm one of the ranked proposers for this slot
-            my_rank = None
-            for i, addr in enumerate(ranked_proposers):
-                if addr == self.reward_address:
-                    my_rank = i
-                    break
+            # SINGLE-VALIDATOR FAST PATH: Skip time-sliced window logic when alone
+            # When there's only one validator, there's no need to coordinate windows
+            # This prevents unnecessary slot skipping and timing delays
+            is_single_validator = (len(ranked_proposers) == 1 and ranked_proposers[0] == self.reward_address)
             
-            if my_rank is None:
-                # DEBUG: Print proposers to diagnose why nodes aren't being selected
-                print(f"🔍 DEBUG: Height {next_height}, Proposers: {[p[:20]+'...' for p in ranked_proposers]}, Me: {self.reward_address[:20]}...")
-                # Not my turn to propose - wait for next slot
-                await asyncio.sleep(0.1)
-                continue
-            
-            # I'm a ranked proposer! Check if it's currently my window
-            # BOOTSTRAP: Use lenient timing for first 10 blocks to handle stale genesis timestamp
-            # After block 10, strict Time-Sliced Windows enforcement (preserves safety invariant)
-            lenient_bootstrap = next_height <= 10
-            
-            is_my_turn, _ = am_i_proposer_now(self.reward_address, ranked_proposers, 
-                                               genesis_timestamp, current_slot, 
-                                               lenient_bootstrap=lenient_bootstrap)
-            
-            if not is_my_turn:
-                # Not my window yet - check when my window opens
-                wait_time = time_until_my_window(my_rank, genesis_timestamp, current_slot)
+            if is_single_validator:
+                # Single validator mode: always my turn, use current slot (don't skip)
+                my_rank = 0
+                is_my_turn = True
+                # Override current_slot to not skip ahead when active_rank != 0
+                current_slot = current_slot_check
+            else:
+                # Multi-validator mode: use full time-sliced window logic
+                # Check if I'm one of the ranked proposers for this slot
+                my_rank = None
+                for i, addr in enumerate(ranked_proposers):
+                    if addr == self.reward_address:
+                        my_rank = i
+                        break
                 
-                if wait_time > 0 and wait_time < 1.5:
-                    # My window is upcoming - wait for it to open
-                    print(f"⏰ Rank {my_rank} proposer waiting {wait_time:.2f}s for window")
-                    await asyncio.sleep(min(wait_time + 0.1, 0.5))  # Wait with small buffer
-                    continue
-                else:
-                    # My window already passed or too far in future - check if block received
-                    current_height = self.ledger.get_block_count() - 1
-                    if current_height >= next_height:
-                        # Block received from another proposer
-                        continue
-                    
-                    # Window passed but no block - move to next cycle
+                if my_rank is None:
+                    # DEBUG: Print proposers to diagnose why nodes aren't being selected
+                    print(f"🔍 DEBUG: Height {next_height}, Proposers: {[p[:20]+'...' for p in ranked_proposers]}, Me: {self.reward_address[:20]}...")
+                    # Not my turn to propose - wait for next slot
                     await asyncio.sleep(0.1)
                     continue
+                
+                # I'm a ranked proposer! Check if it's currently my window
+                # BOOTSTRAP: Use lenient timing for first 10 blocks to handle stale genesis timestamp
+                # After block 10, strict Time-Sliced Windows enforcement (preserves safety invariant)
+                lenient_bootstrap = next_height <= 10
+                
+                is_my_turn, _ = am_i_proposer_now(self.reward_address, ranked_proposers, 
+                                                   genesis_timestamp, current_slot, 
+                                                   lenient_bootstrap=lenient_bootstrap)
+                
+                if not is_my_turn:
+                    # Not my window yet - check when my window opens
+                    wait_time = time_until_my_window(my_rank, genesis_timestamp, current_slot)
+                    
+                    if wait_time > 0 and wait_time < 1.5:
+                        # My window is upcoming - wait for it to open
+                        print(f"⏰ Rank {my_rank} proposer waiting {wait_time:.2f}s for window")
+                        await asyncio.sleep(min(wait_time + 0.1, 0.5))  # Wait with small buffer
+                        continue
+                    else:
+                        # My window already passed or too far in future - check if block received
+                        current_height = self.ledger.get_block_count() - 1
+                        if current_height >= next_height:
+                            # Block received from another proposer
+                            continue
+                        
+                        # Window passed but no block - move to next cycle
+                        await asyncio.sleep(0.1)
+                        continue
             
             # IT'S MY WINDOW! Proceed to create and propose block
             print(f"✅ Rank {my_rank} proposer - it's my window, creating block...")
