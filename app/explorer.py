@@ -2781,6 +2781,310 @@ curl http://localhost:8080/search/tmpl6065afd538da959a3600d5cf9f0b8b1c74c2e8e519
     return html
 
 
+# =============================================================================
+# DEBUG ENDPOINTS - Observability for liveness, proposers, and rewards
+# =============================================================================
+
+@app.get("/debug/liveness")
+@limiter.limit("60/minute")
+async def debug_liveness(request: Request):
+    """
+    DEBUG ENDPOINT: Get validator liveness state for debugging.
+    
+    Returns:
+        JSON with all validators and their liveness state including:
+        - offline_since_height: Block height when validator was marked offline (null if online)
+        - blocks_offline: Number of blocks the validator has been offline
+        - is_offline_for_rewards: Whether validator is excluded from rewards (10-block cutoff)
+        - status: Validator status (active, genesis, pending, etc.)
+        - last_proposed_height: Last block height proposed by this validator
+        - last_reward_height: Last block height where validator received rewards
+    """
+    ledger = get_ledger()
+    current_height = ledger.get_block_count() - 1
+    
+    # Get all validators from registry
+    validators_liveness = {}
+    
+    for addr, data in ledger.validator_registry.items():
+        if addr == "genesis":
+            continue
+        
+        if not isinstance(data, dict):
+            continue
+        
+        # Get offline_since_height from validator registry
+        offline_since_height = data.get('offline_since_height')
+        
+        # Calculate blocks_offline
+        if offline_since_height is not None:
+            blocks_offline = current_height - offline_since_height
+        else:
+            blocks_offline = 0
+        
+        # Check if excluded from rewards (10-block cutoff)
+        is_offline_for_rewards = ledger.is_validator_offline_for_rewards(addr, current_height)
+        
+        # Find last proposed block
+        last_proposed_height = -1
+        last_reward_height = -1
+        for block in reversed(ledger.blocks):
+            if last_proposed_height == -1 and block.proposer == addr:
+                last_proposed_height = block.height
+            if last_reward_height == -1 and block.reward_allocations and addr in block.reward_allocations:
+                last_reward_height = block.height
+            if last_proposed_height != -1 and last_reward_height != -1:
+                break
+        
+        validators_liveness[addr] = {
+            "status": data.get('status', 'unknown'),
+            "offline_since_height": offline_since_height,
+            "blocks_offline": blocks_offline,
+            "is_offline_for_rewards": is_offline_for_rewards,
+            "last_proposed_height": last_proposed_height,
+            "last_reward_height": last_reward_height,
+            "activation_height": data.get('activation_height'),
+            "public_key": data.get('public_key', '')[:20] + '...' if data.get('public_key') else None
+        }
+    
+    return {
+        "current_height": current_height,
+        "timestamp": time.time(),
+        "offline_reward_cutoff_blocks": 10,
+        "validators": validators_liveness,
+        "summary": {
+            "total_validators": len(validators_liveness),
+            "online_validators": sum(1 for v in validators_liveness.values() if v['offline_since_height'] is None),
+            "offline_validators": sum(1 for v in validators_liveness.values() if v['offline_since_height'] is not None),
+            "excluded_from_rewards": sum(1 for v in validators_liveness.values() if v['is_offline_for_rewards'])
+        }
+    }
+
+
+@app.get("/debug/proposers")
+@limiter.limit("60/minute")
+async def debug_proposers(request: Request):
+    """
+    DEBUG ENDPOINT: Get proposer rotation state for debugging.
+    
+    Returns:
+        JSON with current proposer selection state including:
+        - current_slot: Current time-sliced slot number
+        - active_rank: Current active rank within the slot (0, 1, or 2)
+        - ranked_proposers: Ordered list of proposers for current slot
+        - is_single_validator_mode: Whether single-validator fast path is active
+        - recent_proposers: Last N block proposers
+        - fallback_events: Recent fallback proposer activations
+    """
+    ledger = get_ledger()
+    current_height = ledger.get_block_count() - 1
+    latest_block = ledger.get_latest_block()
+    
+    # Get genesis timestamp for slot calculations
+    genesis_block = ledger.get_block_by_height(0)
+    genesis_timestamp = genesis_block.timestamp if genesis_block else time.time()
+    
+    # Calculate current slot and rank
+    current_time = time.time()
+    try:
+        from time_slots import current_slot_and_rank, WINDOW_SECONDS
+        current_slot, active_rank = current_slot_and_rank(genesis_timestamp, current_time)
+    except ImportError:
+        current_slot = int((current_time - genesis_timestamp) / config.BLOCK_TIME)
+        active_rank = 0
+        WINDOW_SECONDS = 1.0
+    
+    # Get ranked proposers for current slot
+    ranked_proposers = ledger.get_ranked_proposers_for_slot(current_slot, num_ranks=3)
+    
+    # Determine if single-validator mode would be active
+    is_single_validator_mode = len(ranked_proposers) == 1
+    
+    # Get recent proposers (last 20 blocks)
+    recent_proposers = []
+    for block in ledger.blocks[-20:]:
+        recent_proposers.append({
+            "height": block.height,
+            "slot": getattr(block, 'slot', None),
+            "proposer": block.proposer,
+            "timestamp": block.timestamp
+        })
+    
+    # Detect fallback events (when proposer rank > 0)
+    fallback_events = []
+    for i, block in enumerate(ledger.blocks[-50:]):
+        if i == 0:
+            continue
+        prev_block = ledger.blocks[-(50-i+1)] if len(ledger.blocks) > 50-i+1 else None
+        if prev_block and block.slot and prev_block.slot:
+            # If same slot but different proposer, it's a fallback
+            if block.slot == prev_block.slot:
+                fallback_events.append({
+                    "height": block.height,
+                    "slot": block.slot,
+                    "proposer": block.proposer,
+                    "reason": "same_slot_different_proposer"
+                })
+    
+    # Get validator set for proposer selection
+    validator_set = ledger.get_validator_set()
+    
+    return {
+        "current_height": current_height,
+        "timestamp": current_time,
+        "genesis_timestamp": genesis_timestamp,
+        "block_time": config.BLOCK_TIME,
+        "window_seconds": WINDOW_SECONDS if 'WINDOW_SECONDS' in dir() else 1.0,
+        "slot_info": {
+            "current_slot": current_slot,
+            "active_rank": active_rank,
+            "latest_block_slot": getattr(latest_block, 'slot', None) if latest_block else None
+        },
+        "proposer_selection": {
+            "ranked_proposers": ranked_proposers,
+            "is_single_validator_mode": is_single_validator_mode,
+            "validator_set_size": len(validator_set)
+        },
+        "recent_proposers": recent_proposers,
+        "fallback_events": fallback_events[-10:],  # Last 10 fallback events
+        "timing": {
+            "time_since_genesis": current_time - genesis_timestamp,
+            "expected_blocks": int((current_time - genesis_timestamp) / config.BLOCK_TIME),
+            "actual_blocks": current_height + 1,
+            "blocks_behind": max(0, int((current_time - genesis_timestamp) / config.BLOCK_TIME) - (current_height + 1))
+        }
+    }
+
+
+@app.get("/debug/rewards")
+@limiter.limit("60/minute")
+async def debug_rewards(request: Request):
+    """
+    DEBUG ENDPOINT: Get reward distribution state for debugging.
+    
+    Returns:
+        JSON with reward eligibility and distribution state including:
+        - rewardable_validators: List of validators eligible for rewards
+        - excluded_validators: List of validators excluded from rewards (and why)
+        - recent_rewards: Last N blocks' reward distributions
+        - reward_sources: How validators qualified for rewards (proposer, attestation, etc.)
+    """
+    ledger = get_ledger()
+    current_height = ledger.get_block_count() - 1
+    
+    # Get online validators (deterministic)
+    rewardable_validators = ledger.get_online_validators_deterministic(current_height)
+    
+    # Get all validators and determine exclusion reasons
+    excluded_validators = []
+    for addr, data in ledger.validator_registry.items():
+        if addr == "genesis":
+            continue
+        if not isinstance(data, dict):
+            continue
+        
+        if addr not in rewardable_validators:
+            # Determine exclusion reason
+            reasons = []
+            
+            status = data.get('status')
+            if status not in ('active', 'genesis'):
+                reasons.append(f"status={status}")
+            
+            offline_since = data.get('offline_since_height')
+            if offline_since is not None:
+                blocks_offline = current_height - offline_since
+                if blocks_offline >= 10:
+                    reasons.append(f"offline_for_{blocks_offline}_blocks")
+                else:
+                    reasons.append(f"offline_but_within_grace_{blocks_offline}_blocks")
+            
+            if not ledger.validator_economics.is_validator_active(addr, current_height):
+                reasons.append("economics_inactive")
+            
+            excluded_validators.append({
+                "address": addr,
+                "reasons": reasons if reasons else ["unknown"],
+                "offline_since_height": offline_since,
+                "status": status
+            })
+    
+    # Get recent reward distributions (last 20 blocks)
+    recent_rewards = []
+    for block in ledger.blocks[-20:]:
+        if block.reward_allocations:
+            total_reward = sum(block.reward_allocations.values())
+            recent_rewards.append({
+                "height": block.height,
+                "proposer": block.proposer,
+                "validators_rewarded": len(block.reward_allocations),
+                "total_reward_pals": total_reward,
+                "total_reward_tmpl": total_reward / 100_000_000,
+                "per_validator_pals": total_reward // len(block.reward_allocations) if block.reward_allocations else 0,
+                "recipients": list(block.reward_allocations.keys())
+            })
+    
+    # Calculate reward sources for each rewardable validator
+    reward_sources = {}
+    proposer_lookback = max(30, len(rewardable_validators) * 2)
+    recent_proposers = set()
+    for block in ledger.blocks[-proposer_lookback:]:
+        if block.proposer:
+            recent_proposers.add(block.proposer)
+    
+    validators_with_attestations = ledger.get_validators_with_recent_attestations(lookback_blocks=100)
+    
+    for addr in rewardable_validators:
+        sources = []
+        if addr in recent_proposers:
+            sources.append("recent_proposer")
+        if addr in validators_with_attestations:
+            sources.append("attestation")
+        if not sources:
+            sources.append("p2p_online")
+        reward_sources[addr] = sources
+    
+    return {
+        "current_height": current_height,
+        "timestamp": time.time(),
+        "offline_reward_cutoff_blocks": 10,
+        "rewardable_validators": {
+            "count": len(rewardable_validators),
+            "addresses": rewardable_validators,
+            "sources": reward_sources
+        },
+        "excluded_validators": {
+            "count": len(excluded_validators),
+            "validators": excluded_validators
+        },
+        "recent_rewards": recent_rewards,
+        "summary": {
+            "total_registered": len([a for a in ledger.validator_registry if a != "genesis"]),
+            "currently_rewardable": len(rewardable_validators),
+            "currently_excluded": len(excluded_validators)
+        }
+    }
+
+
+@app.get("/api/health")
+async def api_health():
+    """
+    Health check endpoint for sync and monitoring.
+    
+    Returns:
+        JSON with node health status and current height
+    """
+    ledger = get_ledger()
+    latest_block = ledger.get_latest_block()
+    
+    return {
+        "status": "healthy",
+        "height": latest_block.height if latest_block else 0,
+        "blocks": len(ledger.blocks),
+        "timestamp": time.time()
+    }
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Run blockchain verification on startup using lifespan handler"""
