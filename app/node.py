@@ -534,11 +534,10 @@ class Node:
         """
         Handle blockchain sync request from a specific peer.
         
-        OPTIMIZED FOR PROXIED WEBSOCKET (Cloudflare Tunnel):
-        - Smaller batch size (20 blocks) to avoid overwhelming proxied connections
+        OPTIMIZED FOR RELIABLE SYNC:
+        - Smaller batch size (20 blocks) to avoid overwhelming connections
         - Longer delays between blocks to prevent buffer overflow
         - More tolerant of failures (connection may be slow, not dead)
-        - Ping keepalives more frequently
         
         Args:
             data: Sync request data containing current_height
@@ -578,8 +577,8 @@ class Node:
             blocks_to_send = latest.height - start_height + 1
             print(f"📤 SYNC RESPONSE: Sending {blocks_to_send} blocks (heights {start_height}-{latest.height}) to peer {peer_id[:8]}...")
             
-            # CLOUDFLARE TUNNEL OPTIMIZATION:
-            # - Smaller batches (20 blocks) to avoid overwhelming proxied connections
+            # SYNC OPTIMIZATION:
+            # - Smaller batches (20 blocks) to avoid overwhelming connections
             # - More tolerant of failures (25 allowed vs 10 before)
             # - Longer delays between blocks
             sent_count = 0
@@ -660,8 +659,6 @@ class Node:
         Supports:
         - ws://host:port -> http://host:port+1
         - wss://host:port -> https://host:port+1
-        - wss://host -> https://host (Cloudflare Tunnel style, same port)
-        - wss://seed.example.org -> https://api.seed.example.org (api. subdomain pattern)
         
         Returns:
             List of HTTP URLs for API access
@@ -678,34 +675,15 @@ class Node:
                 if seed.startswith('wss://'):
                     # Secure WebSocket -> HTTPS
                     # wss://host:port -> https://host:port+1
-                    # wss://host -> https://host (Cloudflare Tunnel, same hostname)
                     host_port = seed.replace('wss://', '').replace('/', '')
                     if ':' in host_port:
                         host, port_str = host_port.rsplit(':', 1)
                         http_port = int(port_str) + 1
                         http_urls.append(f"https://{host}:{http_port}")
-                    else:
-                        # No port specified (Cloudflare Tunnel style)
-                        # Try multiple patterns in order of likelihood:
-                        # 1. api. subdomain with HTTP (Cloudflare Tunnel often uses HTTP internally)
-                        # 2. api. subdomain with HTTPS
-                        # 3. Same hostname with HTTPS
-                        # 4. Explicit port 9001
-                        
-                        # Pattern 1: api. subdomain with HTTP (most common Cloudflare Tunnel setup)
-                        http_urls.append(f"http://api.{host_port}")
-                        
-                        # Pattern 2: api. subdomain with HTTPS
-                        http_urls.append(f"https://api.{host_port}")
-                        
-                        # Pattern 3: Same hostname with HTTPS (if tunnel routes both protocols)
-                        http_urls.append(f"https://{host_port}")
-                        
-                        # Pattern 4: Explicit port (fallback)
-                        http_urls.append(f"https://{host_port}:9001")
                         
                 elif seed.startswith('ws://'):
                     # Plain WebSocket -> HTTP
+                    # ws://host:port -> http://host:port+1
                     host_port = seed.replace('ws://', '').replace('/', '')
                     if ':' in host_port:
                         host, port_str = host_port.rsplit(':', 1)
@@ -1641,7 +1619,7 @@ class Node:
         """
         Robust blockchain sync with HTTP-first strategy.
         
-        SYNC STRATEGY (optimized for Cloudflare Tunnel / proxied WebSocket):
+        SYNC STRATEGY:
         1. Try HTTP batch sync first (most reliable for historical blocks)
         2. Fall back to P2P WebSocket sync if HTTP fails
         3. Use P2P only for live head blocks after initial sync
@@ -1687,7 +1665,7 @@ class Node:
         print(f"📡 Connected to {peer_count} peer(s), starting sync...")
         
         # STRATEGY 1: HTTP batch sync (preferred for historical blocks)
-        # More reliable over proxied connections (Cloudflare Tunnel, etc.)
+        # More reliable for syncing large amounts of historical data
         http_urls = self._get_http_urls_from_seeds()
         if http_urls:
             print(f"🌐 HTTP SYNC: Trying HTTP batch sync from {len(http_urls)} endpoint(s)...")
