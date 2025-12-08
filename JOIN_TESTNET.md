@@ -38,7 +38,7 @@ TIMPAL is a **truly decentralized** blockchain.
 
 **Public Seed Node URL:**
 ```
-ws://timpal.ddns.net:9000
+ws://5.78.43.127:9000
 ```
 
 ---
@@ -48,9 +48,9 @@ ws://timpal.ddns.net:9000
 | Action | Command |
 |--------|---------|
 | **Create wallet** | `python3 wallet_cli.py` |
-| **Join testnet** | `python3 run_testnet_node.py --port 9000 --seed ws://timpal.ddns.net:9000` |
+| **Join testnet** | `python3 run_testnet_node.py --port 9000 --seed ws://5.78.43.127:9000` |
 | **Start genesis node** | `python3 run_testnet_node.py --port 9000 --genesis` |
-| **Testing (multi-node)** | `python3 run_testnet_node.py --port 9000 --skip-device-check --seed ws://timpal.ddns.net:9000` |
+| **Testing (multi-node)** | `python3 run_testnet_node.py --port 9000 --skip-device-check --seed ws://5.78.43.127:9000` |
 | **Check sync status** | `curl http://localhost:9001/api/blockchain/info` |
 | **Start explorer** | `EXPLORER_API_PORT=9001 python3 start_explorer.py --port 8080` |
 | **Check balance** | `python3 wallet_cli.py` (choose "Check balance") |
@@ -131,7 +131,7 @@ set TIMPAL_WALLET_PASSWORD=your_password_here
 
 **Start your validator node (join the testnet):**
 ```cmd
-python run_testnet_node.py --port 9000 --seed ws://timpal.ddns.net:9000
+python run_testnet_node.py --port 9000 --seed ws://5.78.43.127:9000
 ```
 
 **IMPORTANT FOR WINDOWS:**
@@ -144,7 +144,7 @@ If you prefer PowerShell:
 
 ```powershell
 $env:TIMPAL_WALLET_PASSWORD="your_password_here"
-python run_testnet_node.py --port 9000 --seed ws://timpal.ddns.net:9000
+python run_testnet_node.py --port 9000 --seed ws://5.78.43.127:9000
 ```
 
 ## Step 6: (Optional) Start the Block Explorer
@@ -247,7 +247,7 @@ export TIMPAL_WALLET_PASSWORD="your_secure_password"
 
 **Start your validator node (join the testnet):**
 ```bash
-python3 run_testnet_node.py --port 9000 --seed ws://timpal.ddns.net:9000
+python3 run_testnet_node.py --port 9000 --seed ws://5.78.43.127:9000
 ```
 
 **Important:**
@@ -290,7 +290,7 @@ Run the same command:
 
 ```bash
 export TIMPAL_WALLET_PASSWORD="your_password"
-python3 run_testnet_node.py --port 9000 --seed ws://timpal.ddns.net:9000
+python3 run_testnet_node.py --port 9000 --seed ws://5.78.43.127:9000
 ```
 
 ---
@@ -321,15 +321,15 @@ TIMPAL enforces **one validator per device** to prevent Sybil attacks. For testi
 ```bash
 # Terminal 1 - First node
 export TIMPAL_WALLET_PASSWORD="your_password"
-python3 run_testnet_node.py --port 9000 --seed ws://timpal.ddns.net:9000 --skip-device-check
+python3 run_testnet_node.py --port 9000 --seed ws://5.78.43.127:9000 --skip-device-check
 
 # Terminal 2 - Second node (different port)
 export TIMPAL_WALLET_PASSWORD="your_password"
-python3 run_testnet_node.py --port 9002 --seed ws://timpal.ddns.net:9000 --skip-device-check
+python3 run_testnet_node.py --port 9002 --seed ws://5.78.43.127:9000 --skip-device-check
 
 # Terminal 3 - Third node (different port)
 export TIMPAL_WALLET_PASSWORD="your_password"
-python3 run_testnet_node.py --port 9004 --seed ws://timpal.ddns.net:9000 --skip-device-check
+python3 run_testnet_node.py --port 9004 --seed ws://5.78.43.127:9000 --skip-device-check
 ```
 
 **Note:** Each node uses TWO ports:
@@ -378,7 +378,7 @@ To connect to the TIMPAL testnet from any machine (local network or internet):
 
 **1. Use the public seed node:**
 ```bash
-python3 run_testnet_node.py --port 9000 --seed ws://timpal.ddns.net:9000
+python3 run_testnet_node.py --port 9000 --seed ws://5.78.43.127:9000
 ```
 
 **2. Requirements for external validators to connect to YOUR node:**
@@ -567,7 +567,7 @@ Make sure:
 
 If your node is not syncing blocks:
 1. Check your internet connection
-2. Verify the seed node URL: `ws://timpal.ddns.net:9000`
+2. Verify the seed node URL: `ws://5.78.43.127:9000`
 3. Check sync status: `curl http://localhost:9001/api/blockchain/info`
 4. Try restarting the node
 
@@ -575,7 +575,7 @@ If your node is not syncing blocks:
 
 If you see this error when trying to connect to a seed node:
 ```
-P2P: Attempting to connect to ws://timpal.ddns.net:9000
+P2P: Attempting to connect to ws://5.78.43.127:9000
 Connection timed out
 Possible causes: Node offline, firewall blocking, wrong IP/port
 ```
@@ -584,36 +584,24 @@ Possible causes: Node offline, firewall blocking, wrong IP/port
 
 1. **Check if the seed node is online:**
    - Contact the seed node operator to confirm it's running
-   - Try pinging the hostname: `ping timpal.ddns.net`
+   - Try pinging the seed node: `ping 5.78.43.127`
 
-2. **Verify DNS resolution:**
+2. **Test port connectivity:**
    ```bash
-   nslookup timpal.ddns.net
+   nc -zv 5.78.43.127 9000
    # or
-   dig timpal.ddns.net
-   ```
-   The IP should match the seed node's public IP.
-
-3. **Test port connectivity:**
-   ```bash
-   nc -zv timpal.ddns.net 9000
-   # or
-   telnet timpal.ddns.net 9000
+   telnet 5.78.43.127 9000
    ```
    If this times out, the port is blocked or the node is offline.
 
-4. **Common causes:**
+3. **Common causes:**
    - **Seed node firewall**: Port 9000 TCP not open on the seed node
-   - **Seed node NAT**: Port 9000 not forwarded to the seed node machine
-   - **DDNS not updated**: Dynamic IP changed but DDNS hostname not updated
    - **Your firewall**: Some corporate/school networks block outgoing WebSocket connections
    - **Seed node offline**: The genesis node process may have crashed or been stopped
 
-5. **If you're running the seed node:**
+4. **If you're running the seed node:**
    - Verify the node is running: `ps aux | grep run_testnet_node`
    - Check firewall: `sudo ufw status` (Linux) or Windows Firewall settings
-   - Verify port forwarding in your router settings
-   - Update your DDNS client if using dynamic IP
 
 ---
 
