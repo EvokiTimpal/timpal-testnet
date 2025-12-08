@@ -891,26 +891,27 @@ class Node:
             # This allows the network to "catch up" to current time after bootstrap period
             realtime_slot = get_realtime_slot(genesis_timestamp)
             
-            # SAFE CATCH-UP: Find the next slot whose primary window is still open or upcoming
-            # This preserves Time-Sliced Windows invariant: strict window enforcement always
+            # MULTI-VALIDATOR FIX: Use current slot, let window logic handle timing
+            # Previous bug: Skipping to next slot when active_rank != 0 caused all validators
+            # to collectively skip slots, resulting in 6s, 9s, 12s gaps instead of 3s blocks.
+            # 
+            # The correct approach: Use the current wall-clock slot and let each validator
+            # check if their window is open. Window validation in ledger.add_block ensures
+            # only the correct rank can produce a valid block at any given time.
             from time_slots import current_slot_and_rank, WINDOW_SECONDS
             current_time = time.time()
             current_slot_check, active_rank = current_slot_and_rank(genesis_timestamp, current_time)
             
-            # If we're in the first sub-window (rank 0) of a slot, use that slot
-            # Otherwise, advance to the next slot to ensure primary window hasn't passed
-            if active_rank == 0:
-                current_slot = current_slot_check
-            else:
-                current_slot = current_slot_check + 1
+            # Use current slot - don't skip ahead based on active_rank
+            # Each validator will check if their window is open in the am_i_proposer_now call
+            current_slot = current_slot_check
             
-            # Log skipped slots when we jump forward
+            # Log slot info for debugging (only when slots are skipped due to real-time catch-up)
             if latest_block.slot and current_slot > latest_block.slot + 1:
                 skipped_slots = current_slot - latest_block.slot - 1
                 print(f"⏩ SLOT SKIP: Jumped from slot {latest_block.slot} to {current_slot}")
                 print(f"   Skipped {skipped_slots} empty slot(s) - network catching up to real-time")
                 print(f"   Height remains sequential: {latest_block.height} → {next_height}")
-                print(f"   Active rank in current slot: {active_rank} (using next slot to ensure primary window available)")
             
             # Get ranked proposers for this slot (primary, fallback1, fallback2)
             ranked_proposers = self.ledger.get_ranked_proposers_for_slot(current_slot, num_ranks=3)
@@ -927,11 +928,9 @@ class Node:
             is_single_validator = (len(ranked_proposers) == 1 and ranked_proposers[0] == self.reward_address)
             
             if is_single_validator:
-                # Single validator mode: always my turn, use current slot (don't skip)
+                # Single validator mode: always my turn, no window coordination needed
                 my_rank = 0
                 is_my_turn = True
-                # Override current_slot to not skip ahead when active_rank != 0
-                current_slot = current_slot_check
             else:
                 # Multi-validator mode: use full time-sliced window logic
                 # Check if I'm one of the ranked proposers for this slot
