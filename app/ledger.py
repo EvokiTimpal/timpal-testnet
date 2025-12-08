@@ -1880,9 +1880,15 @@ class Ledger:
             
             # TIMPAL 10-BLOCK REWARD CUTOFF: Exclude validators offline >= 10 blocks
             if self.is_validator_offline_for_rewards(addr, current_height):
+                offline_since = data.get('offline_since_height') if isinstance(data, dict) else None
+                print(f"🚫 LIVENESS: Excluding {addr[:20]}... from rewards (offline_since_height={offline_since}, current={current_height})")
                 continue
             
             result.append(addr)
+        
+        # DEBUG: Log the final result for troubleshooting
+        if len(result) > 0:
+            print(f"📊 LIVENESS: get_online_validators_deterministic(height={current_height}) returning {len(result)} validators: {[a[:12]+'...' for a in sorted(result)]}")
         
         # CRITICAL: Sorted for deterministic ordering across all nodes
         return sorted(result)
