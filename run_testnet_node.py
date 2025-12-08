@@ -879,7 +879,16 @@ IMPORTANT:
             print("   Aborted. Restart with --seed flag to join the testnet.")
             sys.exit(0)
     
-    seed_nodes = args.seeds or []
+    # CRITICAL FIX: Normalize seed URLs to prevent "nodename nor servname provided" errors
+    # This error occurs when URLs have trailing whitespace, newlines, or invisible characters
+    # from copy/paste. We strip whitespace and filter empty entries.
+    raw_seeds = args.seeds or []
+    seed_nodes = [s.strip() for s in raw_seeds if s and s.strip()]
+    
+    # Log normalized seeds for debugging (using repr to show invisible characters)
+    if raw_seeds:
+        print(f"🌐 CLI seeds (raw): {raw_seeds!r}")
+        print(f"🌐 CLI seeds (normalized): {seed_nodes!r}")
     
     # CRITICAL: is_genesis_node controls whether node creates genesis locally
     # Only VPS bootstrap node should use --genesis flag

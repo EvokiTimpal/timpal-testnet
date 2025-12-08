@@ -507,6 +507,34 @@ class P2PNetwork:
             return False
     
     async def connect_to_peer(self, peer_address: str):
+        # CRITICAL FIX: Normalize and validate peer_address to prevent "nodename nor servname provided" errors
+        # This error occurs when URLs have trailing whitespace, newlines, or invisible characters
+        raw_address = peer_address
+        peer_address = peer_address.strip() if peer_address else ""
+        
+        # Debug logging with repr() to show invisible characters
+        if raw_address != peer_address:
+            print(f"🔍 P2P DEBUG: Normalized peer_address: raw={raw_address!r} -> normalized={peer_address!r}")
+        
+        # Validate peer_address is not empty
+        if not peer_address:
+            print(f"❌ P2P ERROR: Empty peer_address after stripping (raw={raw_address!r}), skipping connect")
+            return
+        
+        # Validate URL scheme
+        from urllib.parse import urlparse
+        try:
+            parsed = urlparse(peer_address)
+            if parsed.scheme not in ("ws", "wss"):
+                print(f"❌ P2P ERROR: Invalid seed URL scheme (must be ws or wss): {peer_address!r}")
+                return
+            if not parsed.hostname:
+                print(f"❌ P2P ERROR: Missing hostname in seed URL: {peer_address!r}")
+                return
+        except Exception as e:
+            print(f"❌ P2P ERROR: Failed to parse seed URL {peer_address!r}: {e}")
+            return
+        
         if peer_address in self.outbound_peers:
             return
         
@@ -564,8 +592,10 @@ class P2PNetwork:
             print(f"🚫 P2P: Connection to {peer_address} refused")
             print(f"   Possible causes: Node not running, port not open, firewall blocking")
         except OSError as e:
-            print(f"⚠️  P2P: Network error connecting to {peer_address}: {e}")
+            # Use repr() to show invisible characters in peer_address for debugging
+            print(f"⚠️  P2P: Network error connecting to {peer_address!r}: {e!r}")
             print(f"   Possible causes: DNS resolution failed, network unreachable, firewall")
+            print(f"   If 'nodename nor servname provided': check for whitespace/invalid chars in URL")
         except ValueError as e:
             print(f"🔐 P2P: Authentication error connecting to {peer_address}: {e}")
         except Exception as e:
