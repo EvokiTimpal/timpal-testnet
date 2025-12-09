@@ -20,17 +20,6 @@ MAX_SUPPLY_PALS = 250_000_000 * (10 ** 8)
 # Block time
 BLOCK_TIME = 3
 
-# TIMESTAMP ALIGNMENT ACTIVATION HEIGHT
-# After this height, block timestamps are computed purely from slot and rank
-# instead of using wall-clock time. This ensures:
-# - Deterministic timestamps: all nodes compute the same value
-# - Zero wall-time dependency: timestamp is purely slot-based
-# - Optimal block spacing: next validator wakes at exactly the right time
-# 
-# CONSENSUS CRITICAL: This value must be the same on all nodes
-# Do NOT change this after activation without coordinating a hard fork
-TIMESTAMP_ALIGNMENT_ACTIVATION_HEIGHT = 1100
-
 # Emission schedule (same as mainnet for realistic testing)
 EMISSION_PER_BLOCK_TMPL = 0.6345
 EMISSION_PER_BLOCK_PALS = 63_450_000
