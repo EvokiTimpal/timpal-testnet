@@ -81,6 +81,12 @@ class Node:
         self.sync_phase = "SYNCING"  # Start in syncing phase
         self.SEVERE_LAG_THRESHOLD = 10  # Only drop from ACTIVE if this far behind
         
+        # VALIDATOR QUORUM REQUIREMENT: Prevent solo block production during network partitions
+        # When a node is isolated, it should NOT produce blocks (creates divergent chain history)
+        # This prevents the scenario where two isolated nodes each build their own chain,
+        # then can't reconcile when reconnected due to finality checkpoints
+        self.MIN_VALIDATORS_FOR_CONSENSUS = 2  # Minimum online validators required to propose blocks
+        
         # TIMING OPTIMIZATION: Cache peer height to reduce HTTP overhead
         # Only check peer height every N blocks instead of every mining cycle
         self._cached_peer_height = 0
@@ -942,6 +948,41 @@ class Node:
                 await asyncio.sleep(config.BLOCK_TIME)
                 continue
             
+            # ============================================================
+            # VALIDATOR QUORUM GATE: Prevent solo block production
+            # ============================================================
+            # When a node is isolated from the network, it should NOT produce blocks.
+            # This prevents the scenario where two isolated nodes each build their own
+            # chain, then can't reconcile when reconnected due to finality checkpoints.
+            #
+            # Rule: A validator can propose a block ONLY when:
+            #   - sync_phase == "ACTIVE" (checked above)
+            #   - AND online_validators >= MIN_VALIDATORS_FOR_CONSENSUS (or total_validators if smaller)
+            #
+            # Bootstrap nodes are exempt: they are the "source of truth" and must be able
+            # to produce blocks even when alone (to bootstrap the network).
+            # ============================================================
+            if not is_bootstrap:
+                # Get total validators from checkpoint (already computed earlier)
+                total_validators = len(checkpoint_validators) if checkpoint_validators else 0
+                
+                if total_validators > 0:
+                    # Require MIN_VALIDATORS_FOR_CONSENSUS, but cap at total_validators
+                    # (so a 1-validator network can still function)
+                    required_online = min(self.MIN_VALIDATORS_FOR_CONSENSUS, total_validators)
+                    
+                    # Use deterministic liveness check (same as reward calculation)
+                    online_validators = self.ledger.get_online_validators_deterministic(next_height)
+                    online_count = len(online_validators)
+                    
+                    if online_count < required_online:
+                        if next_height % 10 == 0:  # Log every 10 blocks to avoid spam
+                            print(f"⏸️  QUORUM NOT MET: online={online_count}, required={required_online}, "
+                                  f"total_validators={total_validators}")
+                            print(f"   Waiting for more validators to come online before proposing blocks...")
+                            print(f"   Online validators: {[v[:12]+'...' for v in online_validators]}")
+                        await asyncio.sleep(config.BLOCK_TIME)
+                        continue
             
             # TIME-SLICED SLOTS CONSENSUS: Deterministic fallback without race conditions
             # Each 3-second slot is divided into 3×1-second windows:
