@@ -217,34 +217,6 @@ def get_next_slot_time(genesis_timestamp: float, current_slot: int) -> float:
     return slot_start_time(genesis_timestamp, current_slot + 1)
 
 
-def compute_aligned_timestamp(genesis_timestamp: float, slot: int, rank: int) -> float:
-    """
-    Compute the canonical aligned timestamp for a block at (slot, rank).
-    
-    TIMESTAMP ALIGNMENT: Instead of using wall-clock time, compute the exact
-    timestamp from slot and rank. This ensures:
-    - Deterministic timestamps: all nodes compute the same value
-    - Zero wall-time dependency: timestamp is purely slot-based
-    - Optimal block spacing: next validator wakes at exactly the right time
-    
-    Formula: genesis_timestamp + (slot * SLOT_SECONDS) + (rank * WINDOW_SECONDS)
-    
-    This places the timestamp at the START of the validator's window:
-    - Rank 0: slot_start + 0s
-    - Rank 1: slot_start + 1s  
-    - Rank 2: slot_start + 2s
-    
-    Args:
-        genesis_timestamp: Genesis block timestamp
-        slot: Block's slot number
-        rank: Block's rank (proposer position, 0-2)
-    
-    Returns:
-        Canonical aligned timestamp for this (slot, rank)
-    """
-    return genesis_timestamp + (slot * SLOT_SECONDS) + (rank * WINDOW_SECONDS)
-
-
 def get_realtime_slot(genesis_timestamp: float, current_time: float = None) -> int:
     """
     Calculate the real-time slot index based on wall-clock time.
