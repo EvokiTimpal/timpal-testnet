@@ -72,6 +72,15 @@ class Node:
         self.initial_sync_complete_height = None  # Height when initial sync completed
         self.cooling_complete_height = None  # Height when cooling period ends
         
+        # EXPLICIT SYNC PHASE STATE MACHINE (prevents flip-flop bugs)
+        # Phases: "SYNCING" -> "COOLING" -> "ACTIVE"
+        # - SYNCING: Node is catching up to network head
+        # - COOLING: Node is at head but waiting for cooling period
+        # - ACTIVE: Node is fully ready to participate in consensus
+        # Once ACTIVE, node stays ACTIVE unless it falls significantly behind (>10 blocks)
+        self.sync_phase = "SYNCING"  # Start in syncing phase
+        self.SEVERE_LAG_THRESHOLD = 10  # Only drop from ACTIVE if this far behind
+        
         # TIMING OPTIMIZATION: Cache peer height to reduce HTTP overhead
         # Only check peer height every N blocks instead of every mining cycle
         self._cached_peer_height = 0
@@ -837,85 +846,98 @@ class Node:
                 max_peer_height = self._cached_peer_height
             local_height = latest_block.height
             
-            # STAGE 3: Mark as not synced if we fall too far behind
-            if max_peer_height > local_height + self.SYNC_LAG_THRESHOLD:
-                if self.synced:
-                    print(f"⚠️  SYNC STATUS: Falling behind (local: {local_height}, max peer: {max_peer_height})")
-                    print(f"   Entering sync mode, stopping block production temporarily")
+            # ============================================================
+            # EXPLICIT SYNC PHASE STATE MACHINE
+            # ============================================================
+            # Phases: "SYNCING" -> "COOLING" -> "ACTIVE"
+            # - SYNCING: Node is catching up to network head
+            # - COOLING: Node is at head but waiting for cooling period
+            # - ACTIVE: Node is fully ready to participate in consensus
+            #
+            # KEY DESIGN: Once ACTIVE, node stays ACTIVE unless it falls
+            # SEVERELY behind (>SEVERE_LAG_THRESHOLD blocks). This prevents
+            # flip-flopping that caused the fork at block 85.
+            # ============================================================
+            
+            # Bootstrap nodes are always ACTIVE (they are the source of truth)
+            if is_bootstrap:
+                self.sync_phase = "ACTIVE"
+                self.synced = True
+            
+            # PHASE TRANSITIONS based on current state
+            if self.sync_phase == "ACTIVE":
+                # ACTIVE -> SYNCING: Only if we fall SEVERELY behind
+                # Small lags are normal and shouldn't trigger re-cooling
+                if max_peer_height > local_height + self.SEVERE_LAG_THRESHOLD:
+                    print(f"⚠️  SEVERE LAG DETECTED: local={local_height}, peer={max_peer_height}")
+                    print(f"   Dropping from ACTIVE to SYNCING phase")
+                    self.sync_phase = "SYNCING"
                     self.synced = False
-                # COOLING RESET: When falling behind, reset cooling state so node must re-cool after catching up
-                if self.initial_sync_complete_height is not None:
-                    print(f"   Resetting cooling period - will need to re-cool after catching up")
                     self.initial_sync_complete_height = None
                     self.cooling_complete_height = None
-            
-            if max_peer_height > local_height:
-                print(f"🔄 CATCH-UP MODE: Local height {local_height}, max peer height {max_peer_height}")
-                print(f"   Syncing missing blocks {local_height + 1} to {max_peer_height}...")
-                await self._sync_missing_blocks(local_height + 1, max_peer_height)
+                # Otherwise stay ACTIVE - small lags are fine
                 
-                # STAGE 3: Mark as synced when caught up
-                if max_peer_height - local_height <= self.SYNC_LAG_THRESHOLD:
-                    if not self.synced:
-                        print(f"✅ SYNC STATUS: Caught up! (local: {local_height}, max peer: {max_peer_height})")
-                        print(f"   Resuming block production")
-                        self.synced = True
-                
-                # After catch-up, skip this mining cycle to refresh state
-                continue
-            else:
-                # CRITICAL FIX: Only mark as synced if we have peers OR we're the bootstrap node
-                # This prevents validator nodes from creating independent chains when disconnected
-                # max_peer_height can be 0 in two cases:
-                #   1. Bootstrap node with no seeds (GOOD - should create blocks)
-                #   2. Validator node with no peer connections (BAD - should wait for peers)
-                has_peers = max_peer_height > 0 or peer_count > 0
-                can_be_synced = is_bootstrap or has_peers
-                
-                if not self.synced and can_be_synced:
-                    if is_bootstrap:
-                        print(f"✅ SYNC STATUS: Bootstrap node at height {local_height} (no peers required)")
-                    else:
-                        print(f"✅ SYNC STATUS: At network head (height: {local_height}, peers: {peer_count})")
-                    self.synced = True
+            elif self.sync_phase == "COOLING":
+                # COOLING -> ACTIVE: When cooling period is complete
+                if self.cooling_complete_height is not None and local_height >= self.cooling_complete_height:
+                    print(f"✅ COOLING COMPLETE: Now ACTIVE at height {local_height}")
+                    self.sync_phase = "ACTIVE"
+                # COOLING -> SYNCING: If we fall behind during cooling
+                elif max_peer_height > local_height + self.SYNC_LAG_THRESHOLD:
+                    print(f"⚠️  FELL BEHIND DURING COOLING: local={local_height}, peer={max_peer_height}")
+                    print(f"   Returning to SYNCING phase")
+                    self.sync_phase = "SYNCING"
+                    self.synced = False
+                    self.initial_sync_complete_height = None
+                    self.cooling_complete_height = None
                     
-                    # COOLING PERIOD: Initialize cooling state when first catching up (non-bootstrap only)
-                    # This ensures the node waits for a few more blocks before becoming active
-                    if not is_bootstrap and self.initial_sync_complete_height is None:
+            else:  # SYNCING phase
+                # SYNCING -> COOLING: When we catch up to network head
+                has_peers = max_peer_height > 0 or peer_count > 0
+                can_transition = is_bootstrap or has_peers
+                
+                if can_transition and max_peer_height <= local_height + self.SYNC_LAG_THRESHOLD:
+                    if not is_bootstrap:
+                        # Non-bootstrap: transition to COOLING
+                        print(f"✅ SYNC COMPLETE at height {local_height}")
+                        self.sync_phase = "COOLING"
+                        self.synced = True
                         self.initial_sync_complete_height = local_height
                         self.cooling_complete_height = local_height + self.SYNC_COOLING_BLOCKS
-                        print(f"🧊 COOLING PERIOD: Sync complete at height {local_height}")
-                        print(f"   Will become consensus-ready at height {self.cooling_complete_height}")
+                        print(f"🧊 COOLING PERIOD: Will become ACTIVE at height {self.cooling_complete_height}")
                         print(f"   Waiting for {self.SYNC_COOLING_BLOCKS} more blocks before proposing...")
-                        
-                elif not self.synced and not can_be_synced:
-                    # Validator node with no peers - keep waiting
+                    else:
+                        # Bootstrap: skip cooling, go directly to ACTIVE
+                        self.sync_phase = "ACTIVE"
+                        self.synced = True
+            
+            # Handle catch-up sync if behind
+            if max_peer_height > local_height:
+                if self.sync_phase != "ACTIVE":
+                    print(f"🔄 CATCH-UP MODE: Local height {local_height}, max peer height {max_peer_height}")
+                    print(f"   Syncing missing blocks {local_height + 1} to {max_peer_height}...")
+                await self._sync_missing_blocks(local_height + 1, max_peer_height)
+                # After catch-up, skip this mining cycle to refresh state
+                continue
+            
+            # Handle no peers case for non-bootstrap nodes
+            if self.sync_phase == "SYNCING" and not is_bootstrap:
+                has_peers = max_peer_height > 0 or peer_count > 0
+                if not has_peers:
                     if next_height % 30 == 0:
                         print(f"⏸️  WAITING FOR PEERS: Cannot sync without peer connections (height: {local_height})")
                         print(f"   Seed nodes: {self.p2p.seed_nodes}")
                     await asyncio.sleep(1.0)
                     continue
             
-            # STAGE 3: Gate proposer participation until synced AND cooled
-            # consensus_ready = synced + cooling period complete (for non-bootstrap nodes)
-            if is_bootstrap:
-                consensus_ready = True  # Bootstrap nodes are always ready (they are the source of truth)
-            else:
-                # Non-bootstrap nodes need to be synced AND have completed cooling period
-                if not self.synced or self.cooling_complete_height is None:
-                    consensus_ready = False
-                else:
-                    # Check if cooling period is complete AND we're still at network head
-                    consensus_ready = (
-                        local_height >= self.cooling_complete_height and
-                        max_peer_height <= local_height + self.SYNC_LAG_THRESHOLD
-                    )
+            # CONSENSUS GATE: Only ACTIVE nodes can propose blocks
+            consensus_ready = (self.sync_phase == "ACTIVE")
             
             if not consensus_ready:
-                if next_height % 10 == 0:  # Log every 10 blocks to track cooling progress
+                if next_height % 10 == 0:  # Log every 10 blocks to track progress
                     cooling_remaining = (self.cooling_complete_height - local_height) if self.cooling_complete_height else "N/A"
-                    print(f"⏸️  NOT CONSENSUS-READY: local={local_height}, max_peer={max_peer_height}, "
-                          f"synced={self.synced}, cooling_until={self.cooling_complete_height}, "
+                    print(f"⏸️  NOT CONSENSUS-READY: phase={self.sync_phase}, local={local_height}, "
+                          f"max_peer={max_peer_height}, cooling_until={self.cooling_complete_height}, "
                           f"blocks_remaining={cooling_remaining}")
                 await asyncio.sleep(config.BLOCK_TIME)
                 continue
