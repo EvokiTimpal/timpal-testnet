@@ -63,6 +63,15 @@ class Node:
         # (allows run_testnet_node.py to override seed_nodes after Node creation)
         self.SYNC_LAG_THRESHOLD = 5  # Blocks behind peers before re-entering sync mode
         
+        # SYNC COOLING PERIOD: Prevent node from proposing blocks until fully synced + cooling period
+        # This ensures a node doesn't start participating in consensus until it has:
+        # 1. Fully synced 100% of blocks from the network
+        # 2. Observed a few more blocks being produced (cooling period)
+        # This prevents race conditions where a partially-synced node tries to propose
+        self.SYNC_COOLING_BLOCKS = 5  # Number of blocks to wait after sync before becoming active
+        self.initial_sync_complete_height = None  # Height when initial sync completed
+        self.cooling_complete_height = None  # Height when cooling period ends
+        
         # TIMING OPTIMIZATION: Cache peer height to reduce HTTP overhead
         # Only check peer height every N blocks instead of every mining cycle
         self._cached_peer_height = 0
@@ -834,6 +843,11 @@ class Node:
                     print(f"⚠️  SYNC STATUS: Falling behind (local: {local_height}, max peer: {max_peer_height})")
                     print(f"   Entering sync mode, stopping block production temporarily")
                     self.synced = False
+                # COOLING RESET: When falling behind, reset cooling state so node must re-cool after catching up
+                if self.initial_sync_complete_height is not None:
+                    print(f"   Resetting cooling period - will need to re-cool after catching up")
+                    self.initial_sync_complete_height = None
+                    self.cooling_complete_height = None
             
             if max_peer_height > local_height:
                 print(f"🔄 CATCH-UP MODE: Local height {local_height}, max peer height {max_peer_height}")
@@ -864,6 +878,16 @@ class Node:
                     else:
                         print(f"✅ SYNC STATUS: At network head (height: {local_height}, peers: {peer_count})")
                     self.synced = True
+                    
+                    # COOLING PERIOD: Initialize cooling state when first catching up (non-bootstrap only)
+                    # This ensures the node waits for a few more blocks before becoming active
+                    if not is_bootstrap and self.initial_sync_complete_height is None:
+                        self.initial_sync_complete_height = local_height
+                        self.cooling_complete_height = local_height + self.SYNC_COOLING_BLOCKS
+                        print(f"🧊 COOLING PERIOD: Sync complete at height {local_height}")
+                        print(f"   Will become consensus-ready at height {self.cooling_complete_height}")
+                        print(f"   Waiting for {self.SYNC_COOLING_BLOCKS} more blocks before proposing...")
+                        
                 elif not self.synced and not can_be_synced:
                     # Validator node with no peers - keep waiting
                     if next_height % 30 == 0:
@@ -872,10 +896,27 @@ class Node:
                     await asyncio.sleep(1.0)
                     continue
             
-            # STAGE 3: Gate proposer participation until synced
-            if not self.synced:
-                if next_height % 30 == 0:  # Log every 30 blocks to avoid spam
-                    print(f"⏸️  NOT SYNCED: Skipping block production until fully synced")
+            # STAGE 3: Gate proposer participation until synced AND cooled
+            # consensus_ready = synced + cooling period complete (for non-bootstrap nodes)
+            if is_bootstrap:
+                consensus_ready = True  # Bootstrap nodes are always ready (they are the source of truth)
+            else:
+                # Non-bootstrap nodes need to be synced AND have completed cooling period
+                if not self.synced or self.cooling_complete_height is None:
+                    consensus_ready = False
+                else:
+                    # Check if cooling period is complete AND we're still at network head
+                    consensus_ready = (
+                        local_height >= self.cooling_complete_height and
+                        max_peer_height <= local_height + self.SYNC_LAG_THRESHOLD
+                    )
+            
+            if not consensus_ready:
+                if next_height % 10 == 0:  # Log every 10 blocks to track cooling progress
+                    cooling_remaining = (self.cooling_complete_height - local_height) if self.cooling_complete_height else "N/A"
+                    print(f"⏸️  NOT CONSENSUS-READY: local={local_height}, max_peer={max_peer_height}, "
+                          f"synced={self.synced}, cooling_until={self.cooling_complete_height}, "
+                          f"blocks_remaining={cooling_remaining}")
                 await asyncio.sleep(config.BLOCK_TIME)
                 continue
             
@@ -1646,9 +1687,13 @@ class Node:
         print("🔄 Starting blockchain sync...")
         
         # Check if we already have blocks (node restart scenario)
+        # IMPORTANT: Do NOT set self.synced = True here - let mine_blocks verify against peers
+        # This ensures the node goes through proper sync verification and cooling period
+        # even on restart, preventing a stale node from immediately proposing blocks
         if self.ledger.get_block_count() > 0:
-            print(f"✅ Already have {self.ledger.get_block_count()} blocks, skipping sync")
-            self.synced = True
+            print(f"✅ Already have {self.ledger.get_block_count()} blocks on disk")
+            print(f"   Will verify sync status against peers in mining loop")
+            # Do NOT set self.synced = True - let mine_blocks + peer height decide
             return
         
         # Wait a moment for P2P connections to establish
@@ -1690,7 +1735,9 @@ class Node:
             if http_success:
                 block_count = self.ledger.get_block_count()
                 print(f"✅ HTTP sync successful! Synced {block_count} blocks")
-                self.synced = True
+                # Do NOT set self.synced = True here - let mine_blocks verify against peers
+                # and enforce cooling period before allowing block production
+                print(f"   Will verify sync status and start cooling period in mining loop")
                 return
             else:
                 print(f"⚠️  HTTP sync failed, falling back to P2P WebSocket sync...")
@@ -1731,7 +1778,9 @@ class Node:
             # If we have blocks and sync has stalled, we might be done
             if block_count > 0 and stall_count >= 3:
                 print(f"✅ P2P sync complete! Received {block_count} blocks (sync stalled, assuming complete)")
-                self.synced = True
+                # Do NOT set self.synced = True here - let mine_blocks verify against peers
+                # and enforce cooling period before allowing block production
+                print(f"   Will verify sync status and start cooling period in mining loop")
                 return
             
             # Re-broadcast sync request every 15 seconds if no progress
@@ -1744,7 +1793,9 @@ class Node:
         final_block_count = self.ledger.get_block_count()
         if final_block_count > 0:
             print(f"✅ P2P sync finished with {final_block_count} blocks (timeout reached)")
-            self.synced = True
+            # Do NOT set self.synced = True here - let mine_blocks verify against peers
+            # and enforce cooling period before allowing block production
+            print(f"   Will verify sync status and start cooling period in mining loop")
         else:
             print(f"⚠️  Sync timed out after {max_wait_seconds}s with no blocks")
             print("   Blocks may still arrive - node will continue running")
