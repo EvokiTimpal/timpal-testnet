@@ -644,12 +644,23 @@ class Node:
                         if consecutive_failures >= max_consecutive_failures:
                             print(f"❌ SYNC ABORTED: {consecutive_failures} consecutive failures, connection likely dead")
                             print(f"   Peer can re-request sync from height {start_height + sent_count - 1}")
-                            break
+                            # CRITICAL FIX: Return immediately to release control back to main loop
+                            # This ensures block production resumes even if peers disconnect mid-sync
+                            try:
+                                await websocket.close()
+                            except Exception:
+                                pass  # Ignore close errors on dead connection
+                            return
                         
                         # Abort on too many total failures
                         if failed_count >= max_total_failures:
                             print(f"❌ SYNC ABORTED: Too many total failures ({failed_count})")
-                            break
+                            # CRITICAL FIX: Return immediately to release control back to main loop
+                            try:
+                                await websocket.close()
+                            except Exception:
+                                pass  # Ignore close errors on dead connection
+                            return
                         
                         # Wait longer after failure before retrying
                         await asyncio.sleep(0.1)
