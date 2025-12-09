@@ -1625,24 +1625,30 @@ class Ledger:
             # Attestation check is optional - don't fail if it errors
             pass
         
-        # CRITICAL FIX: TIMPAL POLICY - ONLY ONLINE NODES RECEIVE BLOCK REWARDS
-        # If no validators pass Stage 1, 2, or 3, use P2P connections (Stage 4)
+        # CONSENSUS-CRITICAL FIX: Removed P2P callback from proposer selection
+        # 
+        # PREVIOUS BUG: If stages 1-3 yielded empty set, we called _online_validators_callback
+        # which returns P2P-connected validators. This is NON-DETERMINISTIC because different
+        # nodes have different P2P connections → different proposer queues → FORKS.
+        #
+        # This function is used by get_ranked_proposers_for_slot() for PROPOSER SELECTION,
+        # so any non-determinism here directly causes consensus forks.
+        #
+        # FIX: If stages 1-3 yield empty set, fall back to ALL active validators from registry.
+        # This is deterministic because all nodes have the same validator_registry state.
+        #
+        # NOTE: P2P callback is still available for non-consensus uses (explorer UI, debug)
+        # but MUST NOT be used for proposer selection or rewards.
+        
         if not liveness_validators:
-            if self._online_validators_callback is not None:
-                try:
-                    online_validators = self._online_validators_callback()
-                    if online_validators:
-                        liveness_validators = online_validators
-                except Exception as e:
-                    print(f"⚠️  ERROR: Failed to get online validators from P2P callback: {e}")
-            
-            # Final fallback: If no P2P callback or it failed, return all registered validators
+            # Deterministic fallback: all active validators from registry
             # This prevents network stall during genesis or testing scenarios
-            if not liveness_validators:
-                for validator_addr, validator in sorted(self.validator_registry.items()):
-                    if validator_addr == "genesis":
-                        continue
-                    if isinstance(validator, dict) and validator.get('status') in ('active', 'genesis'):
+            for validator_addr, validator in sorted(self.validator_registry.items()):
+                if validator_addr == "genesis":
+                    continue
+                if isinstance(validator, dict) and validator.get('status') in ('active', 'genesis'):
+                    # Also check economics system for consistency
+                    if self.validator_economics.is_validator_active(validator_addr, current_height):
                         liveness_validators.add(validator_addr)
         
         return liveness_validators
@@ -1711,36 +1717,35 @@ class Ledger:
             prev_attestations = self.attestation_manager.get_attestations_for_epoch(current_epoch - 1)
             validators_with_attestations.update(prev_attestations.keys())
         
-        # CRITICAL FIX: When no attestations, use P2P connections for online detection
-        # This enforces TIMPAL policy: ONLY ONLINE NODES RECEIVE BLOCK REWARDS
+        # CONSENSUS-CRITICAL FIX: Removed P2P callback from attestation fallback
+        #
+        # PREVIOUS BUG: When no attestations, we called _online_validators_callback
+        # which returns P2P-connected validators. This is NON-DETERMINISTIC because
+        # different nodes have different P2P connections → different validator sets → FORKS.
+        #
+        # FIX: If no attestations, fall back to ALL active validators from registry.
+        # This is deterministic because all nodes have the same validator_registry state.
+        #
+        # NOTE: P2P callback is still available for non-consensus uses (explorer UI, debug)
+        # but MUST NOT be used for reward calculation or proposer selection.
+        
         if not validators_with_attestations:
-            # Throttle warning: Only log once per hour to reduce spam
-            current_time = time.time()
-            
             # Skip all warnings in read-only mode (e.g., block explorer)
             if self.read_only:
                 # Read-only context doesn't distribute rewards, return all registered validators for display
                 return set(self.validator_registry.keys())
             
-            if current_time - self._last_attestation_warning > 3600:  # 3600 seconds = 1 hour
-                print(f"⚠️  WARNING: No epoch attestations found, using P2P connections for liveness")
-                self._last_attestation_warning = current_time
+            # Deterministic fallback: all active validators from registry
+            # This prevents network stall during genesis or testing scenarios
+            fallback_validators = set()
+            for validator_addr, validator in sorted(self.validator_registry.items()):
+                if validator_addr == "genesis":
+                    continue
+                if isinstance(validator, dict) and validator.get('status') in ('active', 'genesis'):
+                    if self.validator_economics.is_validator_active(validator_addr, current_height):
+                        fallback_validators.add(validator_addr)
             
-            # Fallback: Use P2P connections to determine which validators are online
-            if self._online_validators_callback is not None:
-                try:
-                    online_validators = self._online_validators_callback()
-                    if online_validators:
-                        if current_time - self._last_attestation_warning < 60:  # Log details on first warning
-                            print(f"   Registered validators: {len(self.validator_registry)}, Online validators (P2P): {len(online_validators)}")
-                        return online_validators
-                except Exception as e:
-                    print(f"⚠️  ERROR: Failed to get online validators from callback: {e}")
-            
-            # No callback or callback failed - return empty list (no rewards)
-            if current_time - self._last_attestation_warning < 60:
-                print(f"   No P2P callback available - NO REWARDS will be distributed")
-            return []
+            return sorted(list(fallback_validators))
         
         # CRITICAL FIX: Return sorted list, not set (sets have non-deterministic order)
         # This ensures reward_allocations dict is built in same order on all nodes
@@ -1749,30 +1754,26 @@ class Ledger:
 
     def get_active_validators(self) -> list:
         """
-        Only validators who are:
+        Get validators who are:
         1) Registered & 'active' (or 'genesis' during bootstrap),
         2) Satisfy deposit rules (post-grace),
-        3) Are online by our scalable liveness (recent attestations) OR, if empty, P2P callback.
+        3) Are online by our scalable liveness (recent attestations) OR all active if no attestations.
 
-        Returns a list of validator addresses (deterministic across nodes).
+        CONSENSUS-CRITICAL: Returns a deterministic list of validator addresses.
+        
+        CRITICAL FIX: Removed P2P callback fallback which caused forks.
+        Different nodes have different P2P connections → different validator sets → FORKS.
+        Now uses deterministic fallback: all active validators from registry.
         """
         active = []
         current_height = len(self.blocks) - 1
 
         # Primary scalable liveness (epoch attestations)
+        # NOTE: get_validators_with_recent_attestations now returns deterministic fallback
+        # if no attestations are found (all active validators from registry)
         validators_with_attestations = self.get_validators_with_recent_attestations(lookback_blocks=100)
 
-        # Optional deterministic fallback: P2P callback (ONLY if no attestations set)
-        p2p_online = set()
-        if not validators_with_attestations and self._online_validators_callback:
-            try:
-                cb = self._online_validators_callback()
-                if isinstance(cb, (set, list, tuple)):
-                    p2p_online = set(cb)
-            except Exception:
-                p2p_online = set()
-
-        for addr, data in self.validator_registry.items():
+        for addr, data in sorted(self.validator_registry.items()):
             if addr == "genesis":
                 continue
 
@@ -1789,15 +1790,13 @@ class Ledger:
             if not self.validator_economics.is_validator_active(addr, current_height):
                 continue
 
-            # After bootstrap, require liveness:
+            # After bootstrap, require liveness (attestations or fallback)
             if current_height > 10:
                 if validators_with_attestations:
                     if addr not in validators_with_attestations:
                         continue
-                else:
-                    # No attestations – allow P2P fallback if available
-                    if p2p_online and addr not in p2p_online:
-                        continue
+                # NOTE: No P2P fallback - get_validators_with_recent_attestations
+                # already returns deterministic fallback if no attestations
 
             active.append(addr)
 
