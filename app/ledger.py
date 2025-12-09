@@ -3113,22 +3113,51 @@ class Ledger:
         
         This replicates the validator registration logic from add_block
         but without validation (since we're replaying already-validated blocks).
+        
+        CRITICAL FIX: Must also add validator to validator_set, not just registry.
+        Without this, syncing nodes would have validators in registry but not in
+        validator_set, causing them to not be included in proposer selection.
         """
         validator_address = tx.sender
+        
+        # Determine status based on block height (genesis vs normal)
+        if block_height == 0:
+            status = 'genesis'
+            activation_height = 0
+        else:
+            # For rebuild, we set status to 'active' immediately since we're
+            # replaying blocks that already passed the activation delay
+            status = 'active'
+            activation_height = block_height + 2  # Original activation height
         
         # Register the validator
         self.validator_registry[validator_address] = {
             'public_key': tx.public_key if hasattr(tx, 'public_key') else '',
             'device_id': tx.device_id if hasattr(tx, 'device_id') else '',
-            'activation_height': block_height,
+            'activation_height': activation_height,
+            'registration_height': block_height,
             'stake': tx.amount if hasattr(tx, 'amount') else 0,
-            'status': 'active'
+            'status': status,
+            'registered_at': tx.timestamp if hasattr(tx, 'timestamp') else 0,
+            'deposit_amount': 0,
+            'voting_power': 1,
+            'proposer_priority': 0
         }
+        
+        # CRITICAL FIX: Add to validator_set for consensus membership
+        # This was missing before, causing syncing nodes to not recognize validators
+        if validator_address not in self.validator_set:
+            self.validator_set.append(validator_address)
+        
+        # Mark active in economics system
+        self.validator_economics.mark_active(validator_address)
         
         # Update balance (stake is locked, fee is deducted)
         if validator_address not in self.balances:
             self.balances[validator_address] = 0
         self.balances[validator_address] -= (tx.amount + tx.fee) if hasattr(tx, 'fee') else tx.amount
+        
+        print(f"✅ Validator rebuilt: {validator_address[:20]}... (status={status})")
     
     def add_finality_checkpoint(self, height: int, block_hash: str):
         """
