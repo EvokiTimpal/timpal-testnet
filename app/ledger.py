@@ -1087,6 +1087,81 @@ class Ledger:
             self.validator_set_checkpoints = {
                 0: list(config.GENESIS_VALIDATORS.keys())
             }
+        
+        # CRITICAL FIX: Verify validator_registry matches blocks and rebuild if mismatch
+        # This prevents state divergence when state.json is out of sync with blocks
+        self._verify_and_repair_validator_state()
+    
+    def _verify_and_repair_validator_state(self):
+        """
+        Verify that validator_registry and validator_set match what's in the blocks.
+        If there's a mismatch, rebuild the full state from blocks.
+        
+        This prevents state divergence when:
+        - state.json is out of sync with blocks (e.g., old snapshot)
+        - Node was restarted with different code that processes registrations differently
+        - State file was corrupted or partially written
+        
+        CRITICAL: This ensures all nodes derive identical validator state from the same blocks.
+        """
+        if not self.blocks:
+            return
+        
+        # Count validator registrations in blocks
+        expected_validators = set()
+        for block in self.blocks:
+            for tx in block.transactions:
+                if tx.tx_type == "validator_registration":
+                    expected_validators.add(tx.sender)
+        
+        # Compare with loaded registry
+        loaded_validators = set(self.validator_registry.keys())
+        
+        if expected_validators != loaded_validators:
+            missing = expected_validators - loaded_validators
+            extra = loaded_validators - expected_validators
+            
+            print(f"⚠️  VALIDATOR STATE MISMATCH DETECTED!")
+            print(f"   Expected validators (from blocks): {len(expected_validators)}")
+            print(f"   Loaded validators (from state):    {len(loaded_validators)}")
+            if missing:
+                print(f"   Missing validators: {[v[:20] + '...' for v in missing]}")
+            if extra:
+                print(f"   Extra validators:   {[v[:20] + '...' for v in extra]}")
+            
+            print(f"🔧 Rebuilding full state from blocks to repair mismatch...")
+            self._rebuild_state_from_blocks()
+            
+            # Also rebuild validator_set from the repaired registry
+            self.validator_set = []
+            for addr, data in self.validator_registry.items():
+                if isinstance(data, dict):
+                    status = data.get('status', 'active')
+                    if status in ('active', 'genesis'):
+                        if addr not in self.validator_set:
+                            self.validator_set.append(addr)
+            
+            print(f"✅ State repaired: {len(self.validator_registry)} validators in registry, "
+                  f"{len(self.validator_set)} in active set")
+        else:
+            # Validators match, but also verify validator_set is correct
+            # (validators might be in registry but not in validator_set)
+            active_in_registry = set()
+            for addr, data in self.validator_registry.items():
+                if isinstance(data, dict):
+                    status = data.get('status', 'active')
+                    if status in ('active', 'genesis'):
+                        active_in_registry.add(addr)
+            
+            current_set = set(self.validator_set)
+            if active_in_registry != current_set:
+                print(f"⚠️  VALIDATOR SET MISMATCH DETECTED!")
+                print(f"   Active in registry: {len(active_in_registry)}")
+                print(f"   In validator_set:   {len(current_set)}")
+                
+                # Repair validator_set
+                self.validator_set = list(active_in_registry)
+                print(f"✅ Validator set repaired: {len(self.validator_set)} validators")
     
     def _enforce_grace_period_transition(self, current_height: int):
         """
