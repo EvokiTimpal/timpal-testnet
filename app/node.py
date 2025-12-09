@@ -889,7 +889,8 @@ class Node:
             # KEY: Blocks are ONLY valid if timestamp falls in correct window for their rank
             # This prevents race conditions when offline validators come back online
             from time_slots import (
-                get_realtime_slot, am_i_proposer_now, time_until_my_window
+                get_realtime_slot, am_i_proposer_now, time_until_my_window,
+                compute_aligned_timestamp, WINDOW_SECONDS
             )
             
             # Get genesis timestamp for window calculations
@@ -1056,16 +1057,29 @@ class Node:
             per_validator = total_reward_pals // len(active_validators) if active_validators else 0
             print(f"💰 Block reward: {total_reward_pals / 100_000_000:.8f} TMPL ({per_validator / 100_000_000:.8f} each)")
             
-            # CRITICAL FIX (ChatGPT): Clamp timestamp into slot/rank window
-            # Previous bug: used min(scheduled_time, time.time()) which created timestamps in the PAST
-            # relative to the slot/rank window, causing ledger to reject blocks (stuck at height 1)
-            # 
-            # Fix: Calculate the exact time-sliced window for (slot, rank) and clamp timestamp into it
-            # This ensures the block timestamp is valid for its assigned window and passes ledger validation
+            # TIMESTAMP CALCULATION
+            # Two modes based on activation height:
+            # 1. Before activation: Use wall-clock time clamped to window (legacy behavior)
+            # 2. After activation: Use pure slot-based aligned timestamp (deterministic)
+            #
+            # TIMESTAMP ALIGNMENT (after activation):
+            # - Timestamps are computed purely from slot and rank: genesis + slot*3 + rank*1
+            # - Zero wall-time dependency: timestamp is deterministic
+            # - Optimal block spacing: next validator wakes at exactly the right time
+            #
+            # Import activation height from config
+            from app.config_testnet import TIMESTAMP_ALIGNMENT_ACTIVATION_HEIGHT
+            
             if scheduled_time is None:
                 # Genesis block case - no scheduled time yet
                 block_timestamp = time.time()
+            elif next_height >= TIMESTAMP_ALIGNMENT_ACTIVATION_HEIGHT:
+                # TIMESTAMP ALIGNMENT MODE: Pure slot-based timestamp
+                # Compute canonical timestamp from slot and rank (no wall-time dependency)
+                block_timestamp = compute_aligned_timestamp(genesis_timestamp, current_slot, my_rank)
+                print(f"📐 ALIGNED: Block {next_height} timestamp = {block_timestamp:.2f} (slot={current_slot}, rank={my_rank})")
             else:
+                # LEGACY MODE: Wall-clock time clamped to window
                 # Calculate the time-sliced window bounds for this (slot, rank)
                 slot_start = genesis_timestamp + current_slot * config.BLOCK_TIME
                 window_start = slot_start + my_rank * WINDOW_SECONDS
