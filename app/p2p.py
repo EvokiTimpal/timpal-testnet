@@ -544,8 +544,16 @@ class P2PNetwork:
         print(f"🔄 P2P: Attempting to connect to {peer_address}...")
         
         try:
+            # CRITICAL FIX: Increase ping timeout to prevent spurious disconnects
+            # Default websockets ping_interval=20s, ping_timeout=20s is too aggressive
+            # for blockchain nodes that may be busy processing blocks
+            # Setting ping_timeout=60s gives more tolerance for temporary delays
             websocket = await asyncio.wait_for(
-                websockets.connect(peer_address),
+                websockets.connect(
+                    peer_address,
+                    ping_interval=30,  # Send ping every 30 seconds
+                    ping_timeout=60,   # Wait 60 seconds for pong before closing
+                ),
                 timeout=5.0
             )
             self.outbound_peers[peer_address] = websocket
@@ -646,7 +654,15 @@ class P2PNetwork:
     
     async def start_server(self):
         print(f"🌐 P2P: Starting WebSocket server on 0.0.0.0:{self.port}...")
-        async with websockets.serve(self.handle_client, "0.0.0.0", self.port):
+        # CRITICAL FIX: Match client ping settings to prevent spurious disconnects
+        # Both client and server must use the same ping/pong settings
+        async with websockets.serve(
+            self.handle_client, 
+            "0.0.0.0", 
+            self.port,
+            ping_interval=30,  # Send ping every 30 seconds
+            ping_timeout=60,   # Wait 60 seconds for pong before closing
+        ):
             print(f"✅ P2P: WebSocket server listening on port {self.port}")
             await asyncio.Future()
     

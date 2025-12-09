@@ -3032,6 +3032,11 @@ class Ledger:
         # This only rebuilds financial state, not validator state
         self._rebuild_financial_state_from_blocks()
         
+        # STEP 7: Verify validator state matches blocks after rollback
+        # CRITICAL FIX: Historical frames may be stale (recorded before later registrations)
+        # This ensures validators registered AFTER the frame's height are not lost
+        self._verify_and_repair_validator_state()
+        
         print(f"✅ Rollback complete - now at height {len(self.blocks) - 1}")
         return True
     
