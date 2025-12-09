@@ -171,14 +171,26 @@ def get_ledger() -> Ledger:
     
     if not data_dir:
         # Auto-detect: find any testnet_data_node_* directory with blockchain data
-        node_dirs = glob.glob("testnet_data_node_*/ledger")
+        # Check both the new default location (~/.timpal/) and legacy location (project dir)
+        from pathlib import Path
+        
+        node_dirs = []
+        
+        # Check new default location: ~/.timpal/testnet_data_node_*/ledger
+        timpal_home = Path.home() / ".timpal"
+        if timpal_home.exists():
+            node_dirs.extend(glob.glob(str(timpal_home / "testnet_data_node_*/ledger")))
+        
+        # Also check legacy location: ./testnet_data_node_*/ledger (for backwards compatibility)
+        node_dirs.extend(glob.glob("testnet_data_node_*/ledger"))
+        
         if node_dirs:
             # Prefer the most recently modified directory (active node)
             data_dir = sorted(node_dirs, key=lambda x: os.path.getmtime(x), reverse=True)[0]
             print(f"📊 Explorer auto-detected blockchain data: {data_dir}")
         else:
-            # Fallback to default (VPS genesis node)
-            data_dir = "testnet_data_node_9000/ledger"
+            # Fallback to new default location (VPS genesis node)
+            data_dir = str(Path.home() / ".timpal" / "testnet_data_node_9000" / "ledger")
             print(f"⚠️  No blockchain data found, using default: {data_dir}")
     
     current_time = time.time()
@@ -3094,11 +3106,22 @@ async def lifespan(app: FastAPI):
     
     data_dir = os.getenv("EXPLORER_DATA_DIR")
     if not data_dir:
-        node_dirs = glob.glob("testnet_data_node_*/ledger")
+        from pathlib import Path
+        
+        node_dirs = []
+        
+        # Check new default location: ~/.timpal/testnet_data_node_*/ledger
+        timpal_home = Path.home() / ".timpal"
+        if timpal_home.exists():
+            node_dirs.extend(glob.glob(str(timpal_home / "testnet_data_node_*/ledger")))
+        
+        # Also check legacy location: ./testnet_data_node_*/ledger (for backwards compatibility)
+        node_dirs.extend(glob.glob("testnet_data_node_*/ledger"))
+        
         if node_dirs:
             data_dir = sorted(node_dirs, key=lambda x: os.path.getmtime(x), reverse=True)[0]
         else:
-            data_dir = "testnet_data_node_9000/ledger"
+            data_dir = str(Path.home() / ".timpal" / "testnet_data_node_9000" / "ledger")
     
     try:
         ledger = Ledger(data_dir=data_dir, use_production_storage=False)

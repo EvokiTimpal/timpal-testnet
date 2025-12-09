@@ -62,12 +62,71 @@ from wallet import Wallet
 from seed_wallet import SeedWallet
 
 
+def resolve_data_dir(port: int, data_dir: str = None) -> str:
+    """
+    Resolve the data directory path for a testnet node.
+    
+    Priority:
+    1. Explicit --data-dir argument (if provided)
+    2. TIMPAL_DATA_PATH env variable + testnet_data_node_{port}
+    3. Default: ~/.timpal/testnet_data_node_{port}
+    
+    This avoids storing chain data in project directories (like Desktop)
+    which can be iCloud-synced on macOS, causing consensus divergence.
+    """
+    if data_dir:
+        # User explicitly specified a path - use it (with ~ expansion)
+        return os.path.expanduser(data_dir)
+    
+    # Check for TIMPAL_DATA_PATH environment variable
+    data_path_env = os.environ.get("TIMPAL_DATA_PATH")
+    if data_path_env:
+        data_root = Path(os.path.expanduser(data_path_env))
+    else:
+        # Default: ~/.timpal (safe from iCloud sync)
+        data_root = Path.home() / ".timpal"
+    
+    resolved_path = str(data_root / f"testnet_data_node_{port}")
+    return resolved_path
+
+
+def warn_if_icloud_path(data_dir: str) -> None:
+    """
+    Warn macOS users if their data directory is under Desktop or Documents,
+    which may be iCloud-synced and cause consensus divergence.
+    """
+    import sys
+    if sys.platform != "darwin":
+        return
+    
+    data_path = Path(data_dir).resolve()
+    path_parts_lower = [part.lower() for part in data_path.parts]
+    
+    if "desktop" in path_parts_lower or "documents" in path_parts_lower:
+        print("\n" + "!" * 80)
+        print("⚠️  WARNING: macOS iCloud Sync Risk Detected!")
+        print("!" * 80)
+        print(f"\nYour data directory is under Desktop or Documents:")
+        print(f"   {data_dir}")
+        print(f"\nOn macOS, these folders may be synced to iCloud, which can cause:")
+        print(f"   • Chain state duplication across devices")
+        print(f"   • Old genesis data being restored from iCloud")
+        print(f"   • Permanent consensus forks that look like network bugs")
+        print(f"\n🔧 RECOMMENDED FIX:")
+        print(f"   1. Disable 'Desktop & Documents' in iCloud settings, OR")
+        print(f"   2. Use the default path: ~/.timpal/testnet_data_node_{{port}}")
+        print(f"   3. Or set: export TIMPAL_DATA_PATH=~/.timpal")
+        print("!" * 80 + "\n")
+
+
 class TestnetNode:
     """TIMPAL Testnet Validator Node"""
     
     def __init__(self, port: int = 8765, data_dir: str = None, seed_nodes: list = None, is_genesis_node: bool = False, skip_device_check: bool = False):
         self.port = port
-        self.data_dir = data_dir or f"testnet_data_node_{port}"
+        # Use resolve_data_dir for consistent path resolution
+        # Default: ~/.timpal/testnet_data_node_{port} (safe from iCloud sync)
+        self.data_dir = resolve_data_dir(port, data_dir)
         self.seed_nodes = seed_nodes or []
         self.is_genesis_node = is_genesis_node
         self.skip_device_check = skip_device_check
@@ -77,12 +136,16 @@ class TestnetNode:
         print("TIMPAL TESTNET NODE - STARTUP DIAGNOSTICS")
         print("=" * 60)
         print(f"Working directory: {os.getcwd()}")
+        print(f"Data directory: {self.data_dir}")
         print(f"Files in current dir: {os.listdir('.')[:20]}...")  # First 20 files
         print(f"wallet_v2.json exists: {os.path.exists('wallet_v2.json')}")
         print(f"wallet.json exists: {os.path.exists('wallet.json')}")
         print(f"TIMPAL_WALLET_PASSWORD set: {'Yes' if os.environ.get('TIMPAL_WALLET_PASSWORD') else 'NO!'}")
         print(f"TIMPAL_WALLET_PIN set: {'Yes' if os.environ.get('TIMPAL_WALLET_PIN') else 'NO!'}")
         print("=" * 60)
+        
+        # Warn macOS users if data directory is under iCloud-synced paths
+        warn_if_icloud_path(self.data_dir)
         
         os.makedirs(self.data_dir, exist_ok=True)
         
@@ -747,7 +810,8 @@ IMPORTANT:
         "--data-dir",
         type=str,
         default=None,
-        help="Data directory for blockchain and wallet (default: testnet_data_node_PORT)"
+        help="Data directory for blockchain (default: ~/.timpal/testnet_data_node_PORT). "
+             "Can also set TIMPAL_DATA_PATH env var for custom base directory."
     )
     
     parser.add_argument(
@@ -784,7 +848,8 @@ IMPORTANT:
     if args.reset:
         import shutil
         
-        data_dir = args.data_dir or f"testnet_data_node_{args.port}"
+        # Use the same resolve_data_dir function to ensure we delete the correct directory
+        data_dir = resolve_data_dir(args.port, args.data_dir)
         
         # CRITICAL SAFETY: Only allow deleting testnet directories
         # This prevents accidental deletion of mainnet or system directories
