@@ -215,32 +215,30 @@ class Ledger:
         """
         Check if a validator has been offline long enough to lose rewards.
         
-        TIMPAL 10-BLOCK REWARD CUTOFF:
-        - Returns True if validator has been offline for >= 10 blocks
-        - Returns False if validator is online or offline < 10 blocks
+        CONSENSUS SAFETY FIX: This function is DISABLED to prevent forks.
+        
+        PROBLEM: The 10-block cutoff relied on `offline_since_height` which was set
+        by P2P events (mark_validator_offline). Different nodes see different P2P
+        events at different times, so they would compute different offline_since_height
+        values → different reward allocations → different block hashes → FORK.
+        
+        TEMPORARY FIX: Always return False (all registered validators get rewards).
+        This maintains consensus safety by ensuring all nodes compute identical
+        reward allocations based purely on on-chain data.
+        
+        TODO: Implement purely on-chain liveness detection (e.g., "has proposed in
+        last N blocks") to restore the 10-block cutoff without P2P dependency.
         
         Args:
             address: Validator address to check
             current_height: Current blockchain height
             
         Returns:
-            True if validator should be excluded from rewards, False otherwise
+            Always False (disabled for consensus safety)
         """
-        if address not in self.validator_registry:
-            return True  # Unknown validators don't get rewards
-        
-        data = self.validator_registry[address]
-        if not isinstance(data, dict):
-            return False
-        
-        offline_since = data.get('offline_since_height')
-        if offline_since is None:
-            return False  # Validator is online
-        
-        # 10-BLOCK CUTOFF: Exclude from rewards if offline >= 10 blocks
-        OFFLINE_REWARD_CUTOFF_BLOCKS = 10
-        blocks_offline = current_height - offline_since
-        return blocks_offline >= OFFLINE_REWARD_CUTOFF_BLOCKS
+        # DISABLED: P2P-based offline detection causes forks
+        # All registered validators receive rewards until on-chain liveness is implemented
+        return False
     
     def add_block(self, block: Block, skip_proposer_check: bool = False, use_historical_validators: bool = False) -> bool:
         """
@@ -1809,24 +1807,24 @@ class Ledger:
 
     def get_online_validators_deterministic(self, current_height: int) -> list:
         """
-        DETERMINISTIC online validator detection using on-chain data + P2P liveness state.
+        DETERMINISTIC online validator detection using ONLY on-chain data.
         
         TIMPAL PHILOSOPHY: All online validators receive equal block rewards.
         
-        This function determines "online" using blockchain data and P2P-tracked liveness,
-        ensuring all nodes compute the SAME set of online validators → same reward_allocations
-        → same block hash → NO FORKS.
+        CONSENSUS SAFETY: This function MUST be deterministic across all nodes.
+        All nodes must compute the SAME set of online validators for the same height,
+        otherwise they will produce blocks with different reward_allocations → different
+        block hashes → FORK.
         
-        TIMPAL 10-BLOCK REWARD CUTOFF:
-        - P2P detection is instant (gossip, peer reports, VRF confirmations)
-        - Validators marked offline by P2P have offline_since_height set
-        - After 10 consecutive blocks offline, validator is excluded from rewards
-        - Validator is automatically reinstated when they return (within 10 blocks = no lost rewards)
+        CRITICAL FIX: Removed P2P-based liveness sources that caused forks:
+        - REMOVED: P2P callback (_online_validators_callback) - different nodes have
+          different P2P connections and see different validators as online
+        - REMOVED: P2P-based offline tracking (offline_since_height) - set by P2P events
+          which occur at different times on different nodes
         
-        LIVENESS SOURCES:
-        1. P2P offline tracking (10-block cutoff for rewards)
-        2. Recent block proposers (highest confidence of liveness)
-        3. Epoch attestations (scalable liveness proof)
+        LIVENESS SOURCES (all deterministic, on-chain only):
+        1. Recent block proposers (from blockchain - all nodes see same blocks)
+        2. Epoch attestations (from blockchain - all nodes see same attestations)
         
         Args:
             current_height: Current blockchain height
@@ -1846,27 +1844,25 @@ class Ledger:
         
         # SOURCE 1: Recent block proposers (highest confidence of liveness)
         # Lookback scales with validator count to ensure all validators get fair chance
+        # DETERMINISTIC: All nodes see the same blocks in their chain
         proposer_lookback = max(30, active_validator_count * 2)
         recent_proposers = self._get_recently_active_validators(current_height, lookback_blocks=proposer_lookback)
         online_validators.update(recent_proposers)
         
         # SOURCE 2: Attestation holders (epoch-based liveness proof)
         # Validators must submit attestations each epoch to prove they're online and synced
+        # DETERMINISTIC: Attestations are recorded on-chain, all nodes see the same data
         validators_with_attestations = self.get_validators_with_recent_attestations(lookback_blocks=100)
         online_validators.update(validators_with_attestations)
         
-        # SOURCE 3: P2P-tracked online validators (if callback available)
-        # This adds validators that are connected via P2P but haven't proposed/attested yet
-        if self._online_validators_callback:
-            try:
-                p2p_online = self._online_validators_callback()
-                if isinstance(p2p_online, (set, list, tuple)):
-                    online_validators.update(p2p_online)
-            except Exception:
-                pass
+        # REMOVED: P2P-tracked online validators - NON-DETERMINISTIC, CAUSES FORKS
+        # Different nodes have different P2P connections and see different validators
+        # as online, leading to different reward_allocations → different block hashes
+        # 
+        # The P2P callback is still available for non-consensus uses (e.g., explorer UI)
+        # but MUST NOT be used for reward calculation
         
         # Filter to only registered, active validators that pass economics
-        # AND apply 10-BLOCK REWARD CUTOFF for offline validators
         result = []
         for addr in online_validators:
             if addr not in self.validator_registry:
@@ -1878,10 +1874,9 @@ class Ledger:
             if not self.validator_economics.is_validator_active(addr, current_height):
                 continue
             
-            # TIMPAL 10-BLOCK REWARD CUTOFF: Exclude validators offline >= 10 blocks
+            # NOTE: is_validator_offline_for_rewards is now disabled (always returns False)
+            # to prevent non-deterministic behavior from P2P-set offline_since_height
             if self.is_validator_offline_for_rewards(addr, current_height):
-                offline_since = data.get('offline_since_height') if isinstance(data, dict) else None
-                print(f"🚫 LIVENESS: Excluding {addr[:20]}... from rewards (offline_since_height={offline_since}, current={current_height})")
                 continue
             
             result.append(addr)
