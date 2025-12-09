@@ -960,38 +960,51 @@ class Node:
                 continue
             
             # ============================================================
-            # VALIDATOR QUORUM GATE: Prevent solo block production
+            # P2P ISOLATION CHECK: Prevent solo block production
             # ============================================================
-            # When a node is isolated from the network, it should NOT produce blocks.
-            # This prevents the scenario where two isolated nodes each build their own
-            # chain, then can't reconcile when reconnected due to finality checkpoints.
+            # CRITICAL FIX: Use REAL-TIME P2P connectivity, not on-chain historical data.
+            # 
+            # Previous bug: get_online_validators_deterministic() uses on-chain data
+            # (recent proposers, attestations) which doesn't reflect current connectivity.
+            # When isolated, a node could still see 2 validators as "online" based on
+            # past block history, so it kept producing blocks → FORK.
             #
-            # Rule: A validator can propose a block ONLY when:
-            #   - sync_phase == "ACTIVE" (checked above)
-            #   - AND online_validators >= MIN_VALIDATORS_FOR_CONSENSUS (or total_validators if smaller)
+            # New approach: Check actual P2P connections to other validators.
+            # - peer_validator_addresses: Maps peer_id -> validator_address for live connections
+            # - If we have 0 validator peers, we are ISOLATED and must stop producing
             #
             # Bootstrap nodes are exempt: they are the "source of truth" and must be able
             # to produce blocks even when alone (to bootstrap the network).
             # ============================================================
             if not is_bootstrap:
-                # Get total validators from checkpoint (already computed earlier)
+                # Get total validators from checkpoint
                 total_validators = len(checkpoint_validators) if checkpoint_validators else 0
                 
-                if total_validators > 0:
-                    # Require MIN_VALIDATORS_FOR_CONSENSUS, but cap at total_validators
-                    # (so a 1-validator network can still function)
+                if total_validators >= 2:
+                    # Count validators we're actually connected to via P2P RIGHT NOW
+                    # peer_validator_addresses maps peer_id -> validator_address
+                    connected_validator_peers = len(self.p2p.peer_validator_addresses)
+                    
+                    # Include self in the count (we know we're online)
+                    effective_online = connected_validator_peers + 1
+                    
+                    # Require at least MIN_VALIDATORS_FOR_CONSENSUS validators
                     required_online = min(self.MIN_VALIDATORS_FOR_CONSENSUS, total_validators)
                     
-                    # Use deterministic liveness check (same as reward calculation)
-                    online_validators = self.ledger.get_online_validators_deterministic(next_height)
-                    online_count = len(online_validators)
-                    
-                    if online_count < required_online:
-                        if next_height % 10 == 0:  # Log every 10 blocks to avoid spam
-                            print(f"⏸️  QUORUM NOT MET: online={online_count}, required={required_online}, "
+                    if effective_online < required_online:
+                        # We are ISOLATED - demote to SYNCING and stop producing
+                        if self.sync_phase == "ACTIVE":
+                            print(f"🚨 ISOLATION DETECTED: Only {effective_online} validator(s) reachable "
+                                  f"(need {required_online}), demoting from ACTIVE to SYNCING")
+                            self.sync_phase = "SYNCING"
+                            self.cooling_complete_height = None
+                        
+                        if next_height % 10 == 0:
+                            print(f"⏸️  P2P QUORUM NOT MET: connected_validators={connected_validator_peers}, "
+                                  f"effective_online={effective_online}, required={required_online}, "
                                   f"total_validators={total_validators}")
-                            print(f"   Waiting for more validators to come online before proposing blocks...")
-                            print(f"   Online validators: {[v[:12]+'...' for v in online_validators]}")
+                            print(f"   Waiting for P2P connections to other validators before proposing...")
+                            print(f"   peer_validator_addresses: {list(self.p2p.peer_validator_addresses.values())[:3]}")
                         await asyncio.sleep(config.BLOCK_TIME)
                         continue
             
