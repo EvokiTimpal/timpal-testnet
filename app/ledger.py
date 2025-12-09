@@ -3031,8 +3031,9 @@ class Ledger:
                         self.balances[tx.recipient] = 0
                     self.balances[tx.recipient] += tx.amount
                 
-                # Update nonce
-                self.nonces[tx.sender] = tx.nonce
+                # Update nonce - CRITICAL: must be tx.nonce + 1 to match add_block behavior
+                # The nonce stored is the NEXT expected nonce, not the current transaction's nonce
+                self.nonces[tx.sender] = tx.nonce + 1
         
         emitted_tmpl = self.total_emitted_pals / config.PALS_PER_TMPL
         print(f"✅ Financial state rebuilt: {len(self.balances)} accounts, "
@@ -3092,8 +3093,9 @@ class Ledger:
                         self.balances[tx.recipient] = 0
                     self.balances[tx.recipient] += tx.amount
                 
-                # Update nonce
-                self.nonces[tx.sender] = tx.nonce
+                # Update nonce - CRITICAL: must be tx.nonce + 1 to match add_block behavior
+                # The nonce stored is the NEXT expected nonce, not the current transaction's nonce
+                self.nonces[tx.sender] = tx.nonce + 1
         
         # Create checkpoint for final height
         if self.blocks:
