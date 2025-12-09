@@ -128,33 +128,19 @@ TIMPAL implements a **two-phase economic model**:
 - **CRITICAL**: Network continuity guaranteed through automatic transition
 - Makes mass Sybil attacks economically prohibitive
 
-#### Deposit Transition Timeline
+#### Deposit Transition
 
-To ensure the network NEVER stops, TIMPAL uses a three-phase transition:
+To ensure the network NEVER stops, TIMPAL uses automatic deposit enforcement:
 
-**Phase 2A: Advance Deposit Window**
-- **Testnet**: Blocks 525,000 - 549,999 (~24 hours)
-- **Mainnet**: Blocks 4,750,000 - 4,999,999 (~8 days)
-- Validators can **optionally** submit `schedule_validator_deposit` transaction
-- Pre-scheduling reserves 100 TMPL for automatic locking at transition block
-- Validators can disable auto-lock if they want manual control
-- **Default behavior**: Auto-lock enabled (most validators need no action)
-- Node software displays countdown warnings
-
-**Phase 2B: Automatic Transition**
-- **Testnet**: Block 550,000 exactly
-- **Mainnet**: Block 5,000,000 exactly
+**At Transition Block (Testnet: 550,000 / Mainnet: 5,000,000)**
 - **ONE-TIME automatic enforcement** on all existing validators:
-  - Validators who pre-scheduled deposit: ✅ Deposit locked, remain active
-  - Validators with ≥100 TMPL + auto-lock enabled: ✅ Deposit auto-locked, remain active
-  - Validators with <100 TMPL OR auto-lock disabled: ⚠️ Marked `inactive_pending_deposit`
+  - Validators with ≥100 TMPL: ✅ Deposit auto-locked, remain active
+  - Validators with <100 TMPL: ⚠️ Marked `inactive_pending_deposit`
 - Inactive validators removed from proposer pool but keep their balances
 - **Network continues** with all validators who have locked deposits
-- **Zero downtime** - at least validators who saved earnings remain active
+- **Zero downtime** - validators who saved earnings remain active
 
-**Phase 2C: Post-Transition**
-- **Testnet**: Block 550,001+
-- **Mainnet**: Block 5,000,001+
+**After Transition**
 - New validators must explicitly lock 100 TMPL to register
 - Inactive validators can rejoin anytime by depositing 100 TMPL
 - Deposit is locked (not burned) and returned upon voluntary exit

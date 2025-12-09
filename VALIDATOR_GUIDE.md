@@ -14,10 +14,7 @@
 
 | Action | When | Command | Result |
 |--------|------|---------|--------|
-| **Check status** | Anytime | `python validator_cli.py` → Option 1 | See deposit, balance, auto-lock status |
-| **Enable auto-lock** | Before block 550K | `python validator_cli.py` → Option 2 | Deposit auto-locks at block 550K |
-| **Disable auto-lock** | Before block 550K | `python validator_cli.py` → Option 3 | Manual control (you become inactive) |
-| **Schedule deposit** | Blocks 525K-550K | `python validator_cli.py` → Option 4 | Pre-schedule deposit for block 550K |
+| **Check status** | Anytime | `python validator_cli.py` → Option 1 | See deposit, balance, status |
 | **Exit validation** | Anytime | `python validator_cli.py` → Option 5 | Request withdrawal (5 min wait) |
 | **Get coins back** | After 5 min wait | `python validator_cli.py` → Option 6 | Receive 100 TMPL back to balance |
 
@@ -27,20 +24,14 @@
 
 ### Timeline:
 
-**Blocks 0 - 524,999: Free Validation (~18 days)**
+**Blocks 0 - 549,999: Free Validation (~19 days)**
 - ✅ NO deposit required
 - ✅ Earn rewards immediately
-- ✅ Save your earnings!
-
-**Blocks 525,000 - 549,999: Advance Window (~24 hours)**
-- ⚠️ Deposit requirement coming soon
-- 📅 **OPTIONAL**: Schedule your deposit to auto-lock at block 550K
-- 🔧 **OPTIONAL**: Disable auto-lock if you want manual control
-- ⏰ Node displays countdown warnings
+- ✅ Save your earnings to prepare for the transition!
 
 **Block 550,000: Automatic Transition**
 - 🔒 **100 TMPL deposit becomes required** for ALL validators
-- ✅ **DEFAULT BEHAVIOR**: If you have ≥100 TMPL, deposit auto-locks (you keep validating)
+- ✅ **If you have ≥100 TMPL**: Deposit auto-locks, you keep validating
 - ⚠️ **If balance <100 TMPL**: You become inactive (can rejoin anytime by depositing)
 
 **Block 550,001+: Post-Transition**
@@ -65,16 +56,6 @@
 - You stop earning rewards
 - Your existing balance is safe (not slashed or burned)
 - You can rejoin later when you acquire 100 TMPL
-
-### If You Want Manual Control (Advanced):
-
-🔧 Disable auto-lock **before block 550,000**:
-```bash
-python validator_cli.py
-# Select option 3: Disable auto-lock
-```
-
-**WARNING**: You will become inactive until you manually deposit!
 
 ---
 
@@ -166,59 +147,6 @@ Current block height: 3,500,000
 Deposit requirement in: 1,500,000 blocks
 ```
 
-### Option 2: Enable Auto-Lock
-
-**When to use:** Before block 550,000 (if you disabled it earlier)
-
-**What it does:**
-- Sets your preference to auto-lock at block 550,000
-- If you have ≥100 TMPL at block 550K, deposit locks automatically
-- You continue validating with zero downtime
-
-**Example:**
-```
-✅ Auto-lock ENABLED
-   At block 550,000, your deposit will be automatically locked if you have ≥100 TMPL
-```
-
-### Option 3: Disable Auto-Lock
-
-**When to use:** Before block 550,000 (if you want manual control)
-
-**WARNING:** You will become INACTIVE at block 550,000!
-
-**What it does:**
-- Disables automatic deposit locking
-- You must manually deposit 100 TMPL after block 550,000
-- Use this only if you want full manual control
-
-**Example:**
-```
-🔧 Auto-lock DISABLED
-   You will need to manually deposit 100 TMPL at/after block 550,000
-   ⚠️  You will become INACTIVE until you deposit manually!
-```
-
-### Option 4: Schedule Deposit in Advance
-
-**When to use:** Blocks 525,000 - 549,999 only (~24-hour window)
-
-**What it does:**
-- Pre-schedules your deposit to lock at block 550,000
-- Overrides auto-lock setting (deposit guaranteed)
-- Useful if you want certainty
-
-**Requirements:**
-- Must have ≥100 TMPL balance
-- Must be within advance window (blocks 525K-550K)
-
-**Example:**
-```
-✅ Deposit scheduled for block 550,000
-   100 TMPL will be locked automatically at the transition
-   Your balance: 250.0000 TMPL → 150.0000 TMPL after transition
-```
-
 ### Option 5: Request Withdrawal
 
 **When to use:** Anytime you want to exit validation
@@ -270,13 +198,9 @@ Confirm final withdrawal? (yes/no): yes
 
 ## ❓ Frequently Asked Questions
 
-### Q: What is auto-lock?
+### Q: How does the automatic deposit work?
 
-**A:** Auto-lock is the **default behavior** where your 100 TMPL deposit automatically locks at block 550,000 (testnet) if you have sufficient balance. You don't need to do anything - it happens automatically.
-
-### Q: Do I need to schedule my deposit in advance?
-
-**A:** No! Auto-lock is enabled by default. Scheduling is **optional** and only useful if you want extra certainty or if you previously disabled auto-lock.
+**A:** At block 550,000 (testnet), the system automatically locks 100 TMPL from your balance as a deposit if you have sufficient funds. You don't need to do anything - it happens automatically. If you have less than 100 TMPL, you'll be marked inactive until you deposit.
 
 ### Q: What happens if I have exactly 100 TMPL?
 
@@ -316,29 +240,14 @@ Confirm final withdrawal? (yes/no): yes
 
 **A:** Just register as a validator again and deposit 100 TMPL. There's no penalty for leaving and rejoining.
 
-### Q: When should I disable auto-lock?
-
-**A:** Only disable auto-lock if you:
-- Want full manual control over your deposit
-- Are comfortable becoming inactive at block 550K
-- Plan to manually deposit later
-
-Most validators should keep auto-lock enabled (default).
-
 ---
 
 ## 🎯 Best Practices
 
 ### For Maximum Uptime:
-1. **Save your earnings** during the free validation period (blocks 0-525K)
-2. **Keep auto-lock enabled** (default - don't disable it)
-3. **Ensure you have ≥100 TMPL** by block 550,000
-4. **Monitor your balance** regularly
-
-### For Manual Control:
-1. Disable auto-lock **before block 550,000**
-2. Accept that you'll become inactive at block 550K
-3. Manually deposit when ready (via transaction)
+1. **Save your earnings** during the free validation period (blocks 0-549,999)
+2. **Ensure you have ≥100 TMPL** by block 550,000
+3. **Monitor your balance** regularly
 
 ### For Exiting:
 1. Request withdrawal when ready to exit
