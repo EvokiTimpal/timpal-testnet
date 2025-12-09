@@ -9,7 +9,7 @@
 ```
 Symbol:     TMPL
 Max Supply: 250,000,000 TMPL
-Block Time: 3 seconds
+Block Time: 3 seconds (target)
 Consensus:  VRF-Based Validator Selection
 ```
 
@@ -20,7 +20,7 @@ TIMPAL is a decentralized blockchain with equal rewards for all participants. Li
 **Core Principles:**
 - Every active node shares block rewards equally
 - One node per device (enforced)
-- Fixed emission schedule (37.5 years)
+- Fixed emission schedule (~37.5 years at 3s block time target)
 - Immutable rules - no governance votes
 
 📊 **[Read Complete Tokenomics Documentation →](TOKENOMICS.md)**
@@ -165,7 +165,7 @@ Explorer URL: http://0.0.0.0:<port>
 | Symbol | `TMPL` |
 | Decimals | 8 (pals) |
 | Max Supply | 250,000,000 TMPL |
-| Block Time | 3 seconds |
+| Block Time | 3 seconds (target) |
 | Finality | 1 block |
 | TX Fee | 0.0005 TMPL (fixed) |
 | Consensus | VRF-Based Validator Selection |
@@ -178,13 +178,14 @@ Explorer URL: http://0.0.0.0:<port>
 - 1 TMPL = 100,000,000 pals
 - Like Bitcoin's satoshis
 
-**Phase 1: Emission (37.5 years)**
+**Phase 1: Emission (~37.5 years at 3s block time target)**
 - Block reward: 0.6345 TMPL + transaction fees
-- Total emission: 250,000,000 TMPL
+- Total emission: 250,000,000 TMPL over ~394 million blocks
 - **Distribution: Equal split among ALL active validators**
 - No advantage for block proposer, early joiners, or coordinator
+- Note: Calendar duration scales with actual block time
 
-**Phase 2: Fee-Only (After 37.5 years)**
+**Phase 2: Fee-Only (After ~394 million blocks)**
 - Block reward: Transaction fees only
 - Deflationary economics
 - Self-sustaining network
@@ -449,7 +450,7 @@ The blockchain launched with fixed rules. There is no governance, no voting, and
 
 **Sustainability**
 
-After 37.5 years of emission, the network transitions to a fee-only economy. This creates natural deflation and ensures long-term security.
+After ~37.5 years of emission (at 3-second block time target), the network transitions to a fee-only economy. This creates natural deflation and ensures long-term security. The emission schedule is defined in blocks (~394 million), so actual calendar duration scales with block time.
 
 ## License
 

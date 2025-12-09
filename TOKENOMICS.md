@@ -55,9 +55,15 @@ Examples:
 
 ### Phase 1: Block Emission (Active)
 
-**Duration:** ~37.5 years  
-**Blocks:** ~394,011,032 blocks (actual)  
+**Duration:** ~37.5 years (at 3-second block time target)  
+**Blocks:** ~394,011,032 blocks (exact, enforced by code)  
 **Total Emission:** Exactly 250,000,000 TMPL
+
+> **Note on Block Time:** The emission schedule is defined in **blocks**, not time. The "37.5 years" assumes the design target of 3-second blocks. If actual average block time differs, the calendar duration scales proportionally:
+> ```
+> Actual years = 37.5 × (actual_block_time / 3)
+> ```
+> For example: at 3.5s blocks → ~43.7 years; at 4.0s blocks → ~50 years.
 
 ### Phase 2: Fee-Only (Future)
 
@@ -113,8 +119,12 @@ else:
 | 35 | 10,519,200 | 6,674,432 | 233,605,120 | 93.44% |
 | 37.46 | ~4,839,877 | ~3,070,315 | 250,000,000 | 100.00% |
 
-**Blocks per year:** 10,519,200 (at 3-second block time)  
+**Blocks per year:** 10,519,200 (at 3-second block time target)  
 **Calculation:** (365.25 days × 24 hours × 60 min × 60 sec) ÷ 3 seconds
+
+> **Scaling with Block Time:** If actual block time is T seconds:
+> - Blocks per year = 31,557,600 ÷ T
+> - TMPL per year = (31,557,600 ÷ T) × 0.6345
 
 ---
 
@@ -320,8 +330,14 @@ After Phase 2 transition:
 ### 51% Attack Prevention via Coin-Weighted Verification
 
 TIMPAL implements a breakthrough security mechanism called **time-distributed security** that makes 51% attacks:
-- **Mathematically impossible** for the first 19 years (insufficient supply exists)
-- **Economically impossible** after 19 years (coins too distributed)
+- **Mathematically impossible** for the first ~19 years (insufficient supply exists) *
+- **Economically impossible** after ~19 years (coins too distributed)
+
+> \* At 3-second block time target. The security window scales with actual block time:
+> ```
+> Years until 51% threshold = 19.1 × (actual_block_time / 3)
+> ```
+> Slower blocks = longer security window (more conservative).
 
 ### How It Works
 
@@ -338,15 +354,19 @@ This threshold is FIXED and NEVER CHANGES
 
 **Why This Works:**
 
-| Year | Circulating Supply | % of Attack Threshold | Attack Possible? |
-|------|-------------------|----------------------|------------------|
+*Table assumes 3-second block time target. Years scale with actual block time.*
+
+| Year* | Circulating Supply | % of Attack Threshold | Attack Possible? |
+|-------|-------------------|----------------------|------------------|
 | 1 | 6.67M TMPL | 5.2% | ❌ NO (95% short) |
 | 5 | 33.37M TMPL | 26.2% | ❌ NO (74% short) |
 | 10 | 66.74M TMPL | 52.4% | ❌ NO (48% short) |
 | 15 | 100.12M TMPL | 78.5% | ❌ NO (21% short) |
 | 18 | 120.14M TMPL | 94.2% | ❌ NO (6% short) |
 | 19 | 126.81M TMPL | 99.5% | ⚠️ BARELY (0.5% short) |
-| 20+ | 127M+ TMPL | 100%+ | ⚠️ THEORETICAL* |
+| 20+ | 127M+ TMPL | 100%+ | ⚠️ THEORETICAL** |
+
+*\* Years assume 3-second blocks. Actual calendar years = listed year × (actual_block_time / 3)*
 
 **Why year 20+ is still secure:**
 - Coins distributed across 100,000+ validators globally
@@ -388,20 +408,24 @@ Year 25 Attack Attempt:
 
 ### Security Timeline
 
-**Phase 1 (Years 1-18): Mathematical Impossibility**
+*Years assume 3-second block time target. Actual calendar years scale with block time.*
+
+**Phase 1 (Years 1-19 at 3s blocks): Mathematical Impossibility**
 ```
 Attack requires: 127.5M TMPL
 Supply available: < 127.5M TMPL
 Result: Attack cannot occur (insufficient coins exist)
 ```
 
-**Phase 2 (Year 19+): Economic Impossibility**
+**Phase 2 (Year 19+ at 3s blocks): Economic Impossibility**
 ```
 Attack requires: 127.5M TMPL
 Supply available: ≥ 127.5M TMPL
 Distribution: 100K+ validators × ~1,250 TMPL each
 Result: Attack cost exceeds network value
 ```
+
+> **Block Time Scaling:** If actual block time is T seconds, the "mathematical impossibility" window extends to ~19 × (T/3) calendar years. Slower blocks = longer security window.
 
 ### Key Breakthrough
 
@@ -603,17 +627,20 @@ if self.total_emitted_pals + block.reward > config.MAX_SUPPLY_PALS:
 |--------|-------|
 | **Max Supply** | 250,000,000 TMPL |
 | **Block Reward** | 0.6345 TMPL (fixed) |
-| **Block Time** | 3 seconds |
+| **Block Time Target** | 3 seconds |
 | **Transaction Fee** | 0.0005 TMPL (fixed) |
 | **Max TPS** | 450 TPS (1,350 tx / 3s) |
-| **Emission Blocks** | ~394,011,033 blocks |
-| **Emission Period** | ~37.5 years |
-| **Blocks/Year** | ~10,519,200 blocks |
-| **TMPL/Year** | ~6,674,432 TMPL |
+| **Emission Blocks** | ~394,011,033 blocks (exact) |
+| **Emission Period** | ~37.5 years (at 3s blocks)* |
+| **Blocks/Year** | ~10,519,200 (at 3s blocks) |
+| **TMPL/Year** | ~6,674,432 TMPL (at 3s blocks) |
+| **51% Security Window** | ~19 years (at 3s blocks)* |
 | **Phase Transition** | Automatic at max supply |
 | **Fee-Only Start** | Block ~394,011,034 |
 | **Distribution** | Equal among all validators |
 | **Governance** | None (code is law) |
+
+*\* Calendar years scale with actual block time: multiply by (actual_block_time / 3)*
 
 ---
 

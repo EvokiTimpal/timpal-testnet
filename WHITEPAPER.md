@@ -355,16 +355,20 @@ Result:
 |-----------|-------|
 | **Max Supply** | 250,000,000 TMPL |
 | **Decimals** | 8 (pals) |
-| **Block Time** | 3 seconds |
+| **Block Time Target** | 3 seconds |
 | **Block Reward** | 0.6345 TMPL |
-| **Emission Period** | ~37.5 years |
+| **Emission Blocks** | ~394,011,033 blocks |
+| **Emission Period** | ~37.5 years (at 3s blocks)* |
+
+*\* Calendar years scale with actual block time: years = 37.5 × (actual_block_time / 3)*
 
 ### 7.2 Emission Schedule
 
-**Phase 1: Emission (Blocks 0 - 394,200,000)**
+**Phase 1: Emission (Blocks 0 - ~394,011,033)**
 - Fixed reward: 0.6345 TMPL per block
-- Duration: ~37.5 years at 3-second blocks
+- Duration: ~37.5 years at 3-second block time target
 - Total emission: 250 million TMPL
+- Note: Emission is defined in blocks, not time. Actual calendar duration scales with block time.
 
 **Phase 2: Fee-Only (After block 394,200,000)**
 - Block reward: 0 TMPL
@@ -525,8 +529,10 @@ Like Bitcoin, **code is law**:
 - **Prevention**: Time-distributed security via coin-weighted fork verification
 - **Detection**: Deep reorganizations (4+ blocks) trigger TMPL balance check
 - **Threshold**: Attackers must own 127.5M TMPL (51% of max supply)
-- **Security Window**: Mathematically impossible for 19 years (insufficient supply exists)
-- **Long-term**: Economically impossible after 19 years (coins distributed across 100K+ validators)
+- **Security Window**: Mathematically impossible for ~19 years at 3s blocks (insufficient supply exists)*
+- **Long-term**: Economically impossible after ~19 years (coins distributed across 100K+ validators)
+
+*Security window scales with block time: ~19 × (actual_block_time / 3) calendar years
 - **Mechanism**: 
   - Shallow reorgs (1-3 blocks): Allowed normally (natural network splits)
   - Deep reorgs (4+ blocks): Require proof of 51% coin ownership
@@ -544,7 +550,7 @@ Like Bitcoin, **code is law**:
 
 ### 12.2 Time-Distributed Security Model
 
-TIMPAL achieves a breakthrough in blockchain security through **time-distributed security**—a novel defense mechanism that makes 51% attacks mathematically impossible for the first 19 years and economically impossible thereafter.
+TIMPAL achieves a breakthrough in blockchain security through **time-distributed security**—a novel defense mechanism that makes 51% attacks mathematically impossible for the first ~19 years (at 3-second block time target) and economically impossible thereafter. The security window scales with actual block time.
 
 **The Fundamental Problem:**
 
@@ -568,12 +574,14 @@ Year 20+ supply = 127M+ TMPL (attack threshold reached)
 
 **Why This Works:**
 
-**Phase 1 (Years 1-18): Mathematically Impossible**
+*Years assume 3-second block time target. Actual calendar years = listed year × (actual_block_time / 3)*
+
+**Phase 1 (Years 1-19 at 3s blocks): Mathematically Impossible**
 - Not enough TMPL exists to perform attack
 - Even controlling 100% of circulating supply is insufficient
 - Time itself is the security mechanism
 
-**Phase 2 (Year 19+): Economically Impossible**
+**Phase 2 (Year 19+ at 3s blocks): Economically Impossible**
 - Attack requires 127.5M TMPL
 - Coins distributed across 100,000+ validators globally
 - Acquiring 51% requires:
