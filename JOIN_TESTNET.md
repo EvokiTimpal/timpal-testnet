@@ -26,6 +26,37 @@ That's it - your node will automatically join the P2P network, register as a val
 
 ---
 
+# ⚠️ macOS Users: Important iCloud Warning
+
+**If you use iCloud Desktop & Documents sync on macOS, read this carefully!**
+
+macOS can transparently relocate your Desktop and Documents folders into iCloud Drive. If you clone the TIMPAL repository to your Desktop, the blockchain data may be synced to iCloud, causing:
+
+- **Chain state duplication** across devices
+- **Old genesis data** being restored from iCloud backups
+- **Permanent consensus forks** that look like network bugs
+- **Sync failures** with "FORK DETECTED" errors
+
+**How to avoid this issue:**
+
+1. **Option A (Recommended):** The node now stores data in `~/.timpal/` by default, which is safe from iCloud sync. No action needed if using the latest version.
+
+2. **Option B:** Disable "Desktop & Documents" sync in System Settings → Apple ID → iCloud → iCloud Drive → Options.
+
+3. **Option C:** Clone the repository to a non-iCloud location like `~/Projects/` instead of Desktop.
+
+4. **Option D:** Set a custom data path:
+   ```bash
+   export TIMPAL_DATA_PATH=~/.timpal
+   ```
+
+**Note:** If you previously ran a node from Desktop with iCloud sync enabled, you may need to:
+1. Delete the old `testnet_data_node_*` folders from Desktop
+2. Check iCloud Drive for any synced copies and delete them
+3. Start fresh with the new default location (`~/.timpal/`)
+
+---
+
 # Network Architecture
 
 TIMPAL is a **truly decentralized** blockchain.
