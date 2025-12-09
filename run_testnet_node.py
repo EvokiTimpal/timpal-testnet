@@ -684,7 +684,9 @@ class TestnetNode:
                 if sync_success:
                     current_height = self.node.ledger.get_block_count() - 1
                     print(f"✅ INITIAL SYNC COMPLETE: Synced to height {current_height}")
-                    self.node.synced = True
+                    # Do NOT set self.node.synced = True here - let mine_blocks verify against peers
+                    # and enforce cooling period before allowing block production
+                    print(f"   Will verify sync status and start cooling period in mining loop")
                 else:
                     print(f"⚠️  Initial sync incomplete, will continue syncing via P2P")
             else:
