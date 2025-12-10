@@ -850,16 +850,28 @@ class Node:
             # CRITICAL FIX: Bootstrap nodes (no seeds) skip catch-up entirely
             # They are the source of truth and should never pause for "higher peers"
             #
-            # TIMING OPTIMIZATION: Only check peer height every N blocks to reduce HTTP overhead
-            # This saves ~100-200ms per block by avoiding unnecessary network calls
+            # STATE-AWARE PEER HEIGHT REFRESH:
+            # - When SYNCING or COOLING: ALWAYS refresh peer height (we need accurate data to catch up)
+            # - When ACTIVE: Only refresh every N blocks (optimization to reduce HTTP overhead)
+            #
+            # PREVIOUS BUG: Peer height was only refreshed when next_height % interval == 0.
+            # If the node was stuck (not producing blocks), next_height stayed constant,
+            # so max_peer_height was never refreshed, causing the node to think it was
+            # synced when it was actually behind.
             if is_bootstrap:
                 max_peer_height = 0  # Bootstrap node is always at head
+            elif self.sync_phase != "ACTIVE":
+                # ALWAYS refresh when not fully synced - we need accurate peer height to catch up
+                max_peer_height = await self._get_max_peer_height()
+                self._cached_peer_height = max_peer_height
+                if next_height % 10 == 0:
+                    print(f"🔄 SYNC REFRESH: local={latest_block.height}, peer={max_peer_height}, phase={self.sync_phase}")
             elif next_height % self._peer_height_check_interval == 0:
-                # Time to refresh peer height
+                # ACTIVE phase: only refresh every N blocks to reduce HTTP overhead
                 max_peer_height = await self._get_max_peer_height()
                 self._cached_peer_height = max_peer_height
             else:
-                # Use cached peer height
+                # ACTIVE phase: use cached peer height
                 max_peer_height = self._cached_peer_height
             local_height = latest_block.height
             
