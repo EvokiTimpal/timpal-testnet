@@ -1357,6 +1357,23 @@ class Node:
                 print(f"ℹ️  NOTE: Block {new_block.height} already exists — duplicate attempt skipped (normal behavior)")
                 continue  # Skip this cycle and try again
             
+            # LIVENESS FIX: Update _last_external_block_height after successful proposal
+            # when P2P quorum is present. This prevents the deadlock where a non-bootstrap
+            # node blocks itself after proposing consecutive blocks.
+            #
+            # The key insight: if we have P2P quorum (connected to other validators),
+            # our successfully proposed block IS part of the shared network chain.
+            # So we should treat it as "network head" for isolation detection purposes.
+            #
+            # This only applies to non-bootstrap nodes (bootstrap is exempt from isolation checks)
+            # and only when we have P2P quorum (otherwise we might be building a private chain).
+            if not is_bootstrap:
+                connected_validator_peers = len(self.p2p.peer_validator_addresses)
+                if connected_validator_peers > 0:
+                    # We have P2P quorum - our block is part of the shared chain
+                    self._last_external_block_height = new_block.height
+                    self._last_external_block_time = time.time()
+            
             # CRITICAL: Log block creation so we can track chain progression
             print(f"✅ Block {new_block.height} created and added to ledger")
             print(f"   Proposer: {self.reward_address[:20]}...")
