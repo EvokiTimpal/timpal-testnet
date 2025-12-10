@@ -1468,13 +1468,17 @@ class Node:
         SECURITY: Never fetches genesis block (height 0) from network.
         Genesis must be created locally and validated against CANONICAL_GENESIS_HASH.
         
+        CRITICAL FIX: Prepends local genesis to the fetched chain so that
+        chain indices match block heights. This is required for _find_fork_point
+        to work correctly in reorganize_to_chain.
+        
         Args:
             peer_url: HTTP URL of the peer
             session: aiohttp ClientSession
             end_height: Last block height to fetch
             
         Returns:
-            List[Block] if successful, None if failed
+            List[Block] if successful (starting from genesis), None if failed
         """
         print(f"📥 Fetching full competing chain from {peer_url} (block 1 to {end_height})...")
         
@@ -1510,6 +1514,31 @@ class Node:
                     current_start = current_end + 1
             
             print(f"✅ Fetched {len(all_blocks)} blocks from competing chain")
+            
+            # CRITICAL FIX: Validate that peer's block 1 chains to our genesis
+            # This ensures we're on the same network before attempting reorg
+            local_genesis = self.ledger.get_block_by_height(0)
+            if not local_genesis:
+                print(f"❌ Cannot validate competing chain: no local genesis block")
+                return None
+            
+            if all_blocks and all_blocks[0].height == 1:
+                peer_block_1 = all_blocks[0]
+                if peer_block_1.previous_hash != local_genesis.block_hash:
+                    print(f"❌ GENESIS MISMATCH DETECTED!")
+                    print(f"   Local genesis hash:  {local_genesis.block_hash[:16]}...")
+                    print(f"   Peer block 1 prev:   {peer_block_1.previous_hash[:16]}...")
+                    print(f"   Peer is on a DIFFERENT CHAIN - cannot reorganize")
+                    print(f"   This usually means the peer has stale/old chain data")
+                    print(f"   Solution: Delete chain data on the mismatched node and resync")
+                    return None
+                
+                # CRITICAL FIX: Prepend local genesis to make chain indices match heights
+                # This is required for _find_fork_point to work correctly
+                # chain[0] must be height 0, chain[1] must be height 1, etc.
+                print(f"✅ Genesis validated - prepending local genesis to competing chain")
+                all_blocks.insert(0, local_genesis)
+            
             return all_blocks
             
         except Exception as e:
