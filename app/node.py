@@ -1125,6 +1125,27 @@ class Node:
                         print(f"⏸️  EXTERNAL BLOCK LAG: ahead={blocks_ahead_of_external}, age={time_since_external_block:.1f}s")
                     await asyncio.sleep(config.BLOCK_TIME)
                     continue
+                
+                # ============================================================
+                # CRITICAL SAFETY: No consecutive self-proposals for non-bootstrap
+                # ============================================================
+                # This is the STRONGEST guard against private chain growth.
+                # A non-bootstrap validator CANNOT build on top of a block it proposed.
+                # 
+                # Why this works:
+                # - At worst, an isolated node can create ONE stray block
+                # - It cannot extend that block into a long private chain
+                # - The stray block will be orphaned when the node reconnects
+                # - This is safe because orphaned blocks before finality are normal
+                #
+                # This rule alone would have prevented the 78-block private fork.
+                # ============================================================
+                if latest_block.proposer == self.reward_address:
+                    if next_height % 10 == 0:
+                        print(f"⏸️  CONSECUTIVE SELF-PROPOSAL BLOCKED: Last block {latest_block.height} was proposed by us")
+                        print(f"   Non-bootstrap validators must wait for external block before proposing again")
+                    await asyncio.sleep(config.BLOCK_TIME)
+                    continue
             
             # TIME-SLICED SLOTS CONSENSUS: Deterministic fallback without race conditions
             # Each 3-second slot is divided into 3×1-second windows:
@@ -1371,24 +1392,18 @@ class Node:
                 print(f"ℹ️  NOTE: Block {new_block.height} already exists — duplicate attempt skipped (normal behavior)")
                 continue  # Skip this cycle and try again
             
-            # LIVENESS FIX: Update _last_external_block_height after successful proposal
-            # when P2P quorum is present. This prevents the deadlock where a non-bootstrap
-            # node blocks itself after proposing consecutive blocks.
+            # NOTE: We intentionally do NOT update _last_external_block_height here.
+            # 
+            # CRITICAL BUG FIX: Previously, we updated _last_external_block_height after
+            # successful proposals "with P2P quorum". This was WRONG because:
+            # 1. P2P quorum check can be fooled by stale peer_validator_addresses entries
+            # 2. Once we start updating our own "external" tracker with our own blocks,
+            #    the isolation checks (timeout, height lag) become useless
+            # 3. This allowed a node to build 78+ blocks on a private chain while isolated
             #
-            # The key insight: if we have P2P quorum (connected to other validators),
-            # our successfully proposed block IS part of the shared network chain.
-            # So we should treat it as "network head" for isolation detection purposes.
-            #
-            # This only applies to non-bootstrap nodes (bootstrap is exempt from isolation checks)
-            # and only when we have P2P quorum (otherwise we might be building a private chain).
-            #
-            # IMPORTANT: We reuse the has_p2p_quorum variable computed earlier in this loop
-            # iteration to ensure consistent logic. This prevents divergence between the
-            # isolation check and the network head update.
-            if not is_bootstrap and has_p2p_quorum:
-                # We have P2P quorum - our block is part of the shared chain
-                self._last_external_block_height = new_block.height
-                self._last_external_block_time = time.time()
+            # _last_external_block_height should ONLY be updated when receiving blocks
+            # from OTHER validators (in handle_new_block and HTTP sync), never for our
+            # own proposals. This ensures the isolation checks remain meaningful.
             
             # CRITICAL: Log block creation so we can track chain progression
             print(f"✅ Block {new_block.height} created and added to ledger")
