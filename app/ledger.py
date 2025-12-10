@@ -2942,12 +2942,15 @@ class Ledger:
         
         # STEP 1: Restore AttestationManager state from historical snapshot
         # This is CRITICAL for correct VRF proposer selection during replay
+        # REORG FIX (Dec 2025): import_snapshot now tolerates hash mismatches,
+        # so restore_success should always be True if snapshot exists
         am_snapshot = self.historical_state_log.get_am_snapshot(target_height)
         if am_snapshot:
             restore_success = self.attestation_manager.import_snapshot(am_snapshot)
             if restore_success:
                 print(f"✅ AttestationManager state restored to height {target_height}")
             else:
+                # This should rarely happen now that hash mismatches are tolerated
                 print(f"⚠️ Failed to restore AttestationManager state - using rollback_to_height fallback")
                 self.attestation_manager.rollback_to_height(target_height)
         else:
