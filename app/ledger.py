@@ -321,8 +321,13 @@ class Ledger:
             # This prevents race conditions when offline validators come back online
             # Only the correct (slot, rank) can propose in their assigned time window
             # BOOTSTRAP EXCEPTION: Skip for first 10 blocks to handle delayed genesis startup
+            #
+            # REORG EXCEPTION: Skip slot/rank check when use_historical_validators=True
+            # During chain reorganization, get_ranked_proposers_for_slot() uses current chain
+            # state (len(self.blocks) - 1) which is WRONG for validating historical blocks.
+            # The historical VRF validation at the end of this function handles reorg correctly.
             BOOTSTRAP_HEIGHT = 10
-            if not skip_proposer_check and hasattr(block, 'slot') and hasattr(block, 'rank'):
+            if not skip_proposer_check and not use_historical_validators and hasattr(block, 'slot') and hasattr(block, 'rank'):
                 from time_slots import validate_block_window
                 
                 # Get genesis timestamp
@@ -1310,13 +1315,21 @@ class Ledger:
         may not exist yet (we just cleared it). In this case, we MUST use the PARENT's
         historical state (block_height - 1) which represents the fork point and is preserved.
         
+        CRITICAL FIX: VRF computation must use block_slot (not block_height) as input.
+        Live VRF selection in get_ranked_proposers_for_slot() passes slot to VRF, so
+        historical validation must do the same to match.
+        
         Args:
-            block_height: Block height being validated
-            block_slot: Block slot (time-based) for VRF selection
+            block_height: Block height being validated (used for state lookup)
+            block_slot: Block slot (time-based) for VRF selection (used for VRF computation)
         
         Returns:
             Expected proposer address, or None if historical state unavailable
         """
+        # Use slot for VRF computation (matches live selection in get_ranked_proposers_for_slot)
+        # Fall back to height if slot is 0 or not provided (backward compatibility)
+        vrf_input = block_slot if block_slot > 0 else block_height
+        
         # PRIORITY 1: Use stored proposer queue directly from historical record
         # This is the MOST RELIABLE source as it was captured at commit time
         proposer_queue = self.historical_state_log.get_proposer_queue_at_height(block_height)
@@ -1341,7 +1354,7 @@ class Ledger:
                     queue = HistoricalStateBuilder.compute_proposer_queue_for_height(
                         committee=set(liveness_set),
                         epoch_seed=stored_epoch_seed,
-                        block_height=block_height
+                        block_height=vrf_input  # Use slot for VRF, not height
                     )
                     return queue[0] if queue else None
         
@@ -1367,7 +1380,7 @@ class Ledger:
                         queue = HistoricalStateBuilder.compute_proposer_queue_for_height(
                             committee=set(liveness_set),
                             epoch_seed=stored_epoch_seed,
-                            block_height=block_height
+                            block_height=vrf_input  # Use slot for VRF, not height
                         )
                         return queue[0] if queue else None
         
@@ -1379,7 +1392,7 @@ class Ledger:
                 queue = HistoricalStateBuilder.compute_proposer_queue_for_height(
                     committee=set(epoch_snap.ordered_committee),
                     epoch_seed=epoch_snap.epoch_seed,
-                    block_height=block_height
+                    block_height=vrf_input  # Use slot for VRF, not height
                 )
                 return queue[0] if queue else None
         
@@ -1397,7 +1410,7 @@ class Ledger:
                         queue = HistoricalStateBuilder.compute_proposer_queue_for_height(
                             committee=set(liveness_set),
                             epoch_seed=stored_epoch_seed,
-                            block_height=block_height
+                            block_height=vrf_input  # Use slot for VRF, not height
                         )
                         return queue[0] if queue else None
         
