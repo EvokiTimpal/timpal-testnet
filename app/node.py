@@ -1043,59 +1043,74 @@ class Node:
                             print(f"   peer_validator_addresses: {list(self.p2p.peer_validator_addresses.values())[:3]}")
                         await asyncio.sleep(config.BLOCK_TIME)
                         continue
+                
+                # ============================================================
+                # EXTERNAL BLOCK RECEPTION CHECK: Prevent private chain growth
+                # ============================================================
+                # CRITICAL FIX v2: This check runs for ALL non-bootstrap nodes, regardless
+                # of total_validators count. This ensures isolation detection even if
+                # checkpoint validator set is temporarily weird.
+                #
+                # KEY BUG FIX: Use next_height (block we're about to propose), not local_height.
+                # The previous implementation allowed proposing a conflicting block at the same
+                # height as another validator before the guard kicked in.
+                #
+                # Non-bootstrap nodes should "follow rather than lead" - they can only propose
+                # blocks at heights they've already seen from other validators.
+                #
+                # This catches scenarios where:
+                # 1. WebSocket connections appear alive but are effectively dead
+                # 2. peer_validator_addresses contains stale entries
+                # 3. We're connected to a peer but they're on a different fork
+                # 4. Network partition where we can connect but not receive blocks
+                # ============================================================
+                current_time = time.time()
+                time_since_external_block = current_time - self._last_external_block_time
+                
+                # CRITICAL: Use next_height (block we're about to propose), not local_height
+                # This prevents proposing a conflicting block at the same height as another validator
+                blocks_ahead_of_external = next_height - self._last_external_block_height
+                
+                # Check 1: Time-based isolation (haven't received external block in N seconds)
+                # Only apply after we've received at least one external block
+                if self._last_external_block_time > 0 and time_since_external_block > self._external_block_timeout:
+                    if self.sync_phase == "ACTIVE":
+                        print(f"🚨 EXTERNAL BLOCK TIMEOUT: No blocks from other validators in {time_since_external_block:.1f}s "
+                              f"(threshold: {self._external_block_timeout}s)")
+                        print(f"   Last external block: height {self._last_external_block_height}, "
+                              f"next_height: {next_height}")
+                        print(f"   Demoting from ACTIVE to SYNCING to prevent private chain growth")
+                        self.sync_phase = "SYNCING"
+                        self.cooling_complete_height = None
                     
-                    # ============================================================
-                    # EXTERNAL BLOCK RECEPTION CHECK: Prevent private chain growth
-                    # ============================================================
-                    # CRITICAL FIX: Even if P2P connections appear healthy, we must verify
-                    # that we're actually RECEIVING blocks from other validators.
-                    #
-                    # This catches scenarios where:
-                    # 1. WebSocket connections appear alive but are effectively dead
-                    # 2. peer_validator_addresses contains stale entries
-                    # 3. We're connected to a peer but they're on a different fork
-                    # 4. Network partition where we can connect but not receive blocks
-                    #
-                    # If we haven't received a block from another validator recently,
-                    # we should NOT produce blocks (we might be building a private chain).
-                    # ============================================================
-                    current_time = time.time()
-                    time_since_external_block = current_time - self._last_external_block_time
-                    blocks_ahead_of_external = local_height - self._last_external_block_height
+                    if next_height % 10 == 0:
+                        print(f"⏸️  EXTERNAL BLOCK TIMEOUT: {time_since_external_block:.1f}s since last external block")
+                    await asyncio.sleep(config.BLOCK_TIME)
+                    continue
+                
+                # Check 2: STRICT height-based isolation - non-bootstrap nodes must "follow"
+                # A non-bootstrap node can only propose block H if it has seen an external block
+                # at height >= H-1. This prevents proposing conflicting blocks at the same height.
+                # 
+                # Example: If last external block is height 999, we can propose height 1000.
+                # But if last external block is height 998, we CANNOT propose height 1000
+                # (we might be creating a fork at height 999).
+                #
+                # blocks_ahead_of_external = next_height - _last_external_block_height
+                # If > 1, we're trying to propose a block more than 1 ahead of what we've seen
+                if self._last_external_block_height > 0 and blocks_ahead_of_external > 1:
+                    if self.sync_phase == "ACTIVE":
+                        print(f"🚨 EXTERNAL BLOCK LAG: Trying to propose height {next_height} but last external "
+                              f"block is {self._last_external_block_height} (gap: {blocks_ahead_of_external})")
+                        print(f"   Non-bootstrap nodes must 'follow' - can only propose 1 block ahead of external")
+                        print(f"   Demoting from ACTIVE to SYNCING to prevent private chain growth")
+                        self.sync_phase = "SYNCING"
+                        self.cooling_complete_height = None
                     
-                    # Check 1: Time-based isolation (haven't received external block in N seconds)
-                    # Only apply after we've received at least one external block
-                    if self._last_external_block_time > 0 and time_since_external_block > self._external_block_timeout:
-                        if self.sync_phase == "ACTIVE":
-                            print(f"🚨 EXTERNAL BLOCK TIMEOUT: No blocks from other validators in {time_since_external_block:.1f}s "
-                                  f"(threshold: {self._external_block_timeout}s)")
-                            print(f"   Last external block: height {self._last_external_block_height}, "
-                                  f"current height: {local_height}")
-                            print(f"   Demoting from ACTIVE to SYNCING to prevent private chain growth")
-                            self.sync_phase = "SYNCING"
-                            self.cooling_complete_height = None
-                        
-                        if next_height % 10 == 0:
-                            print(f"⏸️  EXTERNAL BLOCK TIMEOUT: {time_since_external_block:.1f}s since last external block")
-                        await asyncio.sleep(config.BLOCK_TIME)
-                        continue
-                    
-                    # Check 2: Height-based isolation (we're too far ahead of last external block)
-                    # This catches the case where we're producing blocks but not receiving any
-                    if self._last_external_block_height > 0 and blocks_ahead_of_external > self._external_block_lag_threshold:
-                        if self.sync_phase == "ACTIVE":
-                            print(f"🚨 EXTERNAL BLOCK LAG: We're {blocks_ahead_of_external} blocks ahead of last external block "
-                                  f"(threshold: {self._external_block_lag_threshold})")
-                            print(f"   Last external block: height {self._last_external_block_height}, "
-                                  f"current height: {local_height}")
-                            print(f"   Demoting from ACTIVE to SYNCING to prevent private chain growth")
-                            self.sync_phase = "SYNCING"
-                            self.cooling_complete_height = None
-                        
-                        if next_height % 10 == 0:
-                            print(f"⏸️  EXTERNAL BLOCK LAG: {blocks_ahead_of_external} blocks ahead of last external")
-                        await asyncio.sleep(config.BLOCK_TIME)
-                        continue
+                    if next_height % 10 == 0:
+                        print(f"⏸️  EXTERNAL BLOCK LAG: next_height={next_height}, last_external={self._last_external_block_height}")
+                    await asyncio.sleep(config.BLOCK_TIME)
+                    continue
             
             # TIME-SLICED SLOTS CONSENSUS: Deterministic fallback without race conditions
             # Each 3-second slot is divided into 3×1-second windows:
