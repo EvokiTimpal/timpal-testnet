@@ -1012,21 +1012,48 @@ class Node:
             # Bootstrap nodes are exempt: they are the "source of truth" and must be able
             # to produce blocks even when alone (to bootstrap the network).
             # ============================================================
+            
+            # Store quorum metrics for reuse (both in isolation check AND after successful proposal)
+            # This ensures consistent logic throughout the mining loop
+            has_p2p_quorum = False
+            connected_validator_peers = 0
+            effective_online = 1  # At minimum, we count ourselves
+            required_online = 1
+            total_validators = 0
+            
             if not is_bootstrap:
                 # Get total validators from checkpoint
                 total_validators = len(checkpoint_validators) if checkpoint_validators else 0
                 
+                # Count validators we're actually connected to via P2P RIGHT NOW
+                connected_validator_peers = len(self.p2p.peer_validator_addresses)
+                
+                # Include self in the count (we know we're online)
+                effective_online = connected_validator_peers + 1
+                
+                # Require at least MIN_VALIDATORS_FOR_CONSENSUS validators
+                required_online = min(self.MIN_VALIDATORS_FOR_CONSENSUS, total_validators)
+                
+                # Determine if we have P2P quorum
+                has_p2p_quorum = (effective_online >= required_online) and (connected_validator_peers > 0)
+                
+                # Compute external block metrics for isolation detection
+                current_time = time.time()
+                time_since_external_block = current_time - self._last_external_block_time
+                blocks_ahead_of_external = next_height - self._last_external_block_height
+                
+                # PERIODIC DEBUG LOGGING: Log isolation metrics every 50 blocks
+                # This helps diagnose issues without flooding logs
+                if next_height % 50 == 0:
+                    print(f"[ISOLATION DEBUG] h={local_height}, next={next_height}, "
+                          f"last_ext={self._last_external_block_height}, "
+                          f"ext_age={time_since_external_block:.1f}s, "
+                          f"ahead={blocks_ahead_of_external}, "
+                          f"peers={connected_validator_peers}, "
+                          f"eff={effective_online}/{required_online}, "
+                          f"quorum={has_p2p_quorum}")
+                
                 if total_validators >= 2:
-                    # Count validators we're actually connected to via P2P RIGHT NOW
-                    # peer_validator_addresses maps peer_id -> validator_address
-                    connected_validator_peers = len(self.p2p.peer_validator_addresses)
-                    
-                    # Include self in the count (we know we're online)
-                    effective_online = connected_validator_peers + 1
-                    
-                    # Require at least MIN_VALIDATORS_FOR_CONSENSUS validators
-                    required_online = min(self.MIN_VALIDATORS_FOR_CONSENSUS, total_validators)
-                    
                     if effective_online < required_online:
                         # We are ISOLATED - demote to SYNCING and stop producing
                         if self.sync_phase == "ACTIVE":
@@ -1047,29 +1074,18 @@ class Node:
                 # ============================================================
                 # EXTERNAL BLOCK RECEPTION CHECK: Prevent private chain growth
                 # ============================================================
-                # CRITICAL FIX v2: This check runs for ALL non-bootstrap nodes, regardless
-                # of total_validators count. This ensures isolation detection even if
-                # checkpoint validator set is temporarily weird.
+                # CRITICAL FIX v3: Combined height AND time check to avoid false positives.
+                # 
+                # The check fires when BOTH conditions are true:
+                # 1. We're significantly ahead of the last external block (> 3 blocks)
+                # 2. We haven't seen an external block in a while (> 2 * BLOCK_TIME)
                 #
-                # KEY BUG FIX: Use next_height (block we're about to propose), not local_height.
-                # The previous implementation allowed proposing a conflicting block at the same
-                # height as another validator before the guard kicked in.
+                # This prevents:
+                # - Long private chains when actually isolated
+                # - False positives when legitimately proposing consecutive blocks
                 #
-                # Non-bootstrap nodes should "follow rather than lead" - they can only propose
-                # blocks at heights they've already seen from other validators.
-                #
-                # This catches scenarios where:
-                # 1. WebSocket connections appear alive but are effectively dead
-                # 2. peer_validator_addresses contains stale entries
-                # 3. We're connected to a peer but they're on a different fork
-                # 4. Network partition where we can connect but not receive blocks
+                # The time-only check (30s timeout) remains as a separate safety net.
                 # ============================================================
-                current_time = time.time()
-                time_since_external_block = current_time - self._last_external_block_time
-                
-                # CRITICAL: Use next_height (block we're about to propose), not local_height
-                # This prevents proposing a conflicting block at the same height as another validator
-                blocks_ahead_of_external = next_height - self._last_external_block_height
                 
                 # Check 1: Time-based isolation (haven't received external block in N seconds)
                 # Only apply after we've received at least one external block
@@ -1088,27 +1104,25 @@ class Node:
                     await asyncio.sleep(config.BLOCK_TIME)
                     continue
                 
-                # Check 2: STRICT height-based isolation - non-bootstrap nodes must "follow"
-                # A non-bootstrap node can only propose block H if it has seen an external block
-                # at height >= H-1. This prevents proposing conflicting blocks at the same height.
-                # 
-                # Example: If last external block is height 999, we can propose height 1000.
-                # But if last external block is height 998, we CANNOT propose height 1000
-                # (we might be creating a fork at height 999).
-                #
-                # blocks_ahead_of_external = next_height - _last_external_block_height
-                # If > 1, we're trying to propose a block more than 1 ahead of what we've seen
-                if self._last_external_block_height > 0 and blocks_ahead_of_external > 1:
+                # Check 2: Combined height + time isolation check
+                # Only fire when BOTH: significantly ahead AND haven't heard from network recently
+                # This avoids the deadlock where consecutive legitimate proposals trigger the guard
+                height_threshold = 3  # Must be > 3 blocks ahead
+                time_threshold = 2 * config.BLOCK_TIME  # Must be > 2 block times since last external
+                
+                if (self._last_external_block_height > 0 and 
+                    blocks_ahead_of_external > height_threshold and 
+                    time_since_external_block > time_threshold):
                     if self.sync_phase == "ACTIVE":
-                        print(f"🚨 EXTERNAL BLOCK LAG: Trying to propose height {next_height} but last external "
-                              f"block is {self._last_external_block_height} (gap: {blocks_ahead_of_external})")
-                        print(f"   Non-bootstrap nodes must 'follow' - can only propose 1 block ahead of external")
+                        print(f"🚨 EXTERNAL BLOCK LAG: {blocks_ahead_of_external} blocks ahead of last external "
+                              f"AND {time_since_external_block:.1f}s since last external block")
+                        print(f"   Last external: height {self._last_external_block_height}, next: {next_height}")
                         print(f"   Demoting from ACTIVE to SYNCING to prevent private chain growth")
                         self.sync_phase = "SYNCING"
                         self.cooling_complete_height = None
                     
                     if next_height % 10 == 0:
-                        print(f"⏸️  EXTERNAL BLOCK LAG: next_height={next_height}, last_external={self._last_external_block_height}")
+                        print(f"⏸️  EXTERNAL BLOCK LAG: ahead={blocks_ahead_of_external}, age={time_since_external_block:.1f}s")
                     await asyncio.sleep(config.BLOCK_TIME)
                     continue
             
@@ -1356,6 +1370,25 @@ class Node:
             if not success:
                 print(f"ℹ️  NOTE: Block {new_block.height} already exists — duplicate attempt skipped (normal behavior)")
                 continue  # Skip this cycle and try again
+            
+            # LIVENESS FIX: Update _last_external_block_height after successful proposal
+            # when P2P quorum is present. This prevents the deadlock where a non-bootstrap
+            # node blocks itself after proposing consecutive blocks.
+            #
+            # The key insight: if we have P2P quorum (connected to other validators),
+            # our successfully proposed block IS part of the shared network chain.
+            # So we should treat it as "network head" for isolation detection purposes.
+            #
+            # This only applies to non-bootstrap nodes (bootstrap is exempt from isolation checks)
+            # and only when we have P2P quorum (otherwise we might be building a private chain).
+            #
+            # IMPORTANT: We reuse the has_p2p_quorum variable computed earlier in this loop
+            # iteration to ensure consistent logic. This prevents divergence between the
+            # isolation check and the network head update.
+            if not is_bootstrap and has_p2p_quorum:
+                # We have P2P quorum - our block is part of the shared chain
+                self._last_external_block_height = new_block.height
+                self._last_external_block_time = time.time()
             
             # CRITICAL: Log block creation so we can track chain progression
             print(f"✅ Block {new_block.height} created and added to ledger")
