@@ -92,6 +92,22 @@ class Node:
         self._cached_peer_height = 0
         self._peer_height_check_interval = 5  # Check every 5 blocks
         
+        # ISOLATION DETECTION: Track last external block received
+        # This is a CRITICAL safety mechanism to prevent private chain growth.
+        # Even if P2P connections appear healthy, if we're not receiving blocks from
+        # other validators, we are effectively isolated and must NOT produce blocks.
+        # 
+        # The P2P connection check alone is insufficient because:
+        # 1. WebSocket connections can appear alive but be effectively dead
+        # 2. peer_validator_addresses may contain stale entries
+        # 3. We might be connected to a peer on a different fork
+        #
+        # This check ensures: "Am I actually receiving blocks from the network?"
+        self._last_external_block_height = 0  # Height of last block received from another validator
+        self._last_external_block_time = 0.0  # Timestamp when we last received an external block
+        self._external_block_timeout = 30.0  # Seconds without external blocks before considering isolated
+        self._external_block_lag_threshold = 3  # Max blocks we can be ahead of last external block
+        
         # Block gossip: Track recently seen blocks to prevent infinite loops
         self.recently_seen_blocks = set()
         
@@ -498,6 +514,14 @@ class Node:
                 # P2P blocks: Skip strict validation (historical blocks may have old timing)
                 # Only enforce timing for blocks THIS node creates (in mine_blocks function)
                 self.ledger.add_block(block, skip_proposer_check=True)
+                
+                # ISOLATION DETECTION: Track external blocks received from other validators
+                # This is CRITICAL for detecting network isolation - if we're not receiving
+                # blocks from other validators, we should NOT produce blocks ourselves.
+                # This check is more reliable than just checking P2P connection state.
+                if proposer_address != self.reward_address:
+                    self._last_external_block_height = block.height
+                    self._last_external_block_time = time.time()
                 
                 # SYNC LOGGING: Track block reception for debugging sync issues
                 print(f"📥 BLOCK RECEIVED: Height {block.height} from peer {peer_id[:8]}... (chain now at {block.height} blocks)")
@@ -1019,6 +1043,59 @@ class Node:
                             print(f"   peer_validator_addresses: {list(self.p2p.peer_validator_addresses.values())[:3]}")
                         await asyncio.sleep(config.BLOCK_TIME)
                         continue
+                    
+                    # ============================================================
+                    # EXTERNAL BLOCK RECEPTION CHECK: Prevent private chain growth
+                    # ============================================================
+                    # CRITICAL FIX: Even if P2P connections appear healthy, we must verify
+                    # that we're actually RECEIVING blocks from other validators.
+                    #
+                    # This catches scenarios where:
+                    # 1. WebSocket connections appear alive but are effectively dead
+                    # 2. peer_validator_addresses contains stale entries
+                    # 3. We're connected to a peer but they're on a different fork
+                    # 4. Network partition where we can connect but not receive blocks
+                    #
+                    # If we haven't received a block from another validator recently,
+                    # we should NOT produce blocks (we might be building a private chain).
+                    # ============================================================
+                    current_time = time.time()
+                    time_since_external_block = current_time - self._last_external_block_time
+                    blocks_ahead_of_external = local_height - self._last_external_block_height
+                    
+                    # Check 1: Time-based isolation (haven't received external block in N seconds)
+                    # Only apply after we've received at least one external block
+                    if self._last_external_block_time > 0 and time_since_external_block > self._external_block_timeout:
+                        if self.sync_phase == "ACTIVE":
+                            print(f"🚨 EXTERNAL BLOCK TIMEOUT: No blocks from other validators in {time_since_external_block:.1f}s "
+                                  f"(threshold: {self._external_block_timeout}s)")
+                            print(f"   Last external block: height {self._last_external_block_height}, "
+                                  f"current height: {local_height}")
+                            print(f"   Demoting from ACTIVE to SYNCING to prevent private chain growth")
+                            self.sync_phase = "SYNCING"
+                            self.cooling_complete_height = None
+                        
+                        if next_height % 10 == 0:
+                            print(f"⏸️  EXTERNAL BLOCK TIMEOUT: {time_since_external_block:.1f}s since last external block")
+                        await asyncio.sleep(config.BLOCK_TIME)
+                        continue
+                    
+                    # Check 2: Height-based isolation (we're too far ahead of last external block)
+                    # This catches the case where we're producing blocks but not receiving any
+                    if self._last_external_block_height > 0 and blocks_ahead_of_external > self._external_block_lag_threshold:
+                        if self.sync_phase == "ACTIVE":
+                            print(f"🚨 EXTERNAL BLOCK LAG: We're {blocks_ahead_of_external} blocks ahead of last external block "
+                                  f"(threshold: {self._external_block_lag_threshold})")
+                            print(f"   Last external block: height {self._last_external_block_height}, "
+                                  f"current height: {local_height}")
+                            print(f"   Demoting from ACTIVE to SYNCING to prevent private chain growth")
+                            self.sync_phase = "SYNCING"
+                            self.cooling_complete_height = None
+                        
+                        if next_height % 10 == 0:
+                            print(f"⏸️  EXTERNAL BLOCK LAG: {blocks_ahead_of_external} blocks ahead of last external")
+                        await asyncio.sleep(config.BLOCK_TIME)
+                        continue
             
             # TIME-SLICED SLOTS CONSENSUS: Deterministic fallback without race conditions
             # Each 3-second slot is divided into 3×1-second windows:
@@ -1437,6 +1514,13 @@ class Node:
                                             print(f"❌ Block {block.height} validation failed, stopping sync")
                                             return False
                                         
+                                        # ISOLATION DETECTION: Track external blocks received during HTTP sync
+                                        # Blocks from HTTP sync are always from other validators (we're syncing)
+                                        proposer = block.proposer if hasattr(block, 'proposer') else None
+                                        if proposer and proposer != self.reward_address:
+                                            self._last_external_block_height = block.height
+                                            self._last_external_block_time = time.time()
+                                        
                                         current_height = block.height
                                     
                                     print(f"✅ HTTP Sync: Downloaded blocks {start}-{end} ({len(blocks)} blocks)")
@@ -1699,6 +1783,13 @@ class Node:
                                     blocks_added_in_chunk += 1
                                     # Update sync progress tracker
                                     current_sync_height = block.height + 1
+                                    
+                                    # ISOLATION DETECTION: Track external blocks received during sync
+                                    # Blocks from sync are always from other validators
+                                    proposer = block.proposer if hasattr(block, 'proposer') else None
+                                    if proposer and proposer != self.reward_address:
+                                        self._last_external_block_height = block.height
+                                        self._last_external_block_time = time.time()
                                 else:
                                     # FORK DETECTION: Block validation failed
                                     latest = self.ledger.get_latest_block()
