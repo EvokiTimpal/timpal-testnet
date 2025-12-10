@@ -108,6 +108,14 @@ class Node:
         self._external_block_timeout = 30.0  # Seconds without external blocks before considering isolated
         self._external_block_lag_threshold = 3  # Max blocks we can be ahead of last external block
         
+        # STALL DETECTION: Safety net to escape cooling-based deadlocks
+        # If the chain doesn't advance for too long while in SYNCING/COOLING,
+        # automatically return to ACTIVE to break the deadlock.
+        # This prevents scenarios where both validators demote and neither can propose.
+        self._last_block_height_change_time = time.time()  # When chain height last changed
+        self._last_known_height = 0  # Last known chain height
+        self._stall_threshold = self._external_block_timeout * 3  # 90 seconds by default
+        
         # Block gossip: Track recently seen blocks to prevent infinite loops
         self.recently_seen_blocks = set()
         
@@ -912,10 +920,36 @@ class Node:
             # flip-flopping that caused the fork at block 85.
             # ============================================================
             
+            # ============================================================
+            # STALL DETECTION: Track chain height changes for deadlock escape
+            # ============================================================
+            current_time = time.time()
+            if local_height != self._last_known_height:
+                self._last_block_height_change_time = current_time
+                self._last_known_height = local_height
+            
+            time_since_height_change = current_time - self._last_block_height_change_time
+            
             # Bootstrap nodes are always ACTIVE (they are the source of truth)
             if is_bootstrap:
                 self.sync_phase = "ACTIVE"
                 self.synced = True
+            
+            # ============================================================
+            # STALL ESCAPE: Safety net to break cooling-based deadlocks
+            # ============================================================
+            # If chain hasn't advanced for too long while in SYNCING/COOLING,
+            # automatically return to ACTIVE to break the deadlock.
+            # This prevents scenarios where both validators demote and neither can propose.
+            if self.sync_phase in ("SYNCING", "COOLING") and not is_bootstrap:
+                if time_since_height_change > self._stall_threshold:
+                    print(f"🚨 STALL DETECTED: Chain height {local_height} unchanged for {time_since_height_change:.1f}s")
+                    print(f"   Stall threshold: {self._stall_threshold}s, current phase: {self.sync_phase}")
+                    print(f"   ESCAPING DEADLOCK: Forcing transition to ACTIVE phase")
+                    self.sync_phase = "ACTIVE"
+                    self.synced = True
+                    self.cooling_complete_height = None
+                    self._last_block_height_change_time = current_time  # Reset stall timer
             
             # PHASE TRANSITIONS based on current state
             if self.sync_phase == "ACTIVE":
@@ -1074,50 +1108,59 @@ class Node:
                 # ============================================================
                 # EXTERNAL BLOCK RECEPTION CHECK: Prevent private chain growth
                 # ============================================================
-                # CRITICAL FIX v3: Combined height AND time check to avoid false positives.
+                # CRITICAL FIX v4 (Dec 2025): Only demote when ACTUALLY AHEAD of peers.
                 # 
-                # The check fires when BOTH conditions are true:
-                # 1. We're significantly ahead of the last external block (> 3 blocks)
-                # 2. We haven't seen an external block in a while (> 2 * BLOCK_TIME)
+                # PREVIOUS BUG: Both validators would demote to SYNCING when they
+                # hadn't received external blocks, even when at the same height.
+                # This caused a permanent deadlock where neither could propose.
                 #
-                # This prevents:
-                # - Long private chains when actually isolated
-                # - False positives when legitimately proposing consecutive blocks
+                # NEW RULE: External block timeout should ONLY trigger demotion when:
+                #   local_height > max_peer_height
+                # Meaning the node is actually ahead (potential private chain).
                 #
-                # The time-only check (30s timeout) remains as a separate safety net.
+                # If heights are equal or peers are ahead, do NOT demote.
                 # ============================================================
                 
                 # Check 1: Time-based isolation (haven't received external block in N seconds)
                 # Only apply after we've received at least one external block
+                # CRITICAL FIX: Only demote if we're actually AHEAD of peers
                 if self._last_external_block_time > 0 and time_since_external_block > self._external_block_timeout:
-                    if self.sync_phase == "ACTIVE":
-                        print(f"🚨 EXTERNAL BLOCK TIMEOUT: No blocks from other validators in {time_since_external_block:.1f}s "
-                              f"(threshold: {self._external_block_timeout}s)")
-                        print(f"   Last external block: height {self._last_external_block_height}, "
-                              f"next_height: {next_height}")
-                        print(f"   Demoting from ACTIVE to SYNCING to prevent private chain growth")
-                        self.sync_phase = "SYNCING"
-                        self.cooling_complete_height = None
-                    
-                    if next_height % 10 == 0:
-                        print(f"⏸️  EXTERNAL BLOCK TIMEOUT: {time_since_external_block:.1f}s since last external block")
-                    await asyncio.sleep(config.BLOCK_TIME)
-                    continue
+                    # Only demote if we're actually ahead of peers (potential private chain)
+                    if local_height > max_peer_height:
+                        if self.sync_phase == "ACTIVE":
+                            print(f"🚨 EXTERNAL BLOCK TIMEOUT: No blocks from other validators in {time_since_external_block:.1f}s "
+                                  f"(threshold: {self._external_block_timeout}s)")
+                            print(f"   Last external block: height {self._last_external_block_height}, "
+                                  f"local_height: {local_height}, max_peer_height: {max_peer_height}")
+                            print(f"   We are AHEAD of peers - demoting from ACTIVE to SYNCING to prevent private chain growth")
+                            self.sync_phase = "SYNCING"
+                            self.cooling_complete_height = None
+                        
+                        if next_height % 10 == 0:
+                            print(f"⏸️  EXTERNAL BLOCK TIMEOUT: {time_since_external_block:.1f}s since last external block (ahead of peers)")
+                        await asyncio.sleep(config.BLOCK_TIME)
+                        continue
+                    else:
+                        # Not ahead of peers - don't demote, just log occasionally
+                        if next_height % 30 == 0:
+                            print(f"ℹ️  EXTERNAL BLOCK TIMEOUT but NOT ahead of peers: local={local_height}, peer={max_peer_height}")
+                            print(f"   Not demoting - waiting for network to produce blocks")
                 
                 # Check 2: Combined height + time isolation check
                 # Only fire when BOTH: significantly ahead AND haven't heard from network recently
-                # This avoids the deadlock where consecutive legitimate proposals trigger the guard
-                height_threshold = 3  # Must be > 3 blocks ahead
+                # CRITICAL FIX: Also require being ahead of max_peer_height
+                height_threshold = 3  # Must be > 3 blocks ahead of last external
                 time_threshold = 2 * config.BLOCK_TIME  # Must be > 2 block times since last external
                 
                 if (self._last_external_block_height > 0 and 
                     blocks_ahead_of_external > height_threshold and 
-                    time_since_external_block > time_threshold):
+                    time_since_external_block > time_threshold and
+                    local_height > max_peer_height):  # CRITICAL: Must be ahead of peers
                     if self.sync_phase == "ACTIVE":
                         print(f"🚨 EXTERNAL BLOCK LAG: {blocks_ahead_of_external} blocks ahead of last external "
                               f"AND {time_since_external_block:.1f}s since last external block")
-                        print(f"   Last external: height {self._last_external_block_height}, next: {next_height}")
-                        print(f"   Demoting from ACTIVE to SYNCING to prevent private chain growth")
+                        print(f"   Last external: height {self._last_external_block_height}, local: {local_height}, peer: {max_peer_height}")
+                        print(f"   We are AHEAD of peers - demoting from ACTIVE to SYNCING to prevent private chain growth")
                         self.sync_phase = "SYNCING"
                         self.cooling_complete_height = None
                     
