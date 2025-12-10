@@ -454,25 +454,35 @@ class AttestationManager:
         - Committee membership depends on epoch boundaries
         - Incorrect state restoration = invalid proposer selection
         
+        DETERMINISTIC SERIALIZATION (Dec 2025 fix):
+        All collections MUST be sorted to ensure deterministic hash computation.
+        This prevents hash mismatches during import_snapshot() which would cause
+        reorg failures. The hash is computed from JSON with sort_keys=True, but
+        list ordering within values must also be deterministic.
+        
         Args:
             block_height: Block height at which snapshot was taken (metadata only)
             
         Returns:
             Dict containing complete serializable state
         """
+        # CRITICAL: Use deterministic serialization for all collections
+        # - Sort all lists to ensure consistent ordering
+        # - Use string keys for epochs (JSON compatibility)
+        # - Sort dict items by key for deterministic iteration
         snapshot_data = {
             'attestations': {
-                epoch: dict(validators) 
-                for epoch, validators in self.attestations.items()
+                str(epoch): dict(sorted(validators.items())) 
+                for epoch, validators in sorted(self.attestations.items())
             },
             'epoch_validator_sets': {
-                epoch: list(validators) 
-                for epoch, validators in self.epoch_validator_sets.items()
+                str(epoch): list(sorted(validators)) 
+                for epoch, validators in sorted(self.epoch_validator_sets.items())
             },
-            'finalized_epochs': list(self.finalized_epochs),
+            'finalized_epochs': sorted(list(self.finalized_epochs)),
             'epoch_committees': {
-                epoch: list(committee) 
-                for epoch, committee in self.epoch_committees.items()
+                str(epoch): list(sorted(committee)) 
+                for epoch, committee in sorted(self.epoch_committees.items())
             }
         }
         
@@ -502,18 +512,15 @@ class AttestationManager:
         that existed at a previous block height before applying the new chain.
         
         SECURITY NOTE:
-        - Validates snapshot hash integrity (warns on mismatch but continues)
+        - Validates snapshot hash integrity (strict check)
         - Replaces ALL mutable state atomically
         - Config params are NOT restored (assumed consistent)
         
-        REORG FIX (Dec 2025):
-        Hash mismatches can occur due to serialization differences (sets vs lists,
-        JSON key ordering) when snapshots are stored and loaded from SQLite.
-        Since the snapshot data itself is valid, we log a warning but continue
-        with the data to prevent reorg failures. This is safe because:
-        1. The snapshot was created by our own code at commit time
-        2. The data structure is validated during restore
-        3. Rejecting valid snapshots causes worse problems (reorg failures)
+        DETERMINISTIC SERIALIZATION (Dec 2025 fix):
+        Hash verification now works correctly because export_snapshot() uses
+        deterministic serialization (sorted lists, string keys). Old snapshots
+        from before this fix may fail hash verification - in that case, the
+        chain should be reset to ensure clean state.
         
         Args:
             snapshot: Snapshot dict from export_snapshot()
@@ -534,11 +541,14 @@ class AttestationManager:
                 json.dumps(state, sort_keys=True, separators=(',', ':')).encode()
             ).hexdigest()
             if expected_hash != actual_hash:
-                # REORG FIX: Log warning but continue with the data
-                # Hash mismatches are typically due to serialization differences,
-                # not data corruption. Rejecting valid snapshots causes reorg failures.
-                print(f"⚠️ Snapshot hash mismatch (expected {expected_hash[:16]}..., got {actual_hash[:16]}...)")
-                print(f"   Continuing with snapshot data - this is typically a serialization difference, not corruption")
+                # STRICT: Hash mismatch indicates data corruption or version mismatch
+                # With deterministic serialization in export_snapshot(), this should
+                # never happen for snapshots created with the current code version.
+                # If this occurs, the chain likely needs to be reset.
+                print(f"❌ Snapshot hash mismatch! Expected {expected_hash[:16]}..., got {actual_hash[:16]}...")
+                print(f"   This indicates data corruption or snapshot from incompatible version.")
+                print(f"   Consider resetting the chain to ensure clean state.")
+                return False
         
         self.attestations = {
             int(epoch): dict(validators) 
@@ -568,22 +578,27 @@ class AttestationManager:
         Used to detect state divergence between nodes and verify
         that snapshot restore produced correct state.
         
+        DETERMINISTIC SERIALIZATION (Dec 2025 fix):
+        Uses the same serialization format as export_snapshot() to ensure
+        consistent hash computation across export, import, and state hash.
+        
         Returns:
             SHA256 hash of current state
         """
+        # CRITICAL: Must match export_snapshot() serialization exactly
         snapshot_data = {
             'attestations': {
-                str(epoch): dict(validators) 
-                for epoch, validators in self.attestations.items()
+                str(epoch): dict(sorted(validators.items())) 
+                for epoch, validators in sorted(self.attestations.items())
             },
             'epoch_validator_sets': {
                 str(epoch): list(sorted(validators))
-                for epoch, validators in self.epoch_validator_sets.items()
+                for epoch, validators in sorted(self.epoch_validator_sets.items())
             },
-            'finalized_epochs': sorted(self.finalized_epochs),
+            'finalized_epochs': sorted(list(self.finalized_epochs)),
             'epoch_committees': {
                 str(epoch): list(sorted(committee)) 
-                for epoch, committee in self.epoch_committees.items()
+                for epoch, committee in sorted(self.epoch_committees.items())
             }
         }
         return hashlib.sha256(
