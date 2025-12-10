@@ -1170,23 +1170,27 @@ class Node:
                     continue
                 
                 # ============================================================
-                # CRITICAL SAFETY: No consecutive self-proposals for non-bootstrap
+                # CRITICAL SAFETY: No consecutive self-proposals when AHEAD of peers
                 # ============================================================
-                # This is the STRONGEST guard against private chain growth.
-                # A non-bootstrap validator CANNOT build on top of a block it proposed.
+                # This guards against private chain growth when a node is isolated.
+                # A non-bootstrap validator CANNOT build on top of a block it proposed
+                # IF it is ahead of its peers (potential private chain scenario).
                 # 
-                # Why this works:
-                # - At worst, an isolated node can create ONE stray block
-                # - It cannot extend that block into a long private chain
-                # - The stray block will be orphaned when the node reconnects
-                # - This is safe because orphaned blocks before finality are normal
+                # CRITICAL FIX (Dec 2025): Only apply this rule when actually ahead of peers.
+                # Previously, this rule was unconditional, which caused:
+                # - Empty slots when VRF assigned same validator as primary consecutively
+                # - Fallback to rank 1 proposers, adding delays
+                # - ~6 second average block time instead of 3 seconds
                 #
-                # This rule alone would have prevented the 78-block private fork.
+                # NEW RULE: Only block consecutive self-proposals when local_height > max_peer_height
+                # This preserves safety (prevents private chains) while allowing normal
+                # consecutive proposals when the network is healthy and synchronized.
                 # ============================================================
-                if latest_block.proposer == self.reward_address:
+                if latest_block.proposer == self.reward_address and local_height > max_peer_height:
                     if next_height % 10 == 0:
                         print(f"⏸️  CONSECUTIVE SELF-PROPOSAL BLOCKED: Last block {latest_block.height} was proposed by us")
-                        print(f"   Non-bootstrap validators must wait for external block before proposing again")
+                        print(f"   We are AHEAD of peers (local={local_height}, peer={max_peer_height})")
+                        print(f"   Blocking consecutive proposal to prevent private chain growth")
                     await asyncio.sleep(config.BLOCK_TIME)
                     continue
             
