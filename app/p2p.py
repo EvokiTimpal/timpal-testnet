@@ -271,6 +271,31 @@ class P2PNetwork:
                     if is_outbound and self.on_peer_connected_callback:
                         print(f"🔄 P2P: Handshake complete, triggering sync callback for {peer_id[:30]}...")
                         asyncio.create_task(self.on_peer_connected_callback(peer_id))
+                    
+                    # CRITICAL FIX: Send reciprocal announce_node to ensure bidirectional validator mapping
+                    # This fixes the bug where a node that resets and reconnects never receives the
+                    # other node's validator address, causing peer_validator_addresses to remain empty
+                    # and the P2P quorum check to fail, preventing the node from becoming ACTIVE.
+                    # Guard: Only respond once per device_id to avoid infinite echo loops.
+                    if self.reward_address and self.public_key and self.device_id:
+                        try:
+                            response_msg = {
+                                "type": "announce_node",
+                                "device_id": self.device_id,
+                                "reward_address": self.reward_address
+                            }
+                            # Add security fields (timestamp, nonce) via security manager
+                            response_msg = self.security_manager.create_secure_message(response_msg)
+                            response_msg["public_key"] = self.public_key
+                            # Sign the message (same pattern as connect_to_peer)
+                            message_str = json.dumps({k: response_msg[k] for k in sorted(response_msg.keys()) if k != "signature"}, sort_keys=True)
+                            signature = self._sign_message(message_str)
+                            if signature:
+                                response_msg["signature"] = signature
+                                await websocket.send(json.dumps(response_msg))
+                                print(f"🔗 P2P: Sent reciprocal announce_node to peer {peer_id[:8]}... (validator: {self.reward_address[:20]}...)")
+                        except Exception as e:
+                            print(f"⚠️  P2P: Failed to send reciprocal announce_node: {e}")
             
             elif message_type == "peer_list":
                 peers = data.get("peers", [])
