@@ -134,24 +134,34 @@ jobs:
         from app.wallet import Wallet
         from app.transaction import Transaction
         from app.block import Block
+        import os
         
-        # Test wallet creation
-        wallet = Wallet()
+        # Test wallet creation (must call create_new_wallet with a PIN)
+        wallet = Wallet(wallet_file='ci_test_wallet.json')
+        wallet.create_new_wallet('123456')  # 6-digit PIN as required by Wallet class
+        assert wallet.address is not None, 'Wallet address must not be None'
         assert wallet.address.startswith('tmpl'), 'Wallet address must start with tmpl'
         assert len(wallet.address) == 48, 'Wallet address must be 48 chars'
         print(f'Wallet creation OK: {wallet.address[:20]}...')
         
         # Test transaction signing
+        import time
         tx = Transaction(
             sender=wallet.address,
             recipient='tmpl' + '0' * 44,
             amount=100,
             fee=50000,
-            nonce=1
+            timestamp=time.time(),
+            nonce=1,
+            public_key=wallet.public_key
         )
         tx.sign(wallet.private_key)
         assert tx.verify(), 'Transaction signature verification failed'
         print('Transaction signing/verification OK')
+        
+        # Cleanup test wallet file
+        if os.path.exists('ci_test_wallet.json'):
+            os.remove('ci_test_wallet.json')
         
         print('All cryptographic validations passed')
         "
