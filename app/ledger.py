@@ -469,7 +469,12 @@ class Ledger:
                             historical_validators = self.get_validators_at_height(block.height)
                             expected_proposer = self.select_proposer_vrf_based(block_slot, validators=historical_validators)
                     else:
-                        expected_proposer = self.select_proposer_vrf_based(block_slot)
+                        # CRITICAL FIX: Use select_proposer_for_slot() instead of select_proposer_vrf_based()
+                        # select_proposer_vrf_based() interprets its argument as HEIGHT, not SLOT
+                        # This caused consensus failures when slot >> height (e.g., slot=5217, height=2698)
+                        # because VRF used wrong epoch/seed/committee for the slot number.
+                        # select_proposer_for_slot() correctly uses slot-based selection matching mine_blocks()
+                        expected_proposer = self.select_proposer_for_slot(block_slot)
                     
                     if expected_proposer and block.proposer != expected_proposer:
                         print(f"REJECT: Wrong proposer for block {block.height} (slot {block_slot})")
