@@ -114,7 +114,19 @@ class Node:
         # This prevents scenarios where both validators demote and neither can propose.
         self._last_block_height_change_time = time.time()  # When chain height last changed
         self._last_known_height = 0  # Last known chain height
-        self._stall_threshold = self._external_block_timeout * 3  # 90 seconds by default
+        self._stall_threshold_leader = 10.0  # 10 seconds for leader to break deadlock
+        self._stall_threshold_fallback = 30.0  # 30 seconds for non-leader fallback
+        
+        # GLOBAL STALL DETECTION: Track when either local or peer height changes
+        # This helps distinguish "I'm ahead" from "everyone is stalled"
+        self._last_global_height_change_time = time.time()
+        self._last_known_peer_height = 0
+        self._global_stall_threshold = 2 * config.BLOCK_TIME  # 6 seconds
+        
+        # PEER RESPONSIVENESS: Track last time we received any peer message
+        # This helps distinguish "peer is offline" from "peer is behind"
+        self._last_peer_message_time = time.time()
+        self._peer_dead_timeout = 3 * config.BLOCK_TIME  # 9 seconds
         
         # Block gossip: Track recently seen blocks to prevent infinite loops
         self.recently_seen_blocks = set()
@@ -263,6 +275,43 @@ class Node:
         print(f"🟢 LIVENESS CALLBACK: _on_validator_online called for {validator_address[:20]}...")
         self.ledger.mark_validator_online(validator_address)
     
+    def _is_stall_breaker_leader(self) -> bool:
+        """
+        Determine if this node is the deterministic "stall-breaker" leader.
+        
+        When a global stall is detected (no blocks produced for X seconds),
+        only the leader is allowed to aggressively force transition to ACTIVE.
+        This prevents all validators from simultaneously becoming ACTIVE and
+        potentially creating forks.
+        
+        DETERMINISTIC RULE: The lexicographically smallest active validator
+        address becomes the stall-breaker. This is computed purely from
+        on-chain data, so all nodes agree on who the leader is.
+        
+        Returns:
+            True if this node is the stall-breaker leader, False otherwise
+        """
+        if not self.reward_address:
+            return False
+        
+        # Get all active validators from registry
+        active_validators = []
+        for addr, data in self.ledger.validator_registry.items():
+            if addr == "genesis":
+                continue
+            if isinstance(data, dict) and data.get('status') in ('active', 'genesis'):
+                active_validators.append(addr)
+        
+        if not active_validators:
+            # No active validators - this node becomes leader by default
+            return True
+        
+        # Sort lexicographically and check if we're the smallest
+        active_validators.sort()
+        is_leader = (self.reward_address == active_validators[0])
+        
+        return is_leader
+    
     async def _get_peer_height(self, peer_url: str) -> int:
         """
         Get the current blockchain height of a peer via HTTP API.
@@ -319,6 +368,9 @@ class Node:
     
     async def handle_new_block(self, data: dict, peer_id: str):
         try:
+            # PEER RESPONSIVENESS: Update last peer message time
+            self._last_peer_message_time = time.time()
+            
             block = Block.from_dict(data["block"])
             latest = self.ledger.get_latest_block()
             
@@ -606,6 +658,9 @@ class Node:
             websocket: Direct websocket connection for reliable delivery
         """
         try:
+            # PEER RESPONSIVENESS: Update last peer message time
+            self._last_peer_message_time = time.time()
+            
             requested_height = data.get("current_height", 0)
             latest = self.ledger.get_latest_block()
             
@@ -927,8 +982,20 @@ class Node:
             if local_height != self._last_known_height:
                 self._last_block_height_change_time = current_time
                 self._last_known_height = local_height
+                # Also update global stall tracking when local height changes
+                self._last_global_height_change_time = current_time
+            
+            # Track peer height changes for global stall detection
+            if max_peer_height != self._last_known_peer_height:
+                self._last_global_height_change_time = current_time
+                self._last_known_peer_height = max_peer_height
             
             time_since_height_change = current_time - self._last_block_height_change_time
+            time_since_global_change = current_time - self._last_global_height_change_time
+            
+            # Compute peer responsiveness and global stall status
+            peer_responsive = (current_time - self._last_peer_message_time) < self._peer_dead_timeout
+            global_chain_stalled = time_since_global_change > self._global_stall_threshold
             
             # Bootstrap nodes are always ACTIVE (they are the source of truth)
             if is_bootstrap:
@@ -941,10 +1008,17 @@ class Node:
             # If chain hasn't advanced for too long while in SYNCING/COOLING,
             # automatically return to ACTIVE to break the deadlock.
             # This prevents scenarios where both validators demote and neither can propose.
+            #
+            # LEADER-BASED ESCAPE: Only the deterministic leader can escape quickly.
+            # Non-leaders wait longer to avoid simultaneous ACTIVE transitions.
             if self.sync_phase in ("SYNCING", "COOLING") and not is_bootstrap:
-                if time_since_height_change > self._stall_threshold:
+                is_leader = self._is_stall_breaker_leader()
+                stall_threshold = self._stall_threshold_leader if is_leader else self._stall_threshold_fallback
+                
+                if time_since_height_change > stall_threshold:
                     print(f"🚨 STALL DETECTED: Chain height {local_height} unchanged for {time_since_height_change:.1f}s")
-                    print(f"   Stall threshold: {self._stall_threshold}s, current phase: {self.sync_phase}")
+                    print(f"   Stall threshold: {stall_threshold}s (leader={is_leader}), current phase: {self.sync_phase}")
+                    print(f"   peer_responsive={peer_responsive}, global_chain_stalled={global_chain_stalled}")
                     print(f"   ESCAPING DEADLOCK: Forcing transition to ACTIVE phase")
                     self.sync_phase = "ACTIVE"
                     self.synced = True
@@ -1089,21 +1163,35 @@ class Node:
                 
                 if total_validators >= 2:
                     if effective_online < required_online:
-                        # We are ISOLATED - demote to SYNCING and stop producing
-                        if self.sync_phase == "ACTIVE":
-                            print(f"🚨 ISOLATION DETECTED: Only {effective_online} validator(s) reachable "
-                                  f"(need {required_online}), demoting from ACTIVE to SYNCING")
-                            self.sync_phase = "SYNCING"
-                            self.cooling_complete_height = None
+                        # CRITICAL FIX: Don't demote if peer is temporarily offline AND chain is stalled
+                        # This prevents both validators from demoting when the network is just slow
+                        # Only demote if peer is responsive (alive but we're isolated) OR we're not the leader
+                        is_leader = self._is_stall_breaker_leader()
+                        should_demote = peer_responsive or (not is_leader and not global_chain_stalled)
                         
-                        if next_height % 10 == 0:
-                            print(f"⏸️  P2P QUORUM NOT MET: connected_validators={connected_validator_peers}, "
-                                  f"effective_online={effective_online}, required={required_online}, "
-                                  f"total_validators={total_validators}")
-                            print(f"   Waiting for P2P connections to other validators before proposing...")
-                            print(f"   peer_validator_addresses: {list(self.p2p.peer_validator_addresses.values())[:3]}")
-                        await asyncio.sleep(config.BLOCK_TIME)
-                        continue
+                        if should_demote:
+                            # We are ISOLATED - demote to SYNCING and stop producing
+                            if self.sync_phase == "ACTIVE":
+                                print(f"🚨 ISOLATION DETECTED: Only {effective_online} validator(s) reachable "
+                                      f"(need {required_online}), demoting from ACTIVE to SYNCING")
+                                print(f"   peer_responsive={peer_responsive}, global_chain_stalled={global_chain_stalled}, is_leader={is_leader}")
+                                self.sync_phase = "SYNCING"
+                                self.cooling_complete_height = None
+                            
+                            if next_height % 10 == 0:
+                                print(f"⏸️  P2P QUORUM NOT MET: connected_validators={connected_validator_peers}, "
+                                      f"effective_online={effective_online}, required={required_online}, "
+                                      f"total_validators={total_validators}")
+                                print(f"   Waiting for P2P connections to other validators before proposing...")
+                                print(f"   peer_validator_addresses: {list(self.p2p.peer_validator_addresses.values())[:3]}")
+                            await asyncio.sleep(config.BLOCK_TIME)
+                            continue
+                        else:
+                            # Peer is offline AND chain is stalled AND we're the leader
+                            # Don't demote - we need to break the deadlock
+                            if next_height % 10 == 0:
+                                print(f"ℹ️  P2P QUORUM NOT MET but NOT demoting (leader={is_leader}, peer_responsive={peer_responsive}, stalled={global_chain_stalled})")
+                                print(f"   Leader staying ACTIVE to break potential deadlock")
                 
                 # ============================================================
                 # EXTERNAL BLOCK RECEPTION CHECK: Prevent private chain growth
@@ -1123,15 +1211,23 @@ class Node:
                 
                 # Check 1: Time-based isolation (haven't received external block in N seconds)
                 # Only apply after we've received at least one external block
-                # CRITICAL FIX: Only demote if we're actually AHEAD of peers
+                # CRITICAL FIX v5 (Dec 2025): Add peer_responsive and global_chain_stalled gates
+                # to prevent both validators from demoting when the network is stalled.
                 if self._last_external_block_time > 0 and time_since_external_block > self._external_block_timeout:
                     # Only demote if we're actually ahead of peers (potential private chain)
-                    if local_height > max_peer_height:
+                    # AND peer is responsive (alive but behind) AND chain is not globally stalled
+                    is_leader = self._is_stall_breaker_leader()
+                    should_demote = (local_height > max_peer_height and 
+                                     peer_responsive and 
+                                     not global_chain_stalled)
+                    
+                    if should_demote:
                         if self.sync_phase == "ACTIVE":
                             print(f"🚨 EXTERNAL BLOCK TIMEOUT: No blocks from other validators in {time_since_external_block:.1f}s "
                                   f"(threshold: {self._external_block_timeout}s)")
                             print(f"   Last external block: height {self._last_external_block_height}, "
                                   f"local_height: {local_height}, max_peer_height: {max_peer_height}")
+                            print(f"   peer_responsive={peer_responsive}, global_chain_stalled={global_chain_stalled}")
                             print(f"   We are AHEAD of peers - demoting from ACTIVE to SYNCING to prevent private chain growth")
                             self.sync_phase = "SYNCING"
                             self.cooling_complete_height = None
@@ -1141,25 +1237,33 @@ class Node:
                         await asyncio.sleep(config.BLOCK_TIME)
                         continue
                     else:
-                        # Not ahead of peers - don't demote, just log occasionally
+                        # Not demoting - log the reason occasionally
                         if next_height % 30 == 0:
-                            print(f"ℹ️  EXTERNAL BLOCK TIMEOUT but NOT ahead of peers: local={local_height}, peer={max_peer_height}")
-                            print(f"   Not demoting - waiting for network to produce blocks")
+                            if local_height <= max_peer_height:
+                                print(f"ℹ️  EXTERNAL BLOCK TIMEOUT but NOT ahead of peers: local={local_height}, peer={max_peer_height}")
+                            elif not peer_responsive:
+                                print(f"ℹ️  EXTERNAL BLOCK TIMEOUT but peer is OFFLINE: local={local_height}, peer={max_peer_height}")
+                            elif global_chain_stalled:
+                                print(f"ℹ️  EXTERNAL BLOCK TIMEOUT but chain is STALLED: local={local_height}, peer={max_peer_height}")
+                            print(f"   Not demoting - leader={is_leader}, waiting for network to recover")
                 
                 # Check 2: Combined height + time isolation check
                 # Only fire when BOTH: significantly ahead AND haven't heard from network recently
-                # CRITICAL FIX: Also require being ahead of max_peer_height
+                # CRITICAL FIX v5: Also require peer_responsive and not global_chain_stalled
                 height_threshold = 3  # Must be > 3 blocks ahead of last external
                 time_threshold = 2 * config.BLOCK_TIME  # Must be > 2 block times since last external
                 
                 if (self._last_external_block_height > 0 and 
                     blocks_ahead_of_external > height_threshold and 
                     time_since_external_block > time_threshold and
-                    local_height > max_peer_height):  # CRITICAL: Must be ahead of peers
+                    local_height > max_peer_height and  # Must be ahead of peers
+                    peer_responsive and  # Peer is alive but behind
+                    not global_chain_stalled):  # Chain is still progressing
                     if self.sync_phase == "ACTIVE":
                         print(f"🚨 EXTERNAL BLOCK LAG: {blocks_ahead_of_external} blocks ahead of last external "
                               f"AND {time_since_external_block:.1f}s since last external block")
                         print(f"   Last external: height {self._last_external_block_height}, local: {local_height}, peer: {max_peer_height}")
+                        print(f"   peer_responsive={peer_responsive}, global_chain_stalled={global_chain_stalled}")
                         print(f"   We are AHEAD of peers - demoting from ACTIVE to SYNCING to prevent private chain growth")
                         self.sync_phase = "SYNCING"
                         self.cooling_complete_height = None
