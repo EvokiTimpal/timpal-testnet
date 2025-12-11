@@ -1101,6 +1101,10 @@ class Ledger:
         # CRITICAL FIX: Verify validator_registry matches blocks and rebuild if mismatch
         # This prevents state divergence when state.json is out of sync with blocks
         self._verify_and_repair_validator_state()
+        
+        # CRITICAL FIX: Verify historical state matches loaded blocks and rebuild if mismatch
+        # This prevents sync loops where P2P blocks are rejected due to missing parent frames
+        self._verify_and_repair_historical_state()
     
     def _verify_and_repair_validator_state(self):
         """
@@ -1172,6 +1176,67 @@ class Ledger:
                 # Repair validator_set
                 self.validator_set = list(active_in_registry)
                 print(f"✅ Validator set repaired: {len(self.validator_set)} validators")
+    
+    def _verify_and_repair_historical_state(self):
+        """
+        Verify that historical state frames exist for all loaded blocks.
+        If frames are missing, rebuild them by replaying block processing.
+        
+        This prevents sync loops where:
+        - Blocks are loaded from JSON disk storage
+        - SQLite historical state database is missing/corrupted/out-of-sync
+        - P2P blocks arrive but parent historical state is missing
+        - Node triggers HTTP sync which can't retroactively populate frames
+        - Endless sync loop occurs
+        
+        CRITICAL: This ensures historical state is complete before P2P processing begins.
+        """
+        if not self.blocks:
+            return
+        
+        if not hasattr(self, 'historical_state_log') or self.historical_state_log is None:
+            return
+        
+        current_height = len(self.blocks)
+        
+        height_range = self.historical_state_log.get_height_range()
+        if height_range[0] is None:
+            stored_min, stored_max = 0, -1
+        else:
+            stored_min, stored_max = height_range
+        
+        missing_heights = []
+        for height in range(1, current_height + 1):
+            if not self.historical_state_log.has_height(height):
+                missing_heights.append(height)
+        
+        if not missing_heights:
+            return
+        
+        print(f"⚠️  HISTORICAL STATE MISMATCH DETECTED!")
+        print(f"   Loaded blocks: {current_height}")
+        print(f"   Historical state range: {stored_min} to {stored_max}")
+        print(f"   Missing frames: {len(missing_heights)} (first: {missing_heights[0]}, last: {missing_heights[-1]})")
+        print(f"🔧 Rebuilding historical state for {len(missing_heights)} blocks...")
+        
+        rebuilt_count = 0
+        for height in missing_heights:
+            if height < 1 or height > len(self.blocks):
+                continue
+            
+            block = self.blocks[height - 1]
+            
+            try:
+                self._record_historical_state(block)
+                rebuilt_count += 1
+                
+                if rebuilt_count % 100 == 0:
+                    print(f"   Rebuilt {rebuilt_count}/{len(missing_heights)} frames...")
+            except Exception as e:
+                print(f"   Warning: Failed to rebuild frame for height {height}: {e}")
+                continue
+        
+        print(f"✅ Historical state repaired: {rebuilt_count} frames rebuilt")
     
     def _enforce_grace_period_transition(self, current_height: int):
         """
