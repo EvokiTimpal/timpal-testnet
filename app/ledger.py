@@ -1619,6 +1619,10 @@ class Ledger:
         DETERMINISTIC: All nodes compute the same result from the same blockchain state.
         MAINNET PARITY: Scales from 2 validators (testnet) to 100K+ (mainnet).
         
+        CRITICAL FIX (Dec 2025): For small validator sets (≤ MIN_VALIDATORS_FOR_FULL_SET),
+        ALWAYS include ALL active validators. This prevents the eligible set from collapsing
+        to 1 validator, which causes chain stalls when that validator stops producing.
+        
         Stages:
         1. Recent proposers (validators who proposed blocks recently)
         2. Recently activated (dynamic grace window based on validator count)
@@ -1643,13 +1647,44 @@ class Ledger:
         # Count active validators for dynamic grace window calculation
         # CRITICAL: Count from REGISTRY (deterministic), not from any filtered set
         active_validator_count = 0
+        all_active_validators = set()  # Track all active validators for small-set bypass
         registered_validators = []
         for validator_addr, validator in sorted(self.validator_registry.items()):
             if validator_addr == "genesis":
                 continue
             if isinstance(validator, dict) and validator.get('status') in ('active', 'genesis'):
                 active_validator_count += 1
+                all_active_validators.add(validator_addr)
                 registered_validators.append(validator_addr[:20] + '...')
+        
+        # ============================================================
+        # CRITICAL FIX: MINIMUM VALIDATOR COUNT SAFEGUARD
+        # ============================================================
+        # For small validator sets, ALWAYS include ALL active validators.
+        # This prevents the eligible set from collapsing to 1 validator,
+        # which causes chain stalls when that validator stops producing.
+        #
+        # INDUSTRY STANDARD: Other L1 blockchains (Ethereum, Cardano, etc.)
+        # use on-chain registry for proposer eligibility, not short-term
+        # liveness heuristics. Liveness signals affect rewards/slashing,
+        # not who can propose.
+        #
+        # With N=2 validators, aggressive liveness filtering is dangerous:
+        # one misclassification and you're down to one or zero proposers.
+        # ============================================================
+        MIN_VALIDATORS_FOR_FULL_SET = 4  # Below this, always use full set
+        
+        if active_validator_count <= MIN_VALIDATORS_FOR_FULL_SET:
+            # Small validator set: bypass liveness filtering entirely
+            # All active validators are always eligible to propose
+            if len(self.blocks) > 10:  # Only log after bootstrap
+                print(f"   SMALL VALIDATOR SET ({active_validator_count} validators): Using ALL active validators for proposer eligibility")
+                print(f"   Registered validators: {active_validator_count}, Eligible: {active_validator_count} (full set)")
+            return all_active_validators
+        
+        # ============================================================
+        # LARGE VALIDATOR SET: Apply normal liveness filtering
+        # ============================================================
         
         # STAGE 1: Validators who proposed blocks recently (highest confidence of liveness)
         # Lookback scales with validator count: more validators = longer lookback
