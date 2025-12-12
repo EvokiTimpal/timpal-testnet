@@ -99,6 +99,34 @@ class Node:
         self.sync_phase = "SYNCING"  # Start in syncing phase
         self.SEVERE_LAG_THRESHOLD = 10  # Only drop from ACTIVE if this far behind
         
+        # ============================================================
+        # HARD INVARIANTS (Dec 2025): NETWORK BEATS DISK
+        # ============================================================
+        # I1: Network beats disk - local chain is untrusted if it diverges from peers
+        # I2: No writes outside ACTIVE - production blocks only when consensus-ready
+        # I3: Recovery validates against peer chain, not local tip
+        # I4: Invalid previous_hash triggers bounded retry, then automatic purge
+        # I5: After recovery, must pass through SYNCING->COOLING->ACTIVE
+        # I6: Self-healing is automatic - no manual data deletion required
+        # ============================================================
+        
+        # CANONICAL HEAD TRACKING (I1): Track authoritative chain head from peers
+        # Local disk is treated as cache, not authority. Network is the source of truth.
+        self._canonical_head_height = 0
+        self._canonical_head_hash = None  # type: Optional[str]
+        
+        # REORG FAILURE TRACKING (I4): Bounded retry with automatic purge
+        # If the same reorg fails N times, escalate to automatic purge
+        self._reorg_failure_context = {
+            "height": None,           # Fork height where failure occurred
+            "peer_tip_hash": None,    # Peer's tip hash at time of failure
+            "retries": 0,             # Number of consecutive failures
+        }
+        self.MAX_REORG_RETRIES = 3  # After 3 failures, trigger automatic purge
+        
+        # SELF-HEALING STATE (I6): Track if we're in recovery mode
+        self._in_recovery_mode = False  # True when performing automatic purge/rebuild
+        
         # VALIDATOR QUORUM REQUIREMENT: Prevent solo block production during network partitions
         # When a node is isolated, it should NOT produce blocks (creates divergent chain history)
         # This prevents the scenario where two isolated nodes each build their own chain,
@@ -329,6 +357,151 @@ class Node:
         is_leader = (self.reward_address == active_validators[0])
         
         return is_leader
+    
+    # ============================================================
+    # HARD INVARIANT ENFORCEMENT METHODS
+    # ============================================================
+    
+    def _can_accept_production_block(self) -> bool:
+        """
+        HARD INVARIANT I2: No writes outside ACTIVE
+        
+        Check if the node is allowed to accept production blocks (blocks from
+        P2P or locally produced blocks). This is the SINGLE GATE for all
+        production block writes.
+        
+        Returns:
+            True if node is ACTIVE and consensus-ready, False otherwise
+        """
+        return self.sync_phase == "ACTIVE" and not self._in_recovery_mode
+    
+    def _track_reorg_failure(self, fork_height: int, peer_tip_hash: str) -> bool:
+        """
+        HARD INVARIANT I4: Bounded retry with automatic purge
+        
+        Track reorg failures and determine if we should escalate to automatic purge.
+        
+        Args:
+            fork_height: Height where the fork was detected
+            peer_tip_hash: Hash of the peer's tip block
+            
+        Returns:
+            True if we should trigger automatic purge, False to retry
+        """
+        ctx = self._reorg_failure_context
+        
+        # Check if this is the same failure context
+        if ctx["height"] == fork_height and ctx["peer_tip_hash"] == peer_tip_hash:
+            ctx["retries"] += 1
+            print(f"🔄 REORG RETRY: Attempt {ctx['retries']}/{self.MAX_REORG_RETRIES} at height {fork_height}")
+        else:
+            # New failure context - reset counter
+            ctx["height"] = fork_height
+            ctx["peer_tip_hash"] = peer_tip_hash
+            ctx["retries"] = 1
+            print(f"🔄 REORG FAILURE: New context at height {fork_height}, attempt 1/{self.MAX_REORG_RETRIES}")
+        
+        # Check if we've exceeded retry limit
+        if ctx["retries"] >= self.MAX_REORG_RETRIES:
+            print(f"🚨 REORG LIMIT REACHED: {ctx['retries']} failures at height {fork_height}")
+            print(f"   Triggering automatic purge and rebuild...")
+            return True
+        
+        return False
+    
+    async def _trigger_automatic_purge(self, fork_height: int):
+        """
+        HARD INVARIANT I6: Self-healing is automatic
+        
+        Automatically purge divergent local chain suffix and rebuild from peers.
+        This is called when bounded retry limit is exceeded.
+        
+        The user should NEVER need to manually delete node data.
+        
+        Args:
+            fork_height: Height to purge from (exclusive - blocks >= fork_height are removed)
+        """
+        print(f"\n{'='*60}")
+        print(f"🚨 LOCAL CHAIN DIVERGED — PURGING LOCAL SUFFIX AND REBUILDING FROM PEERS")
+        print(f"{'='*60}")
+        print(f"   Fork detected at height: {fork_height}")
+        print(f"   Current local height: {len(self.ledger.blocks) - 1}")
+        print(f"   Action: Purging blocks >= {fork_height} and resyncing from network")
+        
+        self._in_recovery_mode = True
+        
+        try:
+            # Step 1: Rollback to fork point (or genesis if fork_height is 0)
+            target_height = max(0, fork_height - 1)
+            print(f"   Step 1: Rolling back to height {target_height}...")
+            
+            if target_height < len(self.ledger.blocks) - 1:
+                rollback_success = self.ledger._rollback_to_height(target_height)
+                if not rollback_success:
+                    print(f"   ❌ Rollback failed - attempting full reset from genesis")
+                    # Full reset as last resort
+                    self.ledger.blocks = self.ledger.blocks[:1]  # Keep only genesis
+                    self.ledger._rebuild_state_from_blocks()
+                    target_height = 0
+            
+            print(f"   Step 2: Local chain now at height {len(self.ledger.blocks) - 1}")
+            
+            # Step 3: Reset reorg failure context
+            self._reorg_failure_context = {
+                "height": None,
+                "peer_tip_hash": None,
+                "retries": 0,
+            }
+            
+            # Step 4: Force transition to SYNCING to trigger resync
+            print(f"   Step 3: Transitioning to SYNCING phase for resync...")
+            self.sync_phase = "SYNCING"
+            self.synced = False
+            self.initial_sync_complete_height = None
+            self.cooling_complete_height = None
+            
+            # Step 5: Trigger resync from peers
+            print(f"   Step 4: Initiating resync from peers...")
+            max_peer_height = await self._get_max_peer_height()
+            if max_peer_height > len(self.ledger.blocks) - 1:
+                await self._sync_missing_blocks(len(self.ledger.blocks), max_peer_height)
+            
+            print(f"   ✅ Automatic recovery complete - now at height {len(self.ledger.blocks) - 1}")
+            print(f"{'='*60}\n")
+            
+        finally:
+            self._in_recovery_mode = False
+    
+    async def _update_canonical_head(self, peer_height: int, peer_tip_hash: str = None):
+        """
+        HARD INVARIANT I1: Network beats disk
+        
+        Update the canonical head from peer information. The network is the
+        source of truth, not local disk.
+        
+        Args:
+            peer_height: Height of the peer's chain
+            peer_tip_hash: Hash of the peer's tip block (optional)
+        """
+        if peer_height > self._canonical_head_height:
+            self._canonical_head_height = peer_height
+            self._canonical_head_hash = peer_tip_hash
+            
+            # Check for canonical mismatch
+            local_height = len(self.ledger.blocks) - 1
+            if local_height >= peer_height and peer_tip_hash:
+                local_block = self.ledger.get_block_by_height(peer_height)
+                if local_block and local_block.block_hash != peer_tip_hash:
+                    print(f"🚨 CANONICAL MISMATCH DETECTED:")
+                    print(f"   Local tip at height {peer_height}: {local_block.block_hash[:16]}...")
+                    print(f"   Canonical tip at height {peer_height}: {peer_tip_hash[:16]}...")
+                    print(f"   Local chain is UNTRUSTED - treating as cache")
+                    
+                    # Demote to SYNCING immediately (I1: network beats disk)
+                    if self.sync_phase == "ACTIVE":
+                        print(f"   🔄 STATE TRANSITION: ACTIVE → SYNCING (canonical mismatch)")
+                        self.sync_phase = "SYNCING"
+                        self.synced = False
     
     async def _get_peer_height(self, peer_url: str) -> int:
         """
@@ -604,6 +777,17 @@ class Node:
                         temp_balances[tx.sender] -= (tx.amount + tx.fee)
                         temp_balances[tx.recipient] = temp_balances.get(tx.recipient, 0) + tx.amount
                         temp_nonces[tx.sender] = temp_nonces.get(tx.sender, 0) + 1
+                
+                # HARD INVARIANT I2: No writes outside ACTIVE (for production blocks)
+                # P2P blocks during SYNCING/REORGANIZING/COOLING should be rejected
+                # because they could extend a divergent local chain.
+                # EXCEPTION: Bootstrap blocks (height <= 10) and empty chain sync are allowed
+                # because they're part of initial sync, not production.
+                is_initial_sync = block.height <= 10 or self.sync_phase == "SYNCING"
+                if not is_initial_sync and not self._can_accept_production_block():
+                    print(f"⚠️  WRITE GATE: Rejecting P2P block {block.height} - node not ACTIVE (phase={self.sync_phase})")
+                    print(f"   Block production disabled during sync/reorg to prevent chain divergence")
+                    return
                 
                 # P2P blocks: Skip strict validation (historical blocks may have old timing)
                 # Only enforce timing for blocks THIS node creates (in mine_blocks function)
@@ -2093,14 +2277,34 @@ class Node:
                                                 
                                                 if reorg_success:
                                                     print(f"         ✅ Reorganization successful: {reorg_msg}")
+                                                    # Reset reorg failure context on success
+                                                    self._reorg_failure_context = {
+                                                        "height": None,
+                                                        "peer_tip_hash": None,
+                                                        "retries": 0,
+                                                    }
                                                     # Update sync progress to new chain tip
                                                     current_sync_height = len(self.ledger.blocks)
                                                     break  # Exit block loop, continue with next chunk
                                                 else:
                                                     print(f"         ⚠️  Reorg rejected: {reorg_msg}")
-                                                    print(f"         Local chain is canonical, peer is on wrong fork")
-                                                    peer_success = False
-                                                    break  # Try next peer
+                                                    
+                                                    # HARD INVARIANT I4: Bounded retry with automatic purge
+                                                    # Track this failure and check if we should escalate
+                                                    peer_tip_hash = competing_chain[-1].block_hash if competing_chain else None
+                                                    should_purge = self._track_reorg_failure(block.height, peer_tip_hash)
+                                                    
+                                                    if should_purge:
+                                                        # Trigger automatic purge and rebuild (I6: self-healing)
+                                                        await self._trigger_automatic_purge(block.height)
+                                                        # After purge, restart sync from beginning
+                                                        current_sync_height = len(self.ledger.blocks)
+                                                        peer_success = True  # Don't try next peer, we've reset
+                                                        break
+                                                    else:
+                                                        print(f"         Local chain is canonical, peer is on wrong fork")
+                                                        peer_success = False
+                                                        break  # Try next peer
                                             else:
                                                 print(f"         ❌ Could not fetch competing chain")
                                                 peer_success = False
