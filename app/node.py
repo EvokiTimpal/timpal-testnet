@@ -1736,8 +1736,24 @@ class Node:
                 
             elif self.sync_phase == "COOLING":
                 # COOLING -> ACTIVE: When cooling period is complete
-                if self.cooling_complete_height is not None and local_height >= self.cooling_complete_height:
-                    print(f"✅ COOLING COMPLETE: Now ACTIVE at height {local_height}")
+                # OPTION A FIX: Allow ≤1 block lag tolerance for activation
+                # A healthy validator should not be blocked forever by minor sync lag
+                # in low-peer, fast-block networks where it's consistently 1 block behind.
+                
+                # Has the cooling window elapsed? (based on peer/canonical height, not local)
+                cooling_elapsed = (
+                    self.cooling_complete_height is not None and
+                    max_peer_height >= self.cooling_complete_height
+                )
+                # Are we within ≤1 block of canonical head?
+                within_acceptable_lag = (max_peer_height - local_height) <= 1
+                # No fork resolution in progress?
+                no_fork_in_progress = not self._fork_resolution_in_progress
+                
+                if cooling_elapsed and within_acceptable_lag and no_fork_in_progress:
+                    print(f"✅ COOLING COMPLETE (≤1-block lag tolerance): "
+                          f"local={local_height}, peer={max_peer_height}, "
+                          f"cooling_target={self.cooling_complete_height}")
                     self.sync_phase = "ACTIVE"
                 # COOLING -> SYNCING: If we fall behind during cooling
                 elif max_peer_height > local_height + self.SYNC_LAG_THRESHOLD:
