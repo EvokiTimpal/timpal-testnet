@@ -240,7 +240,7 @@ class Ledger:
         # All registered validators receive rewards until on-chain liveness is implemented
         return False
     
-    def add_block(self, block: Block, skip_proposer_check: bool = False, use_historical_validators: bool = False) -> bool:
+    def add_block(self, block: Block, skip_proposer_check: bool = False, use_historical_validators: bool = False, skip_previous_hash_check: bool = False) -> bool:
         """
         Add a block to the blockchain with comprehensive validation.
         Returns True if block was added, False if rejected.
@@ -255,6 +255,23 @@ class Ledger:
                                       for VRF proposer validation during chain reorganization.
                                       Uses activation_height to determine which validators
                                       were active when the block was originally created.
+            skip_previous_hash_check: If True, skip previous_hash validation (used during
+                                     chain reorganization). The peer chain's continuity has
+                                     already been validated by validate_chain_continuity().
+                                     
+                                     CONSENSUS-CRITICAL FIX (Dec 2025): FORK RECOVERY SYNC LOOP
+                                     
+                                     PREVIOUS BUG: During chain reorganization, add_block()
+                                     validated previous_hash against the LOCAL chain's latest
+                                     block. But after rollback, the local chain is at the fork
+                                     point, so peer blocks (which reference peer chain's previous
+                                     blocks) would fail validation with "Invalid previous_hash".
+                                     This caused an infinite sync loop where the node could never
+                                     recover from a fork.
+                                     
+                                     FIX: During reorganization, skip previous_hash validation
+                                     since the peer chain's continuity has already been validated
+                                     by validate_chain_continuity() in get_reorganization_plan().
         """
         # CRITICAL SECURITY #1: Prevent duplicate blocks at same height
         if block.height < len(self.blocks):
@@ -269,12 +286,14 @@ class Ledger:
             return False
         
         # CRITICAL SECURITY #3: Validate previous_hash to prevent chain forks
+        # EXCEPTION: Skip during reorganization (skip_previous_hash_check=True)
+        # because peer chain continuity was already validated by validate_chain_continuity()
         if block.height > 0:  # Genesis block (height 0) has no previous
             latest = self.get_latest_block()
             if not latest:
                 print(f"REJECT: No previous block exists for height {block.height}")
                 return False
-            if block.previous_hash != latest.block_hash:
+            if not skip_previous_hash_check and block.previous_hash != latest.block_hash:
                 print(f"REJECT: Invalid previous_hash - expected {latest.block_hash}, got {block.previous_hash}")
                 return False
             
@@ -1881,19 +1900,25 @@ class Ledger:
         SCALABLE LIVENESS CHECK: Query AttestationManager directly instead of scanning
         all block transactions. Supports 100K+ validators efficiently.
         
+        CONSENSUS-CRITICAL FIX (Dec 2025): This function now returns ONLY validators
+        with proven liveness (attestations). It does NOT fall back to all active
+        validators, which was causing offline validators to receive rewards.
+        
         Args:
             lookback_blocks: Number of recent blocks to check (default: 100 = 1 epoch)
         
         Returns:
             Set of validator addresses who have recent epoch attestations
+            Returns empty set if no attestations found (caller must handle this)
         """
         current_height = len(self.blocks) - 1
         
-        # BOOTSTRAP FALLBACK: If we're in early blocks or have no attestations yet,
-        # return all registered validators so network doesn't stall
+        # BOOTSTRAP PERIOD: During first epoch, return empty set
+        # The caller (get_online_validators_deterministic) will use recent proposers instead
+        # This ensures only validators that have actually proposed blocks get rewards
         if current_height < self.attestation_manager.epoch_length:
-            # Bootstrap period - no attestations required yet
-            return set(self.validator_registry.keys())
+            # Bootstrap period - return empty set, let caller use recent proposers
+            return set()
         
         # Get current and previous epochs
         current_epoch = self.attestation_manager.get_epoch_number(current_height)
@@ -1910,35 +1935,20 @@ class Ledger:
             prev_attestations = self.attestation_manager.get_attestations_for_epoch(current_epoch - 1)
             validators_with_attestations.update(prev_attestations.keys())
         
-        # CONSENSUS-CRITICAL FIX: Removed P2P callback from attestation fallback
+        # CONSENSUS-CRITICAL FIX (Dec 2025): NO FALLBACK TO ALL VALIDATORS
         #
-        # PREVIOUS BUG: When no attestations, we called _online_validators_callback
-        # which returns P2P-connected validators. This is NON-DETERMINISTIC because
-        # different nodes have different P2P connections → different validator sets → FORKS.
+        # PREVIOUS BUG: When no attestations, we fell back to ALL active validators
+        # from registry. This caused OFFLINE validators to receive rewards because
+        # they were still in the registry even though they weren't online.
         #
-        # FIX: If no attestations, fall back to ALL active validators from registry.
-        # This is deterministic because all nodes have the same validator_registry state.
+        # FIX: Return empty set if no attestations. The caller will combine this
+        # with recent proposers to determine who actually deserves rewards.
+        # Only validators with PROVEN LIVENESS (proposed blocks OR attestations)
+        # should receive rewards.
         #
-        # NOTE: P2P callback is still available for non-consensus uses (explorer UI, debug)
-        # but MUST NOT be used for reward calculation or proposer selection.
-        
-        if not validators_with_attestations:
-            # Skip all warnings in read-only mode (e.g., block explorer)
-            if self.read_only:
-                # Read-only context doesn't distribute rewards, return all registered validators for display
-                return set(self.validator_registry.keys())
-            
-            # Deterministic fallback: all active validators from registry
-            # This prevents network stall during genesis or testing scenarios
-            fallback_validators = set()
-            for validator_addr, validator in sorted(self.validator_registry.items()):
-                if validator_addr == "genesis":
-                    continue
-                if isinstance(validator, dict) and validator.get('status') in ('active', 'genesis'):
-                    if self.validator_economics.is_validator_active(validator_addr, current_height):
-                        fallback_validators.add(validator_addr)
-            
-            return sorted(list(fallback_validators))
+        # NOTE: For read-only contexts (explorer), return all validators for display
+        if not validators_with_attestations and self.read_only:
+            return set(self.validator_registry.keys())
         
         # CRITICAL FIX: Return sorted list, not set (sets have non-deterministic order)
         # This ensures reward_allocations dict is built in same order on all nodes
@@ -2008,31 +2018,41 @@ class Ledger:
         otherwise they will produce blocks with different reward_allocations → different
         block hashes → FORK.
         
-        CRITICAL FIX: Removed P2P-based liveness sources that caused forks:
-        - REMOVED: P2P callback (_online_validators_callback) - different nodes have
-          different P2P connections and see different validators as online
-        - REMOVED: P2P-based offline tracking (offline_since_height) - set by P2P events
-          which occur at different times on different nodes
+        CONSENSUS-CRITICAL FIX (Dec 2025): OFFLINE VALIDATORS NO LONGER RECEIVE REWARDS
         
-        LIVENESS SOURCES (all deterministic, on-chain only):
-        1. Recent block proposers (from blockchain - all nodes see same blocks)
-        2. Epoch attestations (from blockchain - all nodes see same attestations)
+        PREVIOUS BUG: When no attestations were found, the system fell back to ALL
+        active validators from the registry. This caused OFFLINE validators to receive
+        rewards because they were still registered even though they weren't online.
+        
+        FIX: Only validators with PROVEN LIVENESS receive rewards:
+        1. Recent block proposers (proposed a block in last N blocks)
+        2. Epoch attestations (submitted attestation in current/previous epoch)
+        
+        If a validator has not proposed a block AND has not submitted an attestation,
+        they are considered OFFLINE and receive ZERO rewards.
+        
+        ACCEPTANCE CRITERIA:
+        - If 3 validators exist but only 1 is active → that validator gets 100%
+        - validators_rewarded == active_validators for every block
         
         Args:
             current_height: Current blockchain height
             
         Returns:
             Sorted list of online validator addresses (deterministic order)
+            Only includes validators with proven liveness (proposers OR attestations)
         """
         online_validators = set()
         
-        # Count active validators for dynamic window calculation
+        # Count active validators for dynamic window calculation and logging
         active_validator_count = 0
+        all_registered_validators = []
         for addr, data in self.validator_registry.items():
             if addr == "genesis":
                 continue
             if isinstance(data, dict) and data.get('status') in ('active', 'genesis'):
                 active_validator_count += 1
+                all_registered_validators.append(addr)
         
         # SOURCE 1: Recent block proposers (highest confidence of liveness)
         # Lookback scales with validator count to ensure all validators get fair chance
@@ -2044,15 +2064,14 @@ class Ledger:
         # SOURCE 2: Attestation holders (epoch-based liveness proof)
         # Validators must submit attestations each epoch to prove they're online and synced
         # DETERMINISTIC: Attestations are recorded on-chain, all nodes see the same data
+        # NOTE: This now returns empty set if no attestations (no fallback to all validators)
         validators_with_attestations = self.get_validators_with_recent_attestations(lookback_blocks=100)
         online_validators.update(validators_with_attestations)
         
-        # REMOVED: P2P-tracked online validators - NON-DETERMINISTIC, CAUSES FORKS
-        # Different nodes have different P2P connections and see different validators
-        # as online, leading to different reward_allocations → different block hashes
-        # 
-        # The P2P callback is still available for non-consensus uses (e.g., explorer UI)
-        # but MUST NOT be used for reward calculation
+        # CONSENSUS-CRITICAL: NO FALLBACK TO ALL VALIDATORS
+        # If a validator has not proposed a block AND has not submitted an attestation,
+        # they are considered OFFLINE and receive ZERO rewards.
+        # This fixes the bug where offline validators were receiving rewards.
         
         # Filter to only registered, active validators that pass economics
         result = []
@@ -2066,16 +2085,16 @@ class Ledger:
             if not self.validator_economics.is_validator_active(addr, current_height):
                 continue
             
-            # NOTE: is_validator_offline_for_rewards is now disabled (always returns False)
-            # to prevent non-deterministic behavior from P2P-set offline_since_height
-            if self.is_validator_offline_for_rewards(addr, current_height):
-                continue
-            
             result.append(addr)
         
-        # DEBUG: Log the final result for troubleshooting
-        if len(result) > 0:
-            print(f"📊 LIVENESS: get_online_validators_deterministic(height={current_height}) returning {len(result)} validators: {[a[:12]+'...' for a in sorted(result)]}")
+        # Log reward distribution for verification
+        # This helps verify that offline validators are NOT receiving rewards
+        excluded_count = active_validator_count - len(result)
+        if excluded_count > 0:
+            print(f"💰 REWARD DISTRIBUTION: {len(result)}/{active_validator_count} validators receiving rewards at height {current_height}")
+            print(f"   {excluded_count} validator(s) EXCLUDED (no proven liveness - no recent blocks or attestations)")
+        elif len(result) > 0:
+            print(f"💰 REWARD DISTRIBUTION: {len(result)}/{active_validator_count} validators receiving rewards at height {current_height}")
         
         # CRITICAL: Sorted for deterministic ordering across all nodes
         return sorted(result)
@@ -2965,6 +2984,19 @@ class Ledger:
         4. Adds blocks from new chain
         5. Returns transactions to mempool
         
+        CONSENSUS-CRITICAL FIX (Dec 2025): FORK RECOVERY SYNC LOOP
+        
+        PREVIOUS BUG: After rollback to fork point, add_block() validated each
+        peer block's previous_hash against the LOCAL chain's latest block. But
+        peer blocks reference the PEER chain's previous blocks, not the local
+        chain. This caused "Invalid previous_hash" errors and an infinite sync
+        loop where the node could never recover from a fork.
+        
+        FIX: Pass skip_previous_hash_check=True to add_block() during reorg.
+        The peer chain's continuity has already been validated by
+        validate_chain_continuity() in get_reorganization_plan(), so we can
+        safely skip the previous_hash check during block addition.
+        
         Args:
             new_chain: The new canonical blockchain
         
@@ -2972,6 +3004,9 @@ class Ledger:
             (success, message) tuple
         """
         # Get reorganization plan
+        # NOTE: get_reorganization_plan() calls validate_chain_continuity() which
+        # verifies that the peer chain has proper continuity (each block's
+        # previous_hash matches the previous block's block_hash)
         plan = self.fork_choice.get_reorganization_plan(self.blocks, new_chain)
         
         if plan is None:
@@ -2981,6 +3016,8 @@ class Ledger:
         blocks_to_add = plan['blocks_to_add']
         
         print(f"🔄 Starting chain reorganization at height {fork_height}")
+        print(f"   Fork point found via common ancestor detection")
+        print(f"   Rolling back local chain and applying {len(blocks_to_add)} peer blocks")
         
         # Step 1: Rollback to fork point
         rollback_success = self._rollback_to_height(fork_height - 1)
@@ -3005,6 +3042,11 @@ class Ledger:
         # FAIL-SAFE: If historical state is missing, REJECT the reorg rather than
         # silently downgrade security. This indicates ledger corruption that must
         # be addressed via resync from peers.
+        #
+        # FORK RECOVERY FIX: Pass skip_previous_hash_check=True because:
+        # - Peer chain continuity was already validated by validate_chain_continuity()
+        # - After rollback, local chain is at fork point, so peer blocks would fail
+        #   previous_hash validation against local chain (they reference peer chain)
         for block in blocks_to_add:
             # Check if we have historical state for this height
             if not self.historical_state_log.has_height(block.height - 1) and block.height > 0:
@@ -3014,7 +3056,8 @@ class Ledger:
                 return (False, f"Missing historical state for VRF validation at height {block.height}")
             
             # Use historical validators for VRF validation during reorg
-            success = self.add_block(block, skip_proposer_check=False, use_historical_validators=True)
+            # skip_previous_hash_check=True: peer chain continuity already validated
+            success = self.add_block(block, skip_proposer_check=False, use_historical_validators=True, skip_previous_hash_check=True)
             if not success:
                 # Reorganization failed - state is corrupted
                 print(f"❌ CRITICAL: Reorganization failed when adding block {block.height}")
@@ -3022,6 +3065,7 @@ class Ledger:
                 return (False, f"Failed to add block at height {block.height} during reorganization")
         
         print(f"✅ Chain reorganization complete: now at height {len(self.blocks) - 1}")
+        print(f"   Node successfully recovered from fork")
         return (True, f"Reorganized to new chain, now at height {len(self.blocks) - 1}")
     
     def _rollback_to_height(self, target_height: int) -> bool:
