@@ -873,9 +873,9 @@ class Node:
         # FIX B: Reset local validator liveness after fork recovery
         # This is node-local only and does NOT affect consensus-critical reward calculation
         # (get_online_validators_deterministic uses on-chain data only)
-        if self.validator_address:
-            self.ledger.mark_validator_online(self.validator_address)
-            print(f"🔄 VALIDATOR LIVENESS RESET: {self.validator_address[:20]}... marked online after {source}")
+        if self.reward_address:
+            self.ledger.mark_validator_online(self.reward_address)
+            print(f"🔄 VALIDATOR LIVENESS RESET: {self.reward_address[:20]}... marked online after {source}")
     
     async def _execute_reorg(self, competing_chain: list, peer_id: str) -> tuple:
         """
@@ -2258,8 +2258,8 @@ class Node:
                 # This still counts as liveness proof (node-local only, does NOT affect rewards).
                 # Rewards are determined by get_online_validators_deterministic() which uses
                 # on-chain data only (recent proposers + attestations).
-                if self.validator_address:
-                    self.ledger.mark_validator_online(self.validator_address)
+                if self.reward_address:
+                    self.ledger.mark_validator_online(self.reward_address)
                     print(f"🔄 LIVENESS CREDITED: Duplicate proposer window counts as liveness proof")
                 continue  # Skip this cycle and try again
             
