@@ -127,6 +127,33 @@ class Node:
         # SELF-HEALING STATE (I6): Track if we're in recovery mode
         self._in_recovery_mode = False  # True when performing automatic purge/rebuild
         
+        # ============================================================
+        # HARD INVARIANTS (Dec 2025): PHANTOM FORK ELIMINATION
+        # ============================================================
+        # F1: Finality wall - blocks at height <= finalized_height can NEVER trigger reorg
+        # F2: One block per height - duplicate detection via block_index_by_height
+        # F3: Fork handling ONLY if ahead-of-finality and objectively better
+        # F4: State-machine strictness - single sync-controller loop
+        # F5: Quorum-based canonical head - majority agreement required
+        # ============================================================
+        
+        # FINALITY WALL (F1): Blocks behind this height are FINAL and cannot be reorged
+        # Uses MAX_REORG_DEPTH from config (80 blocks) as the finality depth
+        self.FINALITY_DEPTH = 80  # Same as MAX_REORG_DEPTH
+        
+        # BLOCK INDEX BY HEIGHT (F2): Track canonical block hash at each height
+        # Used for O(1) duplicate/conflict detection
+        self._block_index_by_height = {}  # height -> canonical_hash
+        
+        # FORK RESOLUTION GUARD (F4): Prevent concurrent/repeated fork resolution
+        self._fork_resolution_in_progress = False
+        
+        # QUORUM-BASED CANONICAL HEAD (F5): Track peer tips for majority agreement
+        # peer_id -> (height, tip_hash, last_seen_time)
+        self._peer_tips = {}
+        self.CANONICAL_QUORUM_MIN = 2  # Minimum peers needed for quorum
+        self._canonical_head_quorum_count = 0  # How many peers agree on canonical head
+        
         # VALIDATOR QUORUM REQUIREMENT: Prevent solo block production during network partitions
         # When a node is isolated, it should NOT produce blocks (creates divergent chain history)
         # This prevents the scenario where two isolated nodes each build their own chain,
@@ -537,6 +564,263 @@ class Node:
                         self.sync_phase = "SYNCING"
                         self.synced = False
     
+    # ============================================================
+    # CENTRALIZED FORK HANDLING (Dec 2025): PHANTOM FORK ELIMINATION
+    # ============================================================
+    # All fork detection and handling MUST go through these methods.
+    # No scattered fork logic allowed elsewhere in the codebase.
+    # ============================================================
+    
+    def _get_finalized_height(self) -> int:
+        """
+        HARD INVARIANT F1: Finality wall
+        
+        Returns the height below which blocks are considered FINAL.
+        Blocks at or below this height can NEVER trigger a reorg.
+        
+        Returns:
+            Finalized height (current_height - FINALITY_DEPTH, minimum 0)
+        """
+        current_height = len(self.ledger.blocks) - 1
+        return max(0, current_height - self.FINALITY_DEPTH)
+    
+    def _update_block_index(self, height: int, block_hash: str):
+        """
+        HARD INVARIANT F2: Update block index for duplicate detection
+        
+        Called after successfully adding a block to the ledger.
+        """
+        self._block_index_by_height[height] = block_hash
+    
+    def _rebuild_block_index(self):
+        """
+        Rebuild block index from ledger after reorg.
+        """
+        self._block_index_by_height = {}
+        for i, block in enumerate(self.ledger.blocks):
+            self._block_index_by_height[block.height] = block.block_hash
+    
+    def _classify_incoming_block(self, block, peer_id: str) -> str:
+        """
+        CENTRALIZED BLOCK CLASSIFIER (F1, F2, F3)
+        
+        This is the SINGLE PLACE where incoming blocks are classified.
+        All P2P and sync code MUST call this before processing blocks.
+        
+        Args:
+            block: The incoming Block object
+            peer_id: ID of the peer that sent the block
+            
+        Returns one of:
+            "DUPLICATE" - Same block we already have (ignore)
+            "CONFLICT_BEHIND_FINALITY" - Different block at finalized height (reject peer)
+            "CONFLICT_AHEAD_OF_FINALITY" - Fork candidate (may trigger reorg)
+            "SEQUENTIAL_NEXT" - Normal next block in sequence
+            "FUTURE_GAP" - Block is ahead, need to sync
+            "PAST_BLOCK" - Block is behind our tip (late gossip)
+            "EMPTY_CHAIN_BOOTSTRAP" - First blocks on empty chain
+        """
+        local_height = len(self.ledger.blocks) - 1
+        finalized_height = self._get_finalized_height()
+        
+        # Empty chain bootstrap case
+        if local_height < 1:
+            return "EMPTY_CHAIN_BOOTSTRAP"
+        
+        # Check if we have a block at this height
+        local_block = self.ledger.get_block_by_height(block.height)
+        
+        if local_block:
+            # We have a block at this height
+            if local_block.block_hash == block.block_hash:
+                # Same block - duplicate (late gossip)
+                return "DUPLICATE"
+            else:
+                # Different block at same height - conflict!
+                if block.height <= finalized_height:
+                    # Conflict behind finality wall - REJECT
+                    print(f"🚫 CONFLICT BEHIND FINALITY: Block {block.height} from peer {peer_id[:8]}...")
+                    print(f"   Local hash:  {local_block.block_hash[:16]}...")
+                    print(f"   Peer hash:   {block.block_hash[:16]}...")
+                    print(f"   Finalized:   {finalized_height}")
+                    print(f"   Action: REJECT peer (conflicting history behind finality)")
+                    return "CONFLICT_BEHIND_FINALITY"
+                else:
+                    # Conflict ahead of finality - potential fork
+                    return "CONFLICT_AHEAD_OF_FINALITY"
+        
+        # No block at this height yet
+        if block.height == local_height + 1:
+            # Next sequential block
+            latest = self.ledger.get_latest_block()
+            if latest and block.previous_hash != latest.block_hash:
+                # Previous hash mismatch - this is a fork indicator
+                if block.height <= finalized_height:
+                    return "CONFLICT_BEHIND_FINALITY"
+                else:
+                    return "CONFLICT_AHEAD_OF_FINALITY"
+            return "SEQUENTIAL_NEXT"
+        elif block.height > local_height + 1:
+            # Future block - we're behind
+            return "FUTURE_GAP"
+        else:
+            # Past block - late gossip
+            return "PAST_BLOCK"
+    
+    def _register_peer_tip(self, peer_id: str, height: int, tip_hash: str = None):
+        """
+        HARD INVARIANT F5: Register peer's tip for quorum tracking
+        
+        Args:
+            peer_id: Unique identifier for the peer
+            height: Peer's chain height
+            tip_hash: Hash of peer's tip block (optional)
+        """
+        import time
+        self._peer_tips[peer_id] = (height, tip_hash, time.time())
+        self._recompute_canonical_head_quorum()
+    
+    def _recompute_canonical_head_quorum(self):
+        """
+        HARD INVARIANT F5: Compute canonical head from peer quorum
+        
+        Only accept a canonical head if multiple peers agree on it.
+        This prevents thrashing based on a single peer's tip.
+        """
+        import time
+        current_time = time.time()
+        stale_threshold = 60.0  # Peers not seen in 60s are stale
+        
+        # Count votes for each (height, tip_hash) pair
+        votes = {}  # (height, tip_hash) -> set of peer_ids
+        
+        for peer_id, (height, tip_hash, last_seen) in self._peer_tips.items():
+            if current_time - last_seen > stale_threshold:
+                continue  # Skip stale peers
+            if tip_hash is None:
+                continue  # Skip peers without tip hash
+            
+            key = (height, tip_hash)
+            if key not in votes:
+                votes[key] = set()
+            votes[key].add(peer_id)
+        
+        # Find the best (height, tip_hash) with quorum
+        best_key = None
+        best_count = 0
+        
+        for key, peer_set in votes.items():
+            count = len(peer_set)
+            if count >= self.CANONICAL_QUORUM_MIN:
+                # Has quorum - prefer higher height
+                if best_key is None or key[0] > best_key[0]:
+                    best_key = key
+                    best_count = count
+        
+        if best_key:
+            height, tip_hash = best_key
+            self._canonical_head_height = height
+            self._canonical_head_hash = tip_hash
+            self._canonical_head_quorum_count = best_count
+    
+    async def _fork_choice_controller(self, conflict_height: int, competing_chain: list, peer_id: str) -> tuple:
+        """
+        CENTRALIZED FORK CHOICE CONTROLLER (F3, F4)
+        
+        This is the SINGLE PLACE where fork resolution decisions are made.
+        All code paths that detect forks MUST call this method.
+        
+        Args:
+            conflict_height: Height where conflict was detected
+            competing_chain: List of Block objects from peer
+            peer_id: ID of the peer providing the competing chain
+            
+        Returns:
+            (should_reorg, reason) tuple
+        """
+        # F4: Prevent concurrent fork resolution
+        if self._fork_resolution_in_progress:
+            return (False, "Fork resolution already in progress")
+        
+        finalized_height = self._get_finalized_height()
+        
+        # F1: Finality wall check
+        if conflict_height <= finalized_height:
+            print(f"🚫 FORK REJECTED: Conflict at height {conflict_height} is behind finality wall ({finalized_height})")
+            return (False, f"Conflict behind finality wall (finalized={finalized_height})")
+        
+        # F3: Validate chain continuity
+        if not competing_chain:
+            return (False, "Empty competing chain")
+        
+        valid, reason = self.ledger.fork_choice.validate_chain_continuity(competing_chain)
+        if not valid:
+            print(f"🚫 FORK REJECTED: Chain continuity validation failed: {reason}")
+            return (False, f"Chain continuity failed: {reason}")
+        
+        # F3: Check if competing chain is objectively better
+        current_chain = self.ledger.blocks
+        allowed, reason = self.ledger.fork_choice.can_reorganize_to_chain(current_chain, competing_chain)
+        
+        if not allowed:
+            print(f"🚫 FORK REJECTED: {reason}")
+            return (False, reason)
+        
+        # All checks passed - proceed with reorg
+        print(f"✅ FORK ACCEPTED: Conflict at height {conflict_height}, competing chain is better")
+        return (True, "Fork accepted - competing chain is objectively better")
+    
+    async def _execute_reorg(self, competing_chain: list, peer_id: str) -> tuple:
+        """
+        Execute a reorganization to the competing chain.
+        
+        This method is called ONLY after _fork_choice_controller approves the reorg.
+        
+        Args:
+            competing_chain: List of Block objects to reorg to
+            peer_id: ID of the peer providing the chain
+            
+        Returns:
+            (success, message) tuple
+        """
+        if self._fork_resolution_in_progress:
+            return (False, "Fork resolution already in progress")
+        
+        self._fork_resolution_in_progress = True
+        old_phase = self.sync_phase
+        
+        try:
+            # Set REORGANIZING state
+            print(f"🔄 STATE TRANSITION: {old_phase} → REORGANIZING")
+            self.sync_phase = "REORGANIZING"
+            self.synced = False
+            
+            # Execute the reorg
+            reorg_success, reorg_msg = self.ledger.reorganize_to_chain(competing_chain)
+            
+            # After reorg, return to SYNCING (NOT ACTIVE)
+            print(f"🔄 STATE TRANSITION: REORGANIZING → SYNCING (post-reorg)")
+            self.sync_phase = "SYNCING"
+            self.synced = False
+            self.initial_sync_complete_height = None
+            self.cooling_complete_height = None
+            
+            if reorg_success:
+                # Rebuild block index after successful reorg
+                self._rebuild_block_index()
+                # Reset reorg failure context
+                self._reorg_failure_context = {
+                    "height": None,
+                    "peer_tip_hash": None,
+                    "retries": 0,
+                }
+                return (True, reorg_msg)
+            else:
+                return (False, reorg_msg)
+                
+        finally:
+            self._fork_resolution_in_progress = False
+    
     async def _get_peer_height(self, peer_url: str) -> int:
         """
         Get the current blockchain height of a peer via HTTP API.
@@ -604,30 +888,62 @@ class Node:
             if block.height <= 100 or block.height % 500 == 0:
                 print(f"📥 BLOCK RECEIVED: height {block.height} from peer {peer_id[:8]}... (current: {current_height})")
             
-            # PERMANENT FIX: Handle height gaps to prevent deadlock
-            # If we receive a future block, trigger sync to backfill missing blocks
-            if latest and block.height > latest.height + 1:
-                gap_size = block.height - latest.height - 1
+            # ============================================================
+            # CENTRALIZED BLOCK CLASSIFICATION (Dec 2025)
+            # All fork detection goes through _classify_incoming_block()
+            # ============================================================
+            classification = self._classify_incoming_block(block, peer_id)
+            
+            # F2: DUPLICATE - Same block we already have (late gossip)
+            if classification == "DUPLICATE":
+                print(f"📋 DUPLICATE IGNORE: Block {block.height} already exists (late gossip from {peer_id[:8]}...)")
+                return
+            
+            # F1: CONFLICT BEHIND FINALITY - Reject peer, no reorg
+            if classification == "CONFLICT_BEHIND_FINALITY":
+                # Already logged by classifier
+                # TODO: Lower peer reputation
+                return
+            
+            # F3: CONFLICT AHEAD OF FINALITY - Potential fork, use fork_choice_controller
+            if classification == "CONFLICT_AHEAD_OF_FINALITY":
+                print(f"\n🔀 CONFLICT AHEAD OF FINALITY at height {block.height}")
+                print(f"   From peer: {peer_id[:8]}...")
+                
+                # F4: Only trigger sync if not already in fork resolution
+                if self._fork_resolution_in_progress:
+                    print(f"   Fork resolution already in progress - ignoring")
+                    return
+                
+                # Only trigger sync if not already syncing (prevent infinite loops)
+                if self.sync_phase not in ("SYNCING", "REORGANIZING"):
+                    print(f"   Triggering HTTP sync to resolve via fork_choice_controller...")
+                    asyncio.create_task(self._sync_missing_blocks(latest.height, block.height + 100))
+                else:
+                    print(f"   Already in {self.sync_phase} phase - skipping duplicate sync trigger")
+                return
+            
+            # FUTURE_GAP - We're behind, need to sync
+            if classification == "FUTURE_GAP":
+                gap_size = block.height - current_height - 1
                 if gap_size <= 100:
                     # Small gap - just log and wait for blocks to arrive
                     if block.height % 1000 == 0:  # Only log occasionally
-                        print(f"⚠️  Small gap: received block {block.height}, waiting for {latest.height + 1}")
+                        print(f"⚠️  Small gap: received block {block.height}, waiting for {current_height + 1}")
                 else:
                     # Large gap - trigger P2P sync request
-                    print(f"⚠️  HEIGHT GAP DETECTED: Received block {block.height}, current is {latest.height}")
+                    print(f"⚠️  HEIGHT GAP DETECTED: Received block {block.height}, current is {current_height}")
                     print(f"   Requesting P2P sync for missing {gap_size} blocks...")
-                    # Use P2P sync instead of HTTP (HTTP not available through Replit proxy)
-                    await self.p2p.broadcast("sync_request", {"current_height": latest.height})
+                    await self.p2p.broadcast("sync_request", {"current_height": current_height})
                 return
             
-            # Skip blocks we already have
-            if latest and block.height <= latest.height:
+            # PAST_BLOCK - Late gossip for block we already have
+            if classification == "PAST_BLOCK":
+                # Already have this block, silently ignore
                 return
             
-            # SYNC FIX: Handle empty chain case (syncing node with no blocks)
-            # When latest is None, we need to accept blocks starting from height 0 or 1
-            if not latest:
-                # Empty chain - accept genesis block (height 0) or first block (height 1) 
+            # EMPTY_CHAIN_BOOTSTRAP - First blocks on empty chain
+            if classification == "EMPTY_CHAIN_BOOTSTRAP":
                 if block.height == 0 or block.height == 1:
                     print(f"📦 SYNC: Accepting first block (height {block.height}) on empty chain")
                     # Validate hash integrity
@@ -638,6 +954,7 @@ class Node:
                     success = self.ledger.add_block(block, skip_proposer_check=True)
                     if success:
                         print(f"✅ SYNC: Added block {block.height} to ledger")
+                        self._update_block_index(block.height, block.block_hash)
                     else:
                         print(f"❌ SYNC: Failed to add block {block.height}")
                     return
@@ -647,26 +964,8 @@ class Node:
                         print(f"⚠️  SYNC: Received block {block.height} but chain is empty, need block 0/1 first")
                     return
             
-            # Normal path: process next sequential block
-            if latest and block.height == latest.height + 1:
-                if block.previous_hash != latest.block_hash:
-                    # P2P FORK DETECTION: Block has different parent than our tip
-                    # This indicates a chain fork - trigger sync to resolve via fork choice
-                    print(f"\n🔀 P2P FORK DETECTED at height {block.height}!")
-                    print(f"   Local tip hash:  {latest.block_hash[:16]}...")
-                    print(f"   Block prev_hash: {block.previous_hash[:16]}...")
-                    print(f"   Block proposer:  {block.proposer[:20] if hasattr(block, 'proposer') else 'unknown'}...")
-                    print(f"   From peer:       {peer_id[:8]}...")
-                    
-                    # Only trigger sync if not already syncing (prevent infinite loops)
-                    if self.sync_phase != "SYNCING":
-                        print(f"   Triggering HTTP sync to resolve fork via fork choice...")
-                        # Use HTTP-based sync which has full fork resolution logic
-                        # _sync_missing_blocks will detect the fork and call reorganize_to_chain
-                        asyncio.create_task(self._sync_missing_blocks(latest.height, block.height + 100))
-                    else:
-                        print(f"   Already in SYNCING phase - skipping duplicate sync trigger")
-                    return
+            # SEQUENTIAL_NEXT - Normal next block in sequence
+            if classification == "SEQUENTIAL_NEXT":
                 
                 if block.calculate_hash() != block.block_hash:
                     return
@@ -835,6 +1134,9 @@ class Node:
                 # P2P blocks: Skip strict validation (historical blocks may have old timing)
                 # Only enforce timing for blocks THIS node creates (in mine_blocks function)
                 self.ledger.add_block(block, skip_proposer_check=True)
+                
+                # F2: Update block index for duplicate detection
+                self._update_block_index(block.height, block.block_hash)
                 
                 # ISOLATION DETECTION: Track external blocks received from other validators
                 # This is CRITICAL for detecting network isolation - if we're not receiving
@@ -2298,70 +2600,67 @@ class Node:
                                         self._last_external_block_height = block.height
                                         self._last_external_block_time = time.time()
                                 else:
-                                    # FORK DETECTION: Block validation failed
+                                    # ============================================================
+                                    # CENTRALIZED FORK HANDLING (Dec 2025)
+                                    # All fork detection goes through _fork_choice_controller()
+                                    # ============================================================
                                     latest = self.ledger.get_latest_block()
                                     
                                     # Check if it's a fork (different previous_hash)
                                     if latest and block.height == latest.height + 1 and block.previous_hash != latest.block_hash:
-                                        print(f"\n      🔀 FORK DETECTED at height {block.height}!")
+                                        # F1: Check finality wall FIRST
+                                        finalized_height = self._get_finalized_height()
+                                        if block.height <= finalized_height:
+                                            print(f"\n      🚫 CONFLICT BEHIND FINALITY at height {block.height}")
+                                            print(f"         Finalized height: {finalized_height}")
+                                            print(f"         Action: REJECT (no reorg behind finality wall)")
+                                            peer_success = False
+                                            break  # Try next peer
+                                        
+                                        print(f"\n      🔀 CONFLICT AHEAD OF FINALITY at height {block.height}")
                                         print(f"         Local chain: ...→ {latest.block_hash[:16]}")
                                         print(f"         Peer chain:  ...→ {block.previous_hash[:16]}")
-                                        print(f"         Fetching peer's full chain for reorganization...")
+                                        print(f"         Using centralized fork_choice_controller...")
                                         
                                         # Fetch full competing chain from this peer
                                         try:
                                             competing_chain = await self._fetch_full_chain(peer_url, session, peer_end_height)
                                             if competing_chain:
-                                                # CONSENSUS-CRITICAL FIX (Dec 2025): FORK LOOP PREVENTION
-                                                # Set REORGANIZING state to ensure block production is disabled
-                                                # during the entire reorganization process
-                                                old_phase = self.sync_phase
-                                                print(f"         🔄 STATE TRANSITION: {old_phase} → REORGANIZING")
-                                                self.sync_phase = "REORGANIZING"
-                                                self.synced = False
+                                                # F3, F4: Use centralized fork_choice_controller
+                                                should_reorg, reason = await self._fork_choice_controller(
+                                                    conflict_height=block.height,
+                                                    competing_chain=competing_chain,
+                                                    peer_id=peer_url
+                                                )
                                                 
-                                                # Trigger reorganization - fork choice decides winner
-                                                reorg_success, reorg_msg = self.ledger.reorganize_to_chain(competing_chain)
-                                                
-                                                # After reorg, return to SYNCING (NOT ACTIVE)
-                                                # Node must go through SYNCING -> COOLING -> ACTIVE path
-                                                print(f"         🔄 STATE TRANSITION: REORGANIZING → SYNCING (post-reorg)")
-                                                self.sync_phase = "SYNCING"
-                                                self.synced = False
-                                                self.initial_sync_complete_height = None
-                                                self.cooling_complete_height = None
-                                                
-                                                if reorg_success:
-                                                    print(f"         ✅ Reorganization successful: {reorg_msg}")
-                                                    # Reset reorg failure context on success
-                                                    self._reorg_failure_context = {
-                                                        "height": None,
-                                                        "peer_tip_hash": None,
-                                                        "retries": 0,
-                                                    }
-                                                    # Update sync progress to new chain tip
-                                                    current_sync_height = len(self.ledger.blocks)
-                                                    break  # Exit block loop, continue with next chunk
-                                                else:
-                                                    print(f"         ⚠️  Reorg rejected: {reorg_msg}")
+                                                if should_reorg:
+                                                    # Execute reorg via centralized _execute_reorg
+                                                    reorg_success, reorg_msg = await self._execute_reorg(competing_chain, peer_url)
                                                     
-                                                    # HARD INVARIANT I4: Bounded retry with automatic purge
-                                                    # Track this failure and check if we should escalate
-                                                    peer_tip_hash = competing_chain[-1].block_hash if competing_chain else None
-                                                    should_purge = self._track_reorg_failure(block.height, peer_tip_hash)
-                                                    
-                                                    if should_purge:
-                                                        # Trigger automatic purge and rebuild (I6: self-healing)
-                                                        # Pass competing_chain for safer common ancestor detection
-                                                        await self._trigger_automatic_purge(block.height, competing_chain)
-                                                        # After purge, restart sync from beginning
+                                                    if reorg_success:
+                                                        print(f"         ✅ Reorganization successful: {reorg_msg}")
+                                                        # Update sync progress to new chain tip
                                                         current_sync_height = len(self.ledger.blocks)
-                                                        peer_success = True  # Don't try next peer, we've reset
-                                                        break
+                                                        break  # Exit block loop, continue with next chunk
                                                     else:
-                                                        print(f"         Local chain is canonical, peer is on wrong fork")
-                                                        peer_success = False
-                                                        break  # Try next peer
+                                                        print(f"         ⚠️  Reorg execution failed: {reorg_msg}")
+                                                        
+                                                        # HARD INVARIANT I4: Bounded retry with automatic purge
+                                                        peer_tip_hash = competing_chain[-1].block_hash if competing_chain else None
+                                                        should_purge = self._track_reorg_failure(block.height, peer_tip_hash)
+                                                        
+                                                        if should_purge:
+                                                            await self._trigger_automatic_purge(block.height, competing_chain)
+                                                            current_sync_height = len(self.ledger.blocks)
+                                                            peer_success = True
+                                                            break
+                                                        else:
+                                                            peer_success = False
+                                                            break
+                                                else:
+                                                    print(f"         🚫 Fork rejected by controller: {reason}")
+                                                    peer_success = False
+                                                    break  # Try next peer
                                             else:
                                                 print(f"         ❌ Could not fetch competing chain")
                                                 peer_success = False
