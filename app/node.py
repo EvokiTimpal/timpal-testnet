@@ -73,10 +73,28 @@ class Node:
         self.cooling_complete_height = None  # Height when cooling period ends
         
         # EXPLICIT SYNC PHASE STATE MACHINE (prevents flip-flop bugs)
+        # 
+        # CONSENSUS-CRITICAL FIX (Dec 2025): FORK LOOP PREVENTION
+        # 
         # Phases: "SYNCING" -> "COOLING" -> "ACTIVE"
-        # - SYNCING: Node is catching up to network head
-        # - COOLING: Node is at head but waiting for cooling period
-        # - ACTIVE: Node is fully ready to participate in consensus
+        #         "ACTIVE" -> "SYNCING" (when behind peers)
+        #         "SYNCING" -> "REORGANIZING" -> "SYNCING" (during fork recovery)
+        #
+        # - SYNCING: Node is catching up to network head - CANNOT PRODUCE BLOCKS
+        # - REORGANIZING: Node is performing chain reorganization - CANNOT PRODUCE BLOCKS
+        # - COOLING: Node is at head but waiting for cooling period - CANNOT PRODUCE BLOCKS
+        # - ACTIVE: Node is fully ready to participate in consensus - CAN PRODUCE BLOCKS
+        #
+        # CRITICAL INVARIANT: Block production is ONLY allowed when sync_phase == "ACTIVE"
+        # 
+        # PREVIOUS BUG: Node could remain in ACTIVE state during sync/reorg operations,
+        # which caused it to produce blocks while catching up, creating divergent chains
+        # and an infinite fork loop.
+        #
+        # FIX: Any sync or reorg operation MUST demote the node from ACTIVE to SYNCING
+        # before starting. The node can only return to ACTIVE through the proper
+        # SYNCING -> COOLING -> ACTIVE transition path.
+        #
         # Once ACTIVE, node stays ACTIVE unless it falls significantly behind (>10 blocks)
         self.sync_phase = "SYNCING"  # Start in syncing phase
         self.SEVERE_LAG_THRESHOLD = 10  # Only drop from ACTIVE if this far behind
@@ -1021,13 +1039,16 @@ class Node:
             # ============================================================
             # STALL ESCAPE: Safety net to break cooling-based deadlocks
             # ============================================================
-            # If chain hasn't advanced for too long while in SYNCING/COOLING,
+            # If chain hasn't advanced for too long while in SYNCING/COOLING/REORGANIZING,
             # automatically return to ACTIVE to break the deadlock.
             # This prevents scenarios where both validators demote and neither can propose.
             #
             # LEADER-BASED ESCAPE: Only the deterministic leader can escape quickly.
             # Non-leaders wait longer to avoid simultaneous ACTIVE transitions.
-            if self.sync_phase in ("SYNCING", "COOLING") and not is_bootstrap:
+            #
+            # NOTE: REORGANIZING is included because a stuck reorg should eventually
+            # allow the node to escape and try again.
+            if self.sync_phase in ("SYNCING", "COOLING", "REORGANIZING") and not is_bootstrap:
                 is_leader = self._is_stall_breaker_leader()
                 stall_threshold = self._stall_threshold_leader if is_leader else self._stall_threshold_fallback
                 
@@ -1089,10 +1110,26 @@ class Node:
                         self.synced = True
             
             # Handle catch-up sync if behind
+            # CONSENSUS-CRITICAL FIX (Dec 2025): FORK LOOP PREVENTION
+            # 
+            # PREVIOUS BUG: Node could remain in ACTIVE state during sync operations.
+            # This caused it to produce blocks while catching up, creating divergent
+            # chains and an infinite fork loop.
+            #
+            # FIX: ALWAYS demote from ACTIVE to SYNCING before any sync operation.
+            # The node can only return to ACTIVE through the proper transition path:
+            # SYNCING -> COOLING -> ACTIVE
             if max_peer_height > local_height:
-                if self.sync_phase != "ACTIVE":
-                    print(f"🔄 CATCH-UP MODE: Local height {local_height}, max peer height {max_peer_height}")
-                    print(f"   Syncing missing blocks {local_height + 1} to {max_peer_height}...")
+                # CRITICAL: Demote from ACTIVE before sync to prevent block production
+                if self.sync_phase == "ACTIVE":
+                    print(f"🔄 STATE TRANSITION: ACTIVE → SYNCING (peers ahead: local={local_height}, peer={max_peer_height})")
+                    self.sync_phase = "SYNCING"
+                    self.synced = False
+                    self.initial_sync_complete_height = None
+                    self.cooling_complete_height = None
+                print(f"🔄 CATCH-UP MODE: Local height {local_height}, max peer height {max_peer_height}")
+                print(f"   Syncing missing blocks {local_height + 1} to {max_peer_height}...")
+                print(f"   Current phase: {self.sync_phase} (block production DISABLED)")
                 await self._sync_missing_blocks(local_height + 1, max_peer_height)
                 # After catch-up, skip this mining cycle to refresh state
                 continue
@@ -2035,8 +2072,25 @@ class Node:
                                         try:
                                             competing_chain = await self._fetch_full_chain(peer_url, session, peer_end_height)
                                             if competing_chain:
+                                                # CONSENSUS-CRITICAL FIX (Dec 2025): FORK LOOP PREVENTION
+                                                # Set REORGANIZING state to ensure block production is disabled
+                                                # during the entire reorganization process
+                                                old_phase = self.sync_phase
+                                                print(f"         🔄 STATE TRANSITION: {old_phase} → REORGANIZING")
+                                                self.sync_phase = "REORGANIZING"
+                                                self.synced = False
+                                                
                                                 # Trigger reorganization - fork choice decides winner
                                                 reorg_success, reorg_msg = self.ledger.reorganize_to_chain(competing_chain)
+                                                
+                                                # After reorg, return to SYNCING (NOT ACTIVE)
+                                                # Node must go through SYNCING -> COOLING -> ACTIVE path
+                                                print(f"         🔄 STATE TRANSITION: REORGANIZING → SYNCING (post-reorg)")
+                                                self.sync_phase = "SYNCING"
+                                                self.synced = False
+                                                self.initial_sync_complete_height = None
+                                                self.cooling_complete_height = None
+                                                
                                                 if reorg_success:
                                                     print(f"         ✅ Reorganization successful: {reorg_msg}")
                                                     # Update sync progress to new chain tip
