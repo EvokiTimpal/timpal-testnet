@@ -771,6 +771,16 @@ class Node:
         if self._fork_resolution_in_progress:
             return (False, "Fork resolution already in progress")
         
+        # FIX D: ALREADY-SYNCED GUARD - Skip fork-choice if local tip matches canonical head
+        # This prevents repeated "CONFLICT AHEAD OF FINALITY" triggers when chains are identical
+        local_latest = self.ledger.get_latest_block()
+        if (local_latest and 
+            self._canonical_head_height > 0 and
+            self._canonical_head_height == local_latest.height and
+            self._canonical_head_hash == local_latest.block_hash):
+            print(f"🔄 FORK CHOICE SKIPPED: local tip already matches canonical head (height={local_latest.height})")
+            return (False, "Already synced to canonical head")
+        
         finalized_height = self._get_finalized_height()
         
         # F1: Finality wall check
@@ -818,6 +828,55 @@ class Node:
         print(f"✅ FORK ACCEPTED: Conflict at height {conflict_height}, competing chain is better")
         return (True, "Fork accepted - competing chain is objectively better")
     
+    def _on_successful_sync_or_reorg(self, source: str = "sync"):
+        """
+        FIX A: Explicit ACTIVE phase transition after successful sync/reorg.
+        
+        This helper is called after HTTP sync or fork recovery completes successfully.
+        It ensures the node transitions to ACTIVE (or COOLING) deterministically,
+        rather than relying on passive transitions in mine_blocks().
+        
+        Args:
+            source: "sync" or "reorg" - for logging purposes
+        """
+        local_height = len(self.ledger.blocks) - 1
+        
+        # Check if we're at or near the canonical head
+        at_canonical_head = (
+            self._canonical_head_height > 0 and
+            local_height >= self._canonical_head_height - self.SYNC_LAG_THRESHOLD
+        )
+        
+        if at_canonical_head:
+            # We're caught up - transition to COOLING (then ACTIVE via mine_blocks)
+            print(f"✅ {source.upper()} COMPLETE at height {local_height}")
+            self.sync_phase = "COOLING"
+            self.synced = True
+            self.initial_sync_complete_height = local_height
+            self.cooling_complete_height = local_height + self.SYNC_COOLING_BLOCKS
+            print(f"🧊 COOLING PERIOD: Will become ACTIVE at height {self.cooling_complete_height}")
+            print(f"   Waiting for {self.SYNC_COOLING_BLOCKS} more blocks before proposing...")
+        else:
+            # Not yet caught up - stay in SYNCING
+            print(f"🔄 {source.upper()} PARTIAL: at height {local_height}, canonical head is {self._canonical_head_height}")
+            self.sync_phase = "SYNCING"
+            self.synced = False
+        
+        # Reset reorg failure context on any successful sync/reorg
+        self._reorg_failure_context = {
+            "height": None,
+            "peer_tip_hash": None,
+            "retries": 0,
+            "last_attempt_time": 0,
+        }
+        
+        # FIX B: Reset local validator liveness after fork recovery
+        # This is node-local only and does NOT affect consensus-critical reward calculation
+        # (get_online_validators_deterministic uses on-chain data only)
+        if self.validator_address:
+            self.ledger.mark_validator_online(self.validator_address)
+            print(f"🔄 VALIDATOR LIVENESS RESET: {self.validator_address[:20]}... marked online after {source}")
+    
     async def _execute_reorg(self, competing_chain: list, peer_id: str) -> tuple:
         """
         Execute a reorganization to the competing chain.
@@ -846,24 +905,19 @@ class Node:
             # Execute the reorg
             reorg_success, reorg_msg = self.ledger.reorganize_to_chain(competing_chain)
             
-            # After reorg, return to SYNCING (NOT ACTIVE)
-            print(f"🔄 STATE TRANSITION: REORGANIZING → SYNCING (post-reorg)")
-            self.sync_phase = "SYNCING"
-            self.synced = False
-            self.initial_sync_complete_height = None
-            self.cooling_complete_height = None
-            
             if reorg_success:
                 # Rebuild block index after successful reorg
                 self._rebuild_block_index()
-                # Reset reorg failure context
-                self._reorg_failure_context = {
-                    "height": None,
-                    "peer_tip_hash": None,
-                    "retries": 0,
-                }
+                # FIX A: Explicit phase transition after successful reorg
+                self._on_successful_sync_or_reorg(source="reorg")
                 return (True, reorg_msg)
             else:
+                # Reorg failed - return to SYNCING
+                print(f"🔄 STATE TRANSITION: REORGANIZING → SYNCING (reorg failed)")
+                self.sync_phase = "SYNCING"
+                self.synced = False
+                self.initial_sync_complete_height = None
+                self.cooling_complete_height = None
                 return (False, reorg_msg)
                 
         finally:
@@ -957,6 +1011,15 @@ class Node:
             if classification == "CONFLICT_AHEAD_OF_FINALITY":
                 print(f"\n🔀 CONFLICT AHEAD OF FINALITY at height {block.height}")
                 print(f"   From peer: {peer_id[:8]}...")
+                
+                # FIX D (part 2): ALREADY-SYNCED GUARD - Skip if local tip matches canonical head
+                # This prevents repeated HTTP sync triggers when chains are actually identical
+                if (latest and 
+                    self._canonical_head_height > 0 and
+                    self._canonical_head_height == latest.height and
+                    self._canonical_head_hash == latest.block_hash):
+                    print(f"   SKIPPED: Local tip already matches canonical head (height={latest.height})")
+                    return
                 
                 # F4: Only trigger sync if not already in fork resolution
                 if self._fork_resolution_in_progress:
@@ -2190,6 +2253,14 @@ class Node:
             success = self.ledger.add_block(new_block)
             if not success:
                 print(f"ℹ️  NOTE: Block {new_block.height} already exists — duplicate attempt skipped (normal behavior)")
+                # FIX C: Credit liveness on duplicate proposer window
+                # The validator was selected and attempted to produce, but lost the race.
+                # This still counts as liveness proof (node-local only, does NOT affect rewards).
+                # Rewards are determined by get_online_validators_deterministic() which uses
+                # on-chain data only (recent proposers + attestations).
+                if self.validator_address:
+                    self.ledger.mark_validator_online(self.validator_address)
+                    print(f"🔄 LIVENESS CREDITED: Duplicate proposer window counts as liveness proof")
                 continue  # Skip this cycle and try again
             
             # NOTE: We intentionally do NOT update _last_external_block_height here.
@@ -2755,6 +2826,8 @@ class Node:
                         print(f"📊 Synced blocks {start_height} → {end_height}")
                         print(f"🔒 Final Chain Height: {len(self.ledger.blocks) - 1}")
                         print(f"📦 Total Chunks: {chunks_synced}")
+                        # FIX A: Explicit phase transition after successful HTTP sync
+                        self._on_successful_sync_or_reorg(source="sync")
                         return
                         
             except Exception as e:
