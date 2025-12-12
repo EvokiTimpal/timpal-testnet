@@ -409,7 +409,25 @@ class Node:
         
         return False
     
-    async def _trigger_automatic_purge(self, fork_height: int):
+    def _find_common_ancestor_height(self, competing_chain: list) -> int:
+        """
+        Find the last common ancestor between local chain and competing chain.
+        
+        Args:
+            competing_chain: List of Block objects from peer
+            
+        Returns:
+            Height of last common ancestor (0 if only genesis matches)
+        """
+        max_common = min(len(self.ledger.blocks), len(competing_chain)) - 1
+        for h in range(max_common, -1, -1):
+            local_block = self.ledger.blocks[h] if h < len(self.ledger.blocks) else None
+            peer_block = competing_chain[h] if h < len(competing_chain) else None
+            if local_block and peer_block and local_block.block_hash == peer_block.block_hash:
+                return h
+        return 0  # Only genesis matches
+    
+    async def _trigger_automatic_purge(self, fork_height: int, competing_chain: list = None):
         """
         HARD INVARIANT I6: Self-healing is automatic
         
@@ -418,50 +436,66 @@ class Node:
         
         The user should NEVER need to manually delete node data.
         
+        SAFER PURGE: If competing_chain is provided, we find the actual common
+        ancestor and only purge from there. Full reset to genesis is only done
+        as a last resort after confirmed repeated mismatch.
+        
         Args:
-            fork_height: Height to purge from (exclusive - blocks >= fork_height are removed)
+            fork_height: Height where fork was detected
+            competing_chain: Optional list of Block objects from peer for ancestor detection
         """
         print(f"\n{'='*60}")
         print(f"🚨 LOCAL CHAIN DIVERGED — PURGING LOCAL SUFFIX AND REBUILDING FROM PEERS")
         print(f"{'='*60}")
         print(f"   Fork detected at height: {fork_height}")
         print(f"   Current local height: {len(self.ledger.blocks) - 1}")
-        print(f"   Action: Purging blocks >= {fork_height} and resyncing from network")
         
         self._in_recovery_mode = True
         
         try:
-            # Step 1: Rollback to fork point (or genesis if fork_height is 0)
-            target_height = max(0, fork_height - 1)
-            print(f"   Step 1: Rolling back to height {target_height}...")
+            # Step 1: Find the actual common ancestor if we have competing chain
+            if competing_chain:
+                ancestor_height = self._find_common_ancestor_height(competing_chain)
+                print(f"   Step 1: Found common ancestor at height {ancestor_height}")
+                target_height = ancestor_height
+            else:
+                # No competing chain - use fork_height - 1 as best guess
+                target_height = max(0, fork_height - 1)
+                print(f"   Step 1: No competing chain available, targeting height {target_height}")
             
+            print(f"   Action: Purging blocks > {target_height} and resyncing from network")
+            
+            # Step 2: Rollback to common ancestor
             if target_height < len(self.ledger.blocks) - 1:
+                print(f"   Step 2: Rolling back to height {target_height}...")
                 rollback_success = self.ledger._rollback_to_height(target_height)
                 if not rollback_success:
-                    print(f"   ❌ Rollback failed - attempting full reset from genesis")
-                    # Full reset as last resort
-                    self.ledger.blocks = self.ledger.blocks[:1]  # Keep only genesis
-                    self.ledger._rebuild_state_from_blocks()
+                    # Only do full reset if rollback fails AND we've already tried 3+ times
+                    # at the same context (which we have, since we're in _trigger_automatic_purge)
+                    print(f"   ❌ Rollback to {target_height} failed")
+                    print(f"   Attempting full reset to genesis as last resort...")
+                    # Use ledger's safe rebuild method instead of direct slice
+                    self.ledger._rollback_to_height(0)
                     target_height = 0
             
-            print(f"   Step 2: Local chain now at height {len(self.ledger.blocks) - 1}")
+            print(f"   Step 3: Local chain now at height {len(self.ledger.blocks) - 1}")
             
-            # Step 3: Reset reorg failure context
+            # Step 4: Reset reorg failure context
             self._reorg_failure_context = {
                 "height": None,
                 "peer_tip_hash": None,
                 "retries": 0,
             }
             
-            # Step 4: Force transition to SYNCING to trigger resync
-            print(f"   Step 3: Transitioning to SYNCING phase for resync...")
+            # Step 5: Force transition to SYNCING to trigger resync
+            print(f"   Step 4: Transitioning to SYNCING phase for resync...")
             self.sync_phase = "SYNCING"
             self.synced = False
             self.initial_sync_complete_height = None
             self.cooling_complete_height = None
             
-            # Step 5: Trigger resync from peers
-            print(f"   Step 4: Initiating resync from peers...")
+            # Step 6: Trigger resync from peers
+            print(f"   Step 5: Initiating resync from peers...")
             max_peer_height = await self._get_max_peer_height()
             if max_peer_height > len(self.ledger.blocks) - 1:
                 await self._sync_missing_blocks(len(self.ledger.blocks), max_peer_height)
@@ -779,14 +813,23 @@ class Node:
                         temp_nonces[tx.sender] = temp_nonces.get(tx.sender, 0) + 1
                 
                 # HARD INVARIANT I2: No writes outside ACTIVE (for production blocks)
-                # P2P blocks during SYNCING/REORGANIZING/COOLING should be rejected
-                # because they could extend a divergent local chain.
-                # EXCEPTION: Bootstrap blocks (height <= 10) and empty chain sync are allowed
-                # because they're part of initial sync, not production.
-                is_initial_sync = block.height <= 10 or self.sync_phase == "SYNCING"
-                if not is_initial_sync and not self._can_accept_production_block():
+                # P2P gossip blocks are PRODUCTION blocks - they must be rejected unless
+                # the node is ACTIVE and consensus-ready.
+                # 
+                # The ONLY exception is when the chain is completely empty (just genesis or
+                # no blocks at all) - in that case, we're bootstrapping and need to accept
+                # the first few blocks to get started. This is NOT the same as "SYNCING" -
+                # once we have blocks, P2P gossip must be gated.
+                #
+                # Sync/reorg writes happen via the dedicated _sync_missing_blocks() path,
+                # NOT via P2P gossip. This separation is critical to prevent poisoning
+                # the local disk during sync.
+                is_empty_chain_bootstrap = len(self.ledger.blocks) <= 1  # Only genesis or empty
+                
+                if not is_empty_chain_bootstrap and not self._can_accept_production_block():
                     print(f"⚠️  WRITE GATE: Rejecting P2P block {block.height} - node not ACTIVE (phase={self.sync_phase})")
-                    print(f"   Block production disabled during sync/reorg to prevent chain divergence")
+                    print(f"   Production blocks disabled during sync/reorg to prevent chain divergence")
+                    print(f"   Sync must happen via HTTP sync path, not P2P gossip")
                     return
                 
                 # P2P blocks: Skip strict validation (historical blocks may have old timing)
@@ -1052,11 +1095,16 @@ class Node:
         Query all peers via HTTP API to get maximum height in the network.
         This enables proactive catch-up when node falls behind.
         
+        HARD INVARIANT I1: Also updates canonical head tracking.
+        Network is the source of truth, local disk is cache.
+        
         Supports both ws:// and wss:// seed nodes.
         """
         peer_http_urls = self._get_http_urls_from_seeds()
         
         max_height = 0
+        max_height_tip_hash = None
+        
         for peer_url in peer_http_urls:
             try:
                 async with aiohttp.ClientSession() as session:
@@ -1067,10 +1115,18 @@ class Node:
                         if resp.status == 200:
                             data = await resp.json()
                             peer_height = data.get('height', 0)
+                            peer_tip_hash = data.get('tip_hash', data.get('latest_block_hash'))
+                            
                             if peer_height > max_height:
                                 max_height = peer_height
+                                max_height_tip_hash = peer_tip_hash
             except Exception:
                 continue
+        
+        # HARD INVARIANT I1: Update canonical head from peers
+        # This is the primary integration point for "network beats disk"
+        if max_height > 0:
+            await self._update_canonical_head(max_height, max_height_tip_hash)
         
         return max_height
     
@@ -2296,7 +2352,8 @@ class Node:
                                                     
                                                     if should_purge:
                                                         # Trigger automatic purge and rebuild (I6: self-healing)
-                                                        await self._trigger_automatic_purge(block.height)
+                                                        # Pass competing_chain for safer common ancestor detection
+                                                        await self._trigger_automatic_purge(block.height, competing_chain)
                                                         # After purge, restart sync from beginning
                                                         current_sync_height = len(self.ledger.blocks)
                                                         peer_success = True  # Don't try next peer, we've reset
