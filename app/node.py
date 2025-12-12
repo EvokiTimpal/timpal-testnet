@@ -121,8 +121,10 @@ class Node:
             "height": None,           # Fork height where failure occurred
             "peer_tip_hash": None,    # Peer's tip hash at time of failure
             "retries": 0,             # Number of consecutive failures
+            "last_attempt_time": 0,   # Timestamp of last reorg attempt (for one-shot guard)
         }
         self.MAX_REORG_RETRIES = 3  # After 3 failures, trigger automatic purge
+        self.REORG_BACKOFF_SECONDS = 30  # Suppress repeated reorg attempts for same (height, hash) within this window
         
         # SELF-HEALING STATE (I6): Track if we're in recovery mode
         self._in_recovery_mode = False  # True when performing automatic purge/rebuild
@@ -684,12 +686,28 @@ class Node:
         """
         HARD INVARIANT F5: Compute canonical head from peer quorum
         
-        Only accept a canonical head if multiple peers agree on it.
-        This prevents thrashing based on a single peer's tip.
+        Only accept a canonical head if peers agree on it.
+        Uses ADAPTIVE QUORUM: quorum = max(1, min(CANONICAL_QUORUM_MIN, reachable_peers))
+        This ensures single-peer networks work correctly.
         """
         import time
         current_time = time.time()
         stale_threshold = 60.0  # Peers not seen in 60s are stale
+        
+        # First, count reachable (non-stale) peers
+        reachable_peers = set()
+        for peer_id, (height, tip_hash, last_seen) in self._peer_tips.items():
+            if current_time - last_seen <= stale_threshold:
+                reachable_peers.add(peer_id)
+        
+        reachable_count = len(reachable_peers)
+        if reachable_count == 0:
+            # No reachable peers - don't update canonical head
+            return
+        
+        # ADAPTIVE QUORUM: Works with single-peer networks
+        # quorum = max(1, min(CANONICAL_QUORUM_MIN, reachable_count))
+        adaptive_quorum = max(1, min(self.CANONICAL_QUORUM_MIN, reachable_count))
         
         # Count votes for each (height, tip_hash) pair
         votes = {}  # (height, tip_hash) -> set of peer_ids
@@ -705,13 +723,13 @@ class Node:
                 votes[key] = set()
             votes[key].add(peer_id)
         
-        # Find the best (height, tip_hash) with quorum
+        # Find the best (height, tip_hash) with adaptive quorum
         best_key = None
         best_count = 0
         
         for key, peer_set in votes.items():
             count = len(peer_set)
-            if count >= self.CANONICAL_QUORUM_MIN:
+            if count >= adaptive_quorum:
                 # Has quorum - prefer higher height
                 if best_key is None or key[0] > best_key[0]:
                     best_key = key
@@ -719,9 +737,15 @@ class Node:
         
         if best_key:
             height, tip_hash = best_key
+            old_height = self._canonical_head_height
+            old_hash = self._canonical_head_hash
             self._canonical_head_height = height
             self._canonical_head_hash = tip_hash
             self._canonical_head_quorum_count = best_count
+            
+            # Log canonical head changes for debugging
+            if old_height != height or old_hash != tip_hash:
+                print(f"📊 CANONICAL HEAD CHANGED: height {old_height}→{height}, quorum={best_count}/{reachable_count} (adaptive={adaptive_quorum})")
     
     async def _fork_choice_controller(self, conflict_height: int, competing_chain: list, peer_id: str) -> tuple:
         """
@@ -729,6 +753,9 @@ class Node:
         
         This is the SINGLE PLACE where fork resolution decisions are made.
         All code paths that detect forks MUST call this method.
+        
+        Includes ONE-SHOT PER HEIGHT guard to prevent repeated reorg attempts
+        at the same (height, tip_hash) within a backoff window.
         
         Args:
             conflict_height: Height where conflict was detected
@@ -738,6 +765,8 @@ class Node:
         Returns:
             (should_reorg, reason) tuple
         """
+        import time
+        
         # F4: Prevent concurrent fork resolution
         if self._fork_resolution_in_progress:
             return (False, "Fork resolution already in progress")
@@ -753,6 +782,20 @@ class Node:
         if not competing_chain:
             return (False, "Empty competing chain")
         
+        # ONE-SHOT PER HEIGHT GUARD: Prevent repeated reorg attempts at same (height, tip_hash)
+        # This prevents infinite loops when the same conflicting block keeps arriving
+        peer_tip_hash = competing_chain[-1].block_hash if competing_chain else None
+        ctx = self._reorg_failure_context
+        current_time = time.time()
+        
+        if (ctx["height"] == conflict_height and 
+            ctx["peer_tip_hash"] == peer_tip_hash and
+            current_time - ctx["last_attempt_time"] < self.REORG_BACKOFF_SECONDS):
+            time_remaining = self.REORG_BACKOFF_SECONDS - (current_time - ctx["last_attempt_time"])
+            print(f"🚫 REORG SUPPRESSED: Repeated conflict at height {conflict_height} with same tip")
+            print(f"   Backoff: {time_remaining:.1f}s remaining before retry allowed")
+            return (False, f"Repeated reorg attempt suppressed (backoff {time_remaining:.1f}s)")
+        
         valid, reason = self.ledger.fork_choice.validate_chain_continuity(competing_chain)
         if not valid:
             print(f"🚫 FORK REJECTED: Chain continuity validation failed: {reason}")
@@ -765,6 +808,11 @@ class Node:
         if not allowed:
             print(f"🚫 FORK REJECTED: {reason}")
             return (False, reason)
+        
+        # Update reorg context with this attempt (for one-shot tracking)
+        ctx["height"] = conflict_height
+        ctx["peer_tip_hash"] = peer_tip_hash
+        ctx["last_attempt_time"] = current_time
         
         # All checks passed - proceed with reorg
         print(f"✅ FORK ACCEPTED: Conflict at height {conflict_height}, competing chain is better")
@@ -1398,6 +1446,7 @@ class Node:
         This enables proactive catch-up when node falls behind.
         
         HARD INVARIANT I1: Also updates canonical head tracking.
+        HARD INVARIANT F5: Registers peer tips for quorum-based canonical head.
         Network is the source of truth, local disk is cache.
         
         Supports both ws:// and wss:// seed nodes.
@@ -1418,6 +1467,11 @@ class Node:
                             data = await resp.json()
                             peer_height = data.get('height', 0)
                             peer_tip_hash = data.get('tip_hash', data.get('latest_block_hash'))
+                            
+                            # F5: Register this peer's tip for quorum tracking
+                            # Use peer_url as peer_id since we don't have a better ID at HTTP layer
+                            if peer_height > 0:
+                                self._register_peer_tip(peer_url, peer_height, peer_tip_hash)
                             
                             if peer_height > max_height:
                                 max_height = peer_height
