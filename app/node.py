@@ -425,6 +425,22 @@ class Node:
             # Normal path: process next sequential block
             if latest and block.height == latest.height + 1:
                 if block.previous_hash != latest.block_hash:
+                    # P2P FORK DETECTION: Block has different parent than our tip
+                    # This indicates a chain fork - trigger sync to resolve via fork choice
+                    print(f"\n🔀 P2P FORK DETECTED at height {block.height}!")
+                    print(f"   Local tip hash:  {latest.block_hash[:16]}...")
+                    print(f"   Block prev_hash: {block.previous_hash[:16]}...")
+                    print(f"   Block proposer:  {block.proposer[:20] if hasattr(block, 'proposer') else 'unknown'}...")
+                    print(f"   From peer:       {peer_id[:8]}...")
+                    
+                    # Only trigger sync if not already syncing (prevent infinite loops)
+                    if self.sync_phase != "SYNCING":
+                        print(f"   Triggering HTTP sync to resolve fork via fork choice...")
+                        # Use HTTP-based sync which has full fork resolution logic
+                        # _sync_missing_blocks will detect the fork and call reorganize_to_chain
+                        asyncio.create_task(self._sync_missing_blocks(latest.height, block.height + 100))
+                    else:
+                        print(f"   Already in SYNCING phase - skipping duplicate sync trigger")
                     return
                 
                 if block.calculate_hash() != block.block_hash:
