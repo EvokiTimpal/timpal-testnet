@@ -848,14 +848,30 @@ class Node:
         )
         
         if at_canonical_head:
-            # We're caught up - transition to COOLING (then ACTIVE via mine_blocks)
-            print(f"✅ {source.upper()} COMPLETE at height {local_height}")
-            self.sync_phase = "COOLING"
-            self.synced = True
-            self.initial_sync_complete_height = local_height
-            self.cooling_complete_height = local_height + self.SYNC_COOLING_BLOCKS
-            print(f"🧊 COOLING PERIOD: Will become ACTIVE at height {self.cooling_complete_height}")
-            print(f"   Waiting for {self.SYNC_COOLING_BLOCKS} more blocks before proposing...")
+            # OPTION A FIX: Don't reset cooling target if already in COOLING with ≤1 block lag
+            # This prevents the cooling target from sliding forward on every tiny HTTP sync
+            # in low-peer, fast-block networks where the node is consistently 1 block behind.
+            already_cooling_with_small_lag = (
+                self.sync_phase == "COOLING" and
+                self.cooling_complete_height is not None and
+                self._canonical_head_height > 0 and
+                (self._canonical_head_height - local_height) <= 1
+            )
+            
+            if already_cooling_with_small_lag:
+                # Keep existing cooling target - don't slide it forward
+                print(f"🧊 COOLING MAINTAINED: Already cooling with ≤1 block lag "
+                      f"(local={local_height}, canonical={self._canonical_head_height}), "
+                      f"keeping target at {self.cooling_complete_height}")
+            else:
+                # Normal case: transition to COOLING with new target
+                print(f"✅ {source.upper()} COMPLETE at height {local_height}")
+                self.sync_phase = "COOLING"
+                self.synced = True
+                self.initial_sync_complete_height = local_height
+                self.cooling_complete_height = local_height + self.SYNC_COOLING_BLOCKS
+                print(f"🧊 COOLING PERIOD: Will become ACTIVE at height {self.cooling_complete_height}")
+                print(f"   Waiting for {self.SYNC_COOLING_BLOCKS} more blocks before proposing...")
         else:
             # Not yet caught up - stay in SYNCING
             print(f"🔄 {source.upper()} PARTIAL: at height {local_height}, canonical head is {self._canonical_head_height}")
