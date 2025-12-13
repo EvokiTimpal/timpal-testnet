@@ -417,10 +417,179 @@ class MainnetNode:
                     'error': str(e)
                 }, status=500)
         
+        async def get_blockchain_info(request):
+            """Get blockchain info for peer sync validation"""
+            try:
+                latest_block = self.node.ledger.get_latest_block()
+                
+                return web.json_response({
+                    'height': latest_block.height if latest_block else 0,
+                    'blocks': len(self.node.ledger.blocks)
+                })
+                
+            except Exception as e:
+                return web.json_response({
+                    'error': str(e)
+                }, status=500)
+        
+        # ============================================================
+        # CANONICAL SYNC ENDPOINTS (for node-to-node HTTP sync)
+        # These are the primary endpoints used for chain synchronization
+        # ============================================================
+        
+        async def get_chain_height(request):
+            """
+            CANONICAL SYNC ENDPOINT: Get current chain height.
+            Used by peers to determine if they need to sync.
+            
+            Returns:
+                JSON with height, tip_hash, and timestamp
+            """
+            try:
+                latest_block = self.node.ledger.get_latest_block()
+                
+                if not latest_block:
+                    return web.json_response({
+                        'height': 0,
+                        'tip_hash': None,
+                        'blocks': 0
+                    })
+                
+                return web.json_response({
+                    'height': latest_block.height,
+                    'tip_hash': latest_block.block_hash,
+                    'blocks': len(self.node.ledger.blocks)
+                })
+                
+            except Exception as e:
+                return web.json_response({
+                    'error': str(e)
+                }, status=500)
+        
+        async def get_chain_block(request):
+            """
+            CANONICAL SYNC ENDPOINT: Get a single block by height.
+            Used by peers to fetch individual blocks during sync.
+            
+            Args:
+                height: Block height (path parameter)
+            
+            Returns:
+                JSON block data, or 404 if height > tip
+            """
+            try:
+                height = int(request.match_info['height'])
+                
+                latest_block = self.node.ledger.get_latest_block()
+                if not latest_block or height > latest_block.height:
+                    return web.json_response({
+                        'error': f'Block {height} not found (tip is {latest_block.height if latest_block else 0})'
+                    }, status=404)
+                
+                if height < 0:
+                    return web.json_response({
+                        'error': 'Invalid height (must be >= 0)'
+                    }, status=400)
+                
+                block = self.node.ledger.get_block_by_height(height)
+                if not block:
+                    return web.json_response({
+                        'error': f'Block {height} not found'
+                    }, status=404)
+                
+                return web.json_response({
+                    'block': block.to_dict(),
+                    'height': height
+                })
+                
+            except ValueError:
+                return web.json_response({
+                    'error': 'Invalid height format'
+                }, status=400)
+            except Exception as e:
+                return web.json_response({
+                    'error': str(e)
+                }, status=500)
+        
+        async def get_chain_blocks(request):
+            """
+            CANONICAL SYNC ENDPOINT: Get multiple blocks by range.
+            Used by peers to batch-fetch blocks during sync.
+            
+            Args:
+                from: Start height (query parameter, default 0)
+                to: End height (query parameter, default = from)
+            
+            Returns:
+                JSON with blocks array, max 100 blocks per request
+            """
+            try:
+                start = int(request.query.get('from', 0))
+                end = int(request.query.get('to', start))
+                
+                # Validate range
+                if start < 0:
+                    return web.json_response({
+                        'error': 'Invalid start height (must be >= 0)'
+                    }, status=400)
+                
+                if end < start:
+                    return web.json_response({
+                        'error': 'Invalid range (to must be >= from)'
+                    }, status=400)
+                
+                # Limit to 100 blocks per request
+                if end - start > 100:
+                    return web.json_response({
+                        'error': 'Max 100 blocks per request'
+                    }, status=400)
+                
+                latest_block = self.node.ledger.get_latest_block()
+                if not latest_block:
+                    return web.json_response({
+                        'blocks': [],
+                        'latest_height': 0,
+                        'count': 0
+                    })
+                
+                # Clamp end to latest height
+                end = min(end, latest_block.height)
+                
+                blocks = []
+                for height in range(start, end + 1):
+                    block = self.node.ledger.get_block_by_height(height)
+                    if block:
+                        blocks.append(block.to_dict())
+                
+                return web.json_response({
+                    'blocks': blocks,
+                    'latest_height': latest_block.height,
+                    'count': len(blocks)
+                })
+                
+            except ValueError:
+                return web.json_response({
+                    'error': 'Invalid height format'
+                }, status=400)
+            except Exception as e:
+                return web.json_response({
+                    'error': str(e)
+                }, status=500)
+        
         app = web.Application()
         app.router.add_post('/send', send_transaction)  # User-friendly endpoint
         app.router.add_post('/submit_transaction', submit_transaction)  # Pre-signed transactions
+        
+        # Legacy sync endpoints (kept for backward compatibility)
         app.router.add_get('/api/blocks/range', get_blocks_range)
+        app.router.add_get('/api/blockchain/info', get_blockchain_info)
+        
+        # Canonical sync endpoints (primary endpoints for node-to-node sync)
+        app.router.add_get('/api/chain/height', get_chain_height)
+        app.router.add_get('/api/chain/block/{height}', get_chain_block)
+        app.router.add_get('/api/chain/blocks', get_chain_blocks)
+        
+        # Other endpoints
         app.router.add_get('/api/health', get_health)
         app.router.add_get('/api/account/{address}', get_account)
         

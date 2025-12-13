@@ -1542,6 +1542,7 @@ class Node:
         HARD INVARIANT F5: Registers peer tips for quorum-based canonical head.
         Network is the source of truth, local disk is cache.
         
+        Uses CANONICAL SYNC ENDPOINT: /api/chain/height
         Supports both ws:// and wss:// seed nodes.
         """
         peer_http_urls = self._get_http_urls_from_seeds()
@@ -1552,14 +1553,15 @@ class Node:
         for peer_url in peer_http_urls:
             try:
                 async with aiohttp.ClientSession() as session:
+                    # Use canonical sync endpoint /api/chain/height
                     async with session.get(
-                        f"{peer_url}/api/health",
+                        f"{peer_url}/api/chain/height",
                         timeout=aiohttp.ClientTimeout(total=5)
                     ) as resp:
                         if resp.status == 200:
                             data = await resp.json()
                             peer_height = data.get('height', 0)
-                            peer_tip_hash = data.get('tip_hash', data.get('latest_block_hash'))
+                            peer_tip_hash = data.get('tip_hash')
                             
                             # F5: Register this peer's tip for quorum tracking
                             # Use peer_url as peer_id since we don't have a better ID at HTTP layer
@@ -2414,6 +2416,10 @@ class Node:
         HTTP-based batch sync (Tendermint/Cosmos-inspired).
         Downloads blocks in batches via HTTP API instead of websockets.
         More reliable than websocket sync for initial catchup.
+        
+        Uses CANONICAL SYNC ENDPOINTS:
+        - /api/chain/height for peer height
+        - /api/chain/blocks?from=&to= for block batches
         """
         import aiohttp
         
@@ -2422,16 +2428,16 @@ class Node:
             print(f"🔍 HTTP Batch Sync [{i+1}/{len(peer_urls)}]: Trying {peer_url}")
             try:
                 async with aiohttp.ClientSession() as session:
-                    # Get peer's current height
-                    health_url = f"{peer_url}/api/health"
-                    print(f"🔍 HTTP Batch Sync: Fetching {health_url}")
-                    async with session.get(health_url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                        print(f"🔍 HTTP Batch Sync: Health check status={resp.status}")
+                    # Get peer's current height using canonical sync endpoint
+                    height_url = f"{peer_url}/api/chain/height"
+                    print(f"🔍 HTTP Batch Sync: Fetching {height_url}")
+                    async with session.get(height_url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                        print(f"🔍 HTTP Batch Sync: Height check status={resp.status}")
                         if resp.status != 200:
-                            print(f"⚠️  HTTP Batch Sync: Health check failed with status {resp.status}")
+                            print(f"⚠️  HTTP Batch Sync: Height check failed with status {resp.status}")
                             continue
-                        health = await resp.json()
-                        peer_height = health.get('height', 0)
+                        height_data = await resp.json()
+                        peer_height = height_data.get('height', 0)
                         print(f"🔍 HTTP Batch Sync: Peer reports height={peer_height}")
                         
                         my_height = self.ledger.get_block_count() - 1
@@ -2458,9 +2464,9 @@ class Node:
                                 # Non-genesis node: sync block 0 from network
                                 print(f"📥 NON-GENESIS: Syncing block 0 from network...")
                                 try:
-                                    # Use the correct API endpoint: /api/blocks/range
+                                    # Use canonical sync endpoint: /api/chain/blocks
                                     async with session.get(
-                                        f"{peer_url}/api/blocks/range?start=0&end=0",
+                                        f"{peer_url}/api/chain/blocks?from=0&to=0",
                                         timeout=aiohttp.ClientTimeout(total=10)
                                     ) as block_resp:
                                         if block_resp.status == 200:
@@ -2498,8 +2504,9 @@ class Node:
                             end = min(start + batch_size - 1, peer_height)
                             
                             try:
+                                # Use canonical sync endpoint: /api/chain/blocks
                                 async with session.get(
-                                    f"{peer_url}/api/blocks/range?start={start}&end={end}",
+                                    f"{peer_url}/api/chain/blocks?from={start}&to={end}",
                                     timeout=aiohttp.ClientTimeout(total=30)
                                 ) as blocks_resp:
                                     if blocks_resp.status != 200:
@@ -2566,6 +2573,8 @@ class Node:
         chain indices match block heights. This is required for _find_fork_point
         to work correctly in reorganize_to_chain.
         
+        Uses CANONICAL SYNC ENDPOINT: /api/chain/blocks
+        
         Args:
             peer_url: HTTP URL of the peer
             session: aiohttp ClientSession
@@ -2586,8 +2595,9 @@ class Node:
             while current_start <= end_height:
                 current_end = min(current_start + CHUNK_SIZE - 1, end_height)
                 
+                # Use canonical sync endpoint: /api/chain/blocks
                 async with session.get(
-                    f"{peer_url}/api/blocks/range?start={current_start}&end={current_end}",
+                    f"{peer_url}/api/chain/blocks?from={current_start}&to={current_end}",
                     timeout=aiohttp.ClientTimeout(total=10)
                 ) as resp:
                     if resp.status != 200:
@@ -2700,9 +2710,10 @@ class Node:
                 async with aiohttp.ClientSession() as session:
                     # STEP 1: Query peer's actual blockchain height BEFORE requesting blocks
                     # This prevents "expected X, got Y" errors from requesting non-existent blocks
+                    # Uses CANONICAL SYNC ENDPOINT: /api/chain/height
                     try:
                         async with session.get(
-                            f"{peer_url}/api/blockchain/info",
+                            f"{peer_url}/api/chain/height",
                             timeout=aiohttp.ClientTimeout(total=5)
                         ) as resp:
                             if resp.status == 200:
@@ -2742,8 +2753,9 @@ class Node:
                         
                         print(f"   📦 Chunk {chunks_synced + 1}: Fetching blocks {current_sync_height}-{chunk_end}")
                         
+                        # Use canonical sync endpoint: /api/chain/blocks
                         async with session.get(
-                            f"{peer_url}/api/blocks/range?start={current_sync_height}&end={chunk_end}",
+                            f"{peer_url}/api/chain/blocks?from={current_sync_height}&to={chunk_end}",
                             timeout=aiohttp.ClientTimeout(total=15)
                         ) as resp:
                             if resp.status != 200:
