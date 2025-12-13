@@ -107,6 +107,11 @@ class AttestationManager:
         Uses epoch-seeded hash ranking to select exactly committee_size validators.
         All nodes will select the same committee independently with uniform probability.
         
+        COMMITTEE CACHING FIX: When committee == full validator set (small networks),
+        bypass the epoch cache entirely. This ensures new validators joining mid-epoch
+        are immediately eligible to propose, preventing "proposer monopoly" bugs where
+        a stale single-validator committee excludes newly joined validators.
+        
         Args:
             epoch_number: Epoch to select committee for
             all_validators: Set of all registered validators
@@ -114,15 +119,23 @@ class AttestationManager:
         Returns:
             Set of validator addresses selected for committee (exactly committee_size members)
         """
-        # Check cache first
-        if epoch_number in self.epoch_committees:
-            return self.epoch_committees[epoch_number]
-        
-        # If fewer validators than committee size, all validators are in committee
+        # COMMITTEE CACHING FIX: When committee == full validator set, bypass cache
+        # This ensures new validators joining mid-epoch are immediately eligible
+        # Caching provides no benefit when committee = full set, but creates correctness risk
         if len(all_validators) <= self.committee_size:
             committee = set(all_validators)
-            self.epoch_committees[epoch_number] = committee
-            return committee
+            # TEMPORARY DEBUG LOG - REMOVE AFTER INVESTIGATION
+            print(f"[COMMITTEE FULL SET] epoch={epoch_number}, size={len(committee)}, "
+                  f"validators={[v[:12]+'...' for v in sorted(all_validators)]} (no caching)")
+            return committee  # No caching for small sets - always use current validators
+        
+        # Check cache first (only for large validator sets where committee < full set)
+        if epoch_number in self.epoch_committees:
+            cached_committee = self.epoch_committees[epoch_number]
+            # TEMPORARY DEBUG LOG - REMOVE AFTER INVESTIGATION
+            print(f"[COMMITTEE CACHE HIT] epoch={epoch_number}, cached_size={len(cached_committee)}, "
+                  f"input_validators={len(all_validators)}")
+            return cached_committee
         
         # UNIFORM SAMPLING: Hash each validator with epoch seed, sort by hash, take top N
         # This guarantees exactly committee_size members with uniform probability

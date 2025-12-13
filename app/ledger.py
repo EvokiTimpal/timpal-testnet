@@ -2606,6 +2606,12 @@ class Ledger:
         if not committee:
             return []
         
+        # TEMPORARY DEBUG LOG - REMOVE AFTER INVESTIGATION
+        print(f"[PROPOSER_SELECTION] slot={slot}, height={current_height}, epoch={current_epoch}, "
+              f"epoch_seed={epoch_seed[:16]}..., "
+              f"validators_for_selection={len(validators_for_selection)}, "
+              f"committee={len(committee)}")
+        
         # Get ordered proposer queue using VRF (deterministic permutation)
         proposer_queue = self.vrf_manager.get_ordered_proposer_queue(
             block_height=slot,  # Pass SLOT, not height
@@ -2614,6 +2620,10 @@ class Ledger:
             committee=committee,
             get_public_key_func=self.get_validator_public_key
         )
+        
+        # TEMPORARY DEBUG LOG - REMOVE AFTER INVESTIGATION
+        if proposer_queue:
+            print(f"[VRF_QUEUE] slot={slot}, queue={[p[:12]+'...' for p in proposer_queue]}")
         
         if not proposer_queue:
             return []
