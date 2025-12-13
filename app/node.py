@@ -848,6 +848,15 @@ class Node:
         )
         
         if at_canonical_head:
+            # MICRO-SYNC FIX: Don't demote ACTIVE nodes back to COOLING during micro-sync
+            # When an ACTIVE node does a micro-sync (≤1 block lag), it should stay ACTIVE.
+            # This prevents the "ACTIVE → micro-sync → COOLING → never propose" deadlock.
+            already_active_with_small_lag = (
+                self.sync_phase == "ACTIVE" and
+                self._canonical_head_height > 0 and
+                (self._canonical_head_height - local_height) <= 1
+            )
+            
             # OPTION A FIX: Don't reset cooling target if already in COOLING with ≤1 block lag
             # This prevents the cooling target from sliding forward on every tiny HTTP sync
             # in low-peer, fast-block networks where the node is consistently 1 block behind.
@@ -858,7 +867,12 @@ class Node:
                 (self._canonical_head_height - local_height) <= 1
             )
             
-            if already_cooling_with_small_lag:
+            if already_active_with_small_lag:
+                # MICRO-SYNC from ACTIVE: Stay ACTIVE, don't demote to COOLING
+                print(f"✅ MICRO-SYNC COMPLETE: Staying ACTIVE with ≤1 block lag "
+                      f"(local={local_height}, canonical={self._canonical_head_height})")
+                # Do not change phase or cooling target - node remains ACTIVE
+            elif already_cooling_with_small_lag:
                 # Keep existing cooling target - don't slide it forward
                 print(f"🧊 COOLING MAINTAINED: Already cooling with ≤1 block lag "
                       f"(local={local_height}, canonical={self._canonical_head_height}), "
@@ -1810,20 +1824,50 @@ class Node:
             # FIX: ALWAYS demote from ACTIVE to SYNCING before any sync operation.
             # The node can only return to ACTIVE through the proper transition path:
             # SYNCING -> COOLING -> ACTIVE
+            #
+            # MICRO-SYNC FIX (Dec 2025): CONSENSUS READINESS DEADLOCK PREVENTION
+            #
+            # PREVIOUS BUG: A node consistently 1 block behind would be stuck in an
+            # infinite loop: COOLING → HTTP sync → COOLING maintained → repeat forever.
+            # The `continue` after sync prevented the COOLING → ACTIVE transition from
+            # ever firing, so the validator could NEVER propose blocks.
+            #
+            # FIX: For ≤1 block lag (normal operation in 2-node networks), do a "micro-sync"
+            # that syncs the missing block but does NOT demote and does NOT `continue`.
+            # This allows the loop to proceed to the COOLING → ACTIVE transition check.
             if max_peer_height > local_height:
-                # CRITICAL: Demote from ACTIVE before sync to prevent block production
-                if self.sync_phase == "ACTIVE":
-                    print(f"🔄 STATE TRANSITION: ACTIVE → SYNCING (peers ahead: local={local_height}, peer={max_peer_height})")
-                    self.sync_phase = "SYNCING"
-                    self.synced = False
-                    self.initial_sync_complete_height = None
-                    self.cooling_complete_height = None
-                print(f"🔄 CATCH-UP MODE: Local height {local_height}, max peer height {max_peer_height}")
-                print(f"   Syncing missing blocks {local_height + 1} to {max_peer_height}...")
-                print(f"   Current phase: {self.sync_phase} (block production DISABLED)")
-                await self._sync_missing_blocks(local_height + 1, max_peer_height)
-                # After catch-up, skip this mining cycle to refresh state
-                continue
+                lag = max_peer_height - local_height
+                
+                # MICRO-SYNC: ≤1-block lag should NOT break consensus readiness
+                # A 1-block lag is NORMAL operation in a 2-node network and should NOT
+                # prevent the node from becoming ACTIVE or staying ACTIVE.
+                if lag <= 1 and self.sync_phase in ("COOLING", "ACTIVE"):
+                    print(f"🔄 MICRO-SYNC: phase={self.sync_phase}, local={local_height}, peer={max_peer_height} "
+                          f"(≤1-block lag, keeping phase unchanged)")
+                    await self._sync_missing_blocks(local_height + 1, max_peer_height)
+                    # Update local_height for the remainder of this loop iteration
+                    # After sync, we expect to be at least at the old peer height
+                    local_height = len(self.ledger.blocks) - 1
+                    print(f"🔄 MICRO-SYNC COMPLETE: Now at height {local_height}, proceeding with loop")
+                    # IMPORTANT: do NOT demote, and do NOT `continue` here.
+                    # Let the loop fall through to:
+                    #  - COOLING → ACTIVE check (if we're in COOLING)
+                    #  - consensus_ready gate and proposer logic (if ACTIVE)
+                else:
+                    # Full catch-up for real lag (>=2 blocks) or other phases (SYNCING)
+                    # CRITICAL: Demote from ACTIVE before sync to prevent block production
+                    if self.sync_phase == "ACTIVE":
+                        print(f"🔄 STATE TRANSITION: ACTIVE → SYNCING (peers ahead: local={local_height}, peer={max_peer_height})")
+                        self.sync_phase = "SYNCING"
+                        self.synced = False
+                        self.initial_sync_complete_height = None
+                        self.cooling_complete_height = None
+                    print(f"🔄 CATCH-UP MODE: Local height {local_height}, max peer height {max_peer_height}")
+                    print(f"   Syncing missing blocks {local_height + 1} to {max_peer_height}...")
+                    print(f"   Current phase: {self.sync_phase} (block production DISABLED)")
+                    await self._sync_missing_blocks(local_height + 1, max_peer_height)
+                    # After catch-up, skip this mining cycle to refresh state
+                    continue
             
             # Handle no peers case for non-bootstrap nodes
             if self.sync_phase == "SYNCING" and not is_bootstrap:
