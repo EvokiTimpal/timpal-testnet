@@ -2979,14 +2979,43 @@ class Node:
                 traceback.print_exc()
                 continue
         
-        # If we got here, ALL peers failed to provide valid blocks
+        # If we got here, we didn't reach the full target - but check if we made progress
+        # PARTIAL PROGRESS FIX (Dec 2025): Treat partial sync as success for state machine
+        # 
+        # PREVIOUS BUG: If we asked for blocks 77→178 but peers only had up to 78, we'd
+        # fall through to "SYNC FAILED - All peers exhausted" even though we successfully
+        # synced to the peer's actual tip. This left the node stuck in SYNCING/COOLING
+        # forever because _on_successful_sync_or_reorg() was never called.
+        #
+        # FIX: If we advanced at least one block, treat it as a successful sync to the
+        # peer's actual tip. The next mining loop iteration will re-query peer heights
+        # and sync any new blocks that appear.
+        
+        current_chain_height = len(self.ledger.blocks) - 1
+        made_progress = current_sync_height > start_height
+        
+        if made_progress:
+            # We advanced the chain - this is a successful partial sync
+            print(f"\n{'='*60}")
+            print(f"✅ SYNC PARTIAL SUCCESS")
+            print(f"{'='*60}")
+            print(f"📊 Synced blocks {start_height} → {current_sync_height - 1}")
+            print(f"   (Target was {end_height}, but peers only had up to {current_sync_height - 1})")
+            print(f"🔒 Final Chain Height: {current_chain_height}")
+            print(f"   Will re-query peers for new blocks in next mining loop iteration")
+            # CRITICAL: Call _on_successful_sync_or_reorg to transition state machine
+            # This ensures SYNCING → COOLING → ACTIVE transitions happen properly
+            self._on_successful_sync_or_reorg(source="sync")
+            return
+        
+        # Truly no progress - all peers failed to provide any valid blocks
         print(f"\n{'='*60}")
-        print(f"❌ SYNC FAILED - All peers exhausted")
+        print(f"❌ SYNC FAILED - All peers exhausted (no progress)")
         print(f"{'='*60}")
         print(f"📊 Sync Status:")
         print(f"   Requested: {start_height} → {end_height}")
-        print(f"   Achieved:  {start_height} → {current_sync_height - 1}")
-        print(f"   Gap:       {end_height - current_sync_height + 1} blocks remaining")
+        print(f"   Achieved:  No blocks added")
+        print(f"   Current height: {current_chain_height}")
         print(f"")
         print(f"🔍 Possible causes:")
         print(f"   1. Network partition (all peers unreachable)")
@@ -3002,6 +3031,7 @@ class Node:
         print(f"")
         
         # Do NOT auto-delete - too dangerous (could be temporary network issue)
+        # Do NOT change phase here - let mine_blocks re-query peers and retry
     
     async def bootstrap_or_sync(self):
         """
