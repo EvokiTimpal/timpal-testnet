@@ -1713,13 +1713,16 @@ class Ledger:
         A validator is ELIGIBLE iff:
         - REGISTERED: exists in validator_registry
         - STAKED: passes validator_economics deposit check (if applicable)
-        - ONLINE: has produced a valid liveness proof within T_online
+        - ONLINE: has produced a valid liveness proof within T_ONLINE_BLOCKS
         
         NOTE: SYNCED and HEALTHY are NODE-level states checked in node.py,
         not validator-level states checked here.
         
         CRITICAL: ACTIVE status is NOT a valid eligibility criterion.
         We check REGISTERED (in registry) + STAKED (deposit) + ONLINE (liveness proof).
+        
+        IMMUTABLE: Parameters are fixed constants safe for permanent mainnet deployment.
+        No dynamic windows, no phase-based logic, no configurable values.
         
         Args:
             height: Current blockchain height for eligibility computation
@@ -1729,10 +1732,10 @@ class Ledger:
         """
         eligible = set()
         
-        # T_online from TIMPAL_INVARIANTS.md Section 9: 10 seconds
-        # At 3-second block time, this is approximately 3-4 blocks
-        # We use a slightly larger window to account for network delays
-        T_ONLINE_BLOCKS = 4  # ~12 seconds, slightly more than T_online=10s
+        # IMMUTABLE CONSTANT: Liveness lookback window in blocks
+        # At 3-second block time, 30 blocks = 90 seconds
+        # This value is fixed and must NOT be changed or made configurable
+        T_ONLINE_BLOCKS = 30
         
         # Get validators with recent liveness proofs (ONLINE check)
         # Liveness proof = proposed a block OR submitted an attestation
@@ -1742,58 +1745,43 @@ class Ledger:
         # Union of liveness proofs
         validators_with_liveness = recent_proposers | set(validators_with_attestations)
         
-        # For each validator in registry, check eligibility criteria
+        # Count total registered+staked validators for quorum calculation
+        total_validators = 0
+        registered_staked_validators = []
+        
         for addr, data in sorted(self.validator_registry.items()):
-            # Skip genesis placeholder
             if addr == "genesis":
                 continue
             
-            # REGISTERED: Must be in registry (implicit by iterating registry)
-            # We do NOT check status == 'active' - that's the old ACTIVE-based logic
-            # Instead, we check if the validator is properly registered
+            # Check REGISTERED
             if not isinstance(data, dict):
-                # Legacy format - treat as registered
                 is_registered = True
             else:
-                # New format - must have a valid registration (any status except explicitly removed)
                 is_registered = data.get('status') is not None
             
             if not is_registered:
                 continue
             
-            # STAKED: Must pass validator_economics deposit check
+            # Check STAKED
             if not self.validator_economics.is_validator_active(addr, height):
                 continue
             
-            # ONLINE: Must have liveness proof within T_online
-            # During bootstrap (first 10 blocks), all registered+staked validators are eligible
-            if height <= 10:
+            # This validator is registered + staked
+            total_validators += 1
+            registered_staked_validators.append(addr)
+            
+            # Check ONLINE: Must have liveness proof within T_ONLINE_BLOCKS
+            if addr in validators_with_liveness:
                 eligible.add(addr)
-            elif addr in validators_with_liveness:
-                eligible.add(addr)
-            # Grace period for newly activated validators
-            elif isinstance(data, dict):
-                activation_height = data.get('activation_height', 0)
-                # Dynamic grace window based on validator count
-                active_count = len([v for v, d in self.validator_registry.items() 
-                                   if v != "genesis" and isinstance(d, dict) and d.get('status')])
-                grace_window = max(100, 2 * active_count)
-                if activation_height > 0 and height - activation_height < grace_window:
-                    eligible.add(addr)
         
-        # CRITICAL FIX: For small validator sets, include all registered+staked validators
-        # This prevents chain stalls when liveness filtering is too aggressive
-        MIN_VALIDATORS_FOR_FULL_SET = 4
-        if len(eligible) < MIN_VALIDATORS_FOR_FULL_SET:
-            for addr, data in sorted(self.validator_registry.items()):
-                if addr == "genesis":
-                    continue
-                if not isinstance(data, dict):
-                    if self.validator_economics.is_validator_active(addr, height):
-                        eligible.add(addr)
-                elif data.get('status') is not None:
-                    if self.validator_economics.is_validator_active(addr, height):
-                        eligible.add(addr)
+        # IMMUTABLE FALLBACK: Quorum-based threshold
+        # quorum = max(2, floor(total_validators / 3))
+        # If eligible < quorum, include all registered+staked validators
+        # This prevents chain stalls while maintaining decentralization
+        quorum = max(2, total_validators // 3)
+        if len(eligible) < quorum:
+            for addr in registered_staked_validators:
+                eligible.add(addr)
         
         return eligible
     
