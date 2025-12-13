@@ -1705,173 +1705,103 @@ class Ledger:
         
         return recently_active
     
+    def get_eligible_validators(self, height: int) -> Set[str]:
+        """
+        AUTHORITATIVE ELIGIBILITY COMPUTATION (TIMPAL_INVARIANTS.md Section 3)
+        
+        This is the SINGLE SOURCE OF TRUTH for validator eligibility.
+        A validator is ELIGIBLE iff:
+        - REGISTERED: exists in validator_registry
+        - STAKED: passes validator_economics deposit check (if applicable)
+        - ONLINE: has produced a valid liveness proof within T_ONLINE_BLOCKS
+        
+        NOTE: SYNCED and HEALTHY are NODE-level states checked in node.py,
+        not validator-level states checked here.
+        
+        CRITICAL: ACTIVE status is NOT a valid eligibility criterion.
+        We check REGISTERED (in registry) + STAKED (deposit) + ONLINE (liveness proof).
+        
+        IMMUTABLE: Parameters are fixed constants safe for permanent mainnet deployment.
+        No dynamic windows, no phase-based logic, no configurable values.
+        
+        Args:
+            height: Current blockchain height for eligibility computation
+            
+        Returns:
+            Set of validator addresses that are ELIGIBLE for proposer selection
+        """
+        eligible = set()
+        
+        # IMMUTABLE CONSTANT: Liveness lookback window in blocks
+        # At 3-second block time, 30 blocks = 90 seconds
+        # This value is fixed and must NOT be changed or made configurable
+        T_ONLINE_BLOCKS = 30
+        
+        # Get validators with recent liveness proofs (ONLINE check)
+        # Liveness proof = proposed a block OR submitted an attestation
+        recent_proposers = self._get_recently_active_validators(height, lookback_blocks=T_ONLINE_BLOCKS)
+        validators_with_attestations = self.get_validators_with_recent_attestations(lookback_blocks=100)
+        
+        # Union of liveness proofs
+        validators_with_liveness = recent_proposers | set(validators_with_attestations)
+        
+        # Count total registered+staked validators for quorum calculation
+        total_validators = 0
+        registered_staked_validators = []
+        
+        for addr, data in sorted(self.validator_registry.items()):
+            if addr == "genesis":
+                continue
+            
+            # Check REGISTERED
+            if not isinstance(data, dict):
+                is_registered = True
+            else:
+                is_registered = data.get('status') is not None
+            
+            if not is_registered:
+                continue
+            
+            # Check STAKED
+            if not self.validator_economics.is_validator_active(addr, height):
+                continue
+            
+            # This validator is registered + staked
+            total_validators += 1
+            registered_staked_validators.append(addr)
+            
+            # Check ONLINE: Must have liveness proof within T_ONLINE_BLOCKS
+            if addr in validators_with_liveness:
+                eligible.add(addr)
+        
+        # IMMUTABLE FALLBACK: Quorum-based threshold
+        # quorum = max(2, floor(total_validators / 3))
+        # If eligible < quorum, include all registered+staked validators
+        # This prevents chain stalls while maintaining decentralization
+        quorum = max(2, total_validators // 3)
+        if len(eligible) < quorum:
+            for addr in registered_staked_validators:
+                eligible.add(addr)
+        
+        return eligible
+    
     def _get_liveness_filtered_validators(self, current_height: int) -> Set[str]:
         """
-        Three-stage liveness filter that unions recent proposers, newly activated validators,
-        and validators with recent attestations to enable proper rotation while maintaining liveness.
+        DEPRECATED: This function now delegates to get_eligible_validators().
         
-        FIXES CHICKEN-AND-EGG PROBLEM: Newly activated validators can enter rotation
-        even before proposing their first block via dynamic grace period.
-        
-        DETERMINISTIC: All nodes compute the same result from the same blockchain state.
-        MAINNET PARITY: Scales from 2 validators (testnet) to 100K+ (mainnet).
-        
-        CRITICAL FIX (Dec 2025): For small validator sets (≤ MIN_VALIDATORS_FOR_FULL_SET),
-        ALWAYS include ALL active validators. This prevents the eligible set from collapsing
-        to 1 validator, which causes chain stalls when that validator stops producing.
-        
-        Stages:
-        1. Recent proposers (validators who proposed blocks recently)
-        2. Recently activated (dynamic grace window based on validator count)
-        3. Validators with recent epoch attestations (proves liveness without proposing)
-        
-        DYNAMIC GRACE WINDOW: max(MIN_BLOCKS, 2 × active_validator_count)
-        - 2 validators: max(100, 4) = 100 blocks (~5 min)
-        - 100 validators: max(100, 200) = 200 blocks (~10 min)
-        - 100,000 validators: max(100, 200,000) = 200,000 blocks (~7 days)
-        
-        This ensures every validator gets at least 2 full proposer-priority rotations
-        before being considered offline.
+        Per TIMPAL_INVARIANTS.md Section 7 (No Dual Truths), there must be exactly
+        ONE authoritative eligibility computation. This function is kept for backward
+        compatibility but now delegates to the authoritative get_eligible_validators().
         
         Args:
             current_height: Current blockchain height
         
         Returns:
-            Set of validator addresses that pass liveness filter
+            Set of validator addresses that are ELIGIBLE for proposer selection
         """
-        liveness_validators = set()
-        
-        # Count active validators for dynamic grace window calculation
-        # CRITICAL: Count from REGISTRY (deterministic), not from any filtered set
-        active_validator_count = 0
-        all_active_validators = set()  # Track all active validators for small-set bypass
-        registered_validators = []
-        for validator_addr, validator in sorted(self.validator_registry.items()):
-            if validator_addr == "genesis":
-                continue
-            if isinstance(validator, dict) and validator.get('status') in ('active', 'genesis'):
-                active_validator_count += 1
-                all_active_validators.add(validator_addr)
-                registered_validators.append(validator_addr[:20] + '...')
-        
-        # ============================================================
-        # CRITICAL FIX: MINIMUM VALIDATOR COUNT SAFEGUARD
-        # ============================================================
-        # For small validator sets, ALWAYS include ALL active validators.
-        # This prevents the eligible set from collapsing to 1 validator,
-        # which causes chain stalls when that validator stops producing.
-        #
-        # INDUSTRY STANDARD: Other L1 blockchains (Ethereum, Cardano, etc.)
-        # use on-chain registry for proposer eligibility, not short-term
-        # liveness heuristics. Liveness signals affect rewards/slashing,
-        # not who can propose.
-        #
-        # With N=2 validators, aggressive liveness filtering is dangerous:
-        # one misclassification and you're down to one or zero proposers.
-        # ============================================================
-        MIN_VALIDATORS_FOR_FULL_SET = 4  # Below this, always use full set
-        
-        if active_validator_count <= MIN_VALIDATORS_FOR_FULL_SET:
-            # Small validator set: bypass liveness filtering entirely
-            # All active validators are always eligible to propose
-            if len(self.blocks) > 10 and current_height % 10 == 0:  # Only log after bootstrap, every 10 blocks
-                print(f"[LIVENESS_DEBUG] height={current_height} active_count={active_validator_count} "
-                      f"all_active={[v[:16]+'...' for v in sorted(all_active_validators)]}")
-            return all_active_validators
-        
-        # ============================================================
-        # LARGE VALIDATOR SET: Apply normal liveness filtering
-        # ============================================================
-        
-        # STAGE 1: Validators who proposed blocks recently (highest confidence of liveness)
-        # Lookback scales with validator count: more validators = longer lookback
-        proposer_lookback = max(30, active_validator_count)
-        recent_proposers = self._get_recently_active_validators(current_height, lookback_blocks=proposer_lookback)
-        liveness_validators.update(recent_proposers)
-        
-        # DEBUG: Log what Stage 1 found (helps diagnose consensus issues)
-        if len(self.blocks) > 10:  # Only log after bootstrap
-            print(f"   Registered validators: {active_validator_count}, Online validators (P2P): {len(recent_proposers)}")
-        
-        # STAGE 2: Recently activated validators (dynamic grace period)
-        # DYNAMIC GRACE WINDOW: Scales with validator count
-        # Formula: max(MIN_BLOCKS, 2 × active_validator_count)
-        # This ensures every new validator gets at least 2 full priority rotations
-        # to be selected by VRF before being considered offline
-        MIN_GRACE_BLOCKS = 100  # Minimum 5 minutes at 3s block time
-        ROTATION_MULTIPLIER = 2  # Allow 2 full rotations through all validators
-        activation_grace_window = max(MIN_GRACE_BLOCKS, ROTATION_MULTIPLIER * active_validator_count)
-        
-        # CRITICAL FIX: Sort validator registry items by address for deterministic iteration
-        # Dict.items() order is NOT guaranteed across different Python processes!
-        for validator_addr, validator in sorted(self.validator_registry.items()):
-            # CRITICAL FIX: Exclude genesis block proposer "genesis" - it's not a real validator
-            if validator_addr == "genesis":
-                continue
-                
-            if not isinstance(validator, dict):
-                # Old-format registry, consider as active for backward compatibility
-                liveness_validators.add(validator_addr)
-                continue
-            
-            status = validator.get('status')
-            if status not in ('active', 'genesis'):
-                continue
-            
-            activation_height = validator.get('activation_height', 0)
-            
-            # Include validators within dynamic grace window:
-            # - Normal activations within window
-            # - Genesis (activation_height == 0) while still early enough in chain
-            if (activation_height > 0 and current_height - activation_height < activation_grace_window) or \
-               (activation_height == 0 and current_height < activation_grace_window):
-                liveness_validators.add(validator_addr)
-        
-        # STAGE 3: Validators with recent epoch attestations (proves liveness without proposing)
-        # This allows validators who haven't proposed yet to stay in rotation by attesting
-        # Particularly important for large validator sets where proposer slots are rare
-        try:
-            if hasattr(self, 'attestation_manager') and self.attestation_manager:
-                current_epoch = current_height // config.EPOCH_LENGTH
-                # Check last 2 epochs for attestations
-                for epoch in range(max(0, current_epoch - 1), current_epoch + 1):
-                    attestations = self.attestation_manager.get_attestations_for_epoch(epoch)
-                    for validator_addr in attestations.keys():
-                        if validator_addr in self.validator_registry:
-                            validator = self.validator_registry[validator_addr]
-                            if isinstance(validator, dict) and validator.get('status') in ('active', 'genesis'):
-                                liveness_validators.add(validator_addr)
-        except Exception as e:
-            # Attestation check is optional - don't fail if it errors
-            pass
-        
-        # CONSENSUS-CRITICAL FIX: Removed P2P callback from proposer selection
-        # 
-        # PREVIOUS BUG: If stages 1-3 yielded empty set, we called _online_validators_callback
-        # which returns P2P-connected validators. This is NON-DETERMINISTIC because different
-        # nodes have different P2P connections → different proposer queues → FORKS.
-        #
-        # This function is used by get_ranked_proposers_for_slot() for PROPOSER SELECTION,
-        # so any non-determinism here directly causes consensus forks.
-        #
-        # FIX: If stages 1-3 yield empty set, fall back to ALL active validators from registry.
-        # This is deterministic because all nodes have the same validator_registry state.
-        #
-        # NOTE: P2P callback is still available for non-consensus uses (explorer UI, debug)
-        # but MUST NOT be used for proposer selection or rewards.
-        
-        if not liveness_validators:
-            # Deterministic fallback: all active validators from registry
-            # This prevents network stall during genesis or testing scenarios
-            for validator_addr, validator in sorted(self.validator_registry.items()):
-                if validator_addr == "genesis":
-                    continue
-                if isinstance(validator, dict) and validator.get('status') in ('active', 'genesis'):
-                    # Also check economics system for consistency
-                    if self.validator_economics.is_validator_active(validator_addr, current_height):
-                        liveness_validators.add(validator_addr)
-        
-        return liveness_validators
+        # TIMPAL_INVARIANTS.md Section 3: ELIGIBLE_SET(h) is the single source of truth
+        # Delegate to the authoritative eligibility function
+        return self.get_eligible_validators(current_height)
     
     def get_validators_with_recent_heartbeats(self, lookback_blocks: int = 5) -> Set[str]:
         """
@@ -1965,147 +1895,56 @@ class Ledger:
 
     def get_active_validators(self) -> list:
         """
-        Get validators who are:
-        1) Registered & 'active' (or 'genesis' during bootstrap),
-        2) Satisfy deposit rules (post-grace),
-        3) Are online by our scalable liveness (recent attestations) OR all active if no attestations.
+        DEPRECATED: This function now delegates to get_eligible_validators().
+        
+        Per TIMPAL_INVARIANTS.md Section 7 (No Dual Truths), there must be exactly
+        ONE authoritative eligibility computation. This function is kept for backward
+        compatibility but now delegates to the authoritative get_eligible_validators().
+        
+        CRITICAL: ACTIVE status is NOT a valid eligibility criterion.
+        We use get_eligible_validators() which checks REGISTERED + STAKED + ONLINE.
 
         CONSENSUS-CRITICAL: Returns a deterministic list of validator addresses.
-        
-        CRITICAL FIX: Removed P2P callback fallback which caused forks.
-        Different nodes have different P2P connections → different validator sets → FORKS.
-        Now uses deterministic fallback: all active validators from registry.
         """
-        active = []
         current_height = len(self.blocks) - 1
-
-        # Primary scalable liveness (epoch attestations)
-        # NOTE: get_validators_with_recent_attestations now returns deterministic fallback
-        # if no attestations are found (all active validators from registry)
-        validators_with_attestations = self.get_validators_with_recent_attestations(lookback_blocks=100)
-
-        for addr, data in sorted(self.validator_registry.items()):
-            if addr == "genesis":
-                continue
-
-            is_registered_active = False
-            if isinstance(data, dict) and data.get('status') in ('active', 'genesis'):
-                is_registered_active = True
-            elif isinstance(data, str):
-                # legacy registry format
-                is_registered_active = True
-
-            if not is_registered_active:
-                continue
-
-            if not self.validator_economics.is_validator_active(addr, current_height):
-                continue
-
-            # After bootstrap, require liveness (attestations or fallback)
-            if current_height > 10:
-                if validators_with_attestations:
-                    if addr not in validators_with_attestations:
-                        continue
-                # NOTE: No P2P fallback - get_validators_with_recent_attestations
-                # already returns deterministic fallback if no attestations
-
-            active.append(addr)
-
+        
+        # TIMPAL_INVARIANTS.md Section 3: ELIGIBLE_SET(h) is the single source of truth
+        # Delegate to the authoritative eligibility function
+        eligible = self.get_eligible_validators(current_height)
+        
         # CRITICAL FIX: Return sorted list for deterministic reward_allocations ordering
         # This ensures all nodes build reward dicts in identical order → same block hash
-        return sorted(active)
+        return sorted(list(eligible))
 
     def get_online_validators_deterministic(self, current_height: int) -> list:
         """
-        DETERMINISTIC online validator detection using ONLY on-chain data.
+        DEPRECATED: This function now delegates to get_eligible_validators().
         
-        TIMPAL PHILOSOPHY: All online validators receive equal block rewards.
+        Per TIMPAL_INVARIANTS.md Section 7 (No Dual Truths), there must be exactly
+        ONE authoritative eligibility computation. This function is kept for backward
+        compatibility but now delegates to the authoritative get_eligible_validators().
+        
+        CRITICAL: ACTIVE status is NOT a valid eligibility criterion.
+        We use get_eligible_validators() which checks REGISTERED + STAKED + ONLINE.
         
         CONSENSUS SAFETY: This function MUST be deterministic across all nodes.
         All nodes must compute the SAME set of online validators for the same height,
         otherwise they will produce blocks with different reward_allocations → different
         block hashes → FORK.
         
-        CONSENSUS-CRITICAL FIX (Dec 2025): OFFLINE VALIDATORS NO LONGER RECEIVE REWARDS
-        
-        PREVIOUS BUG: When no attestations were found, the system fell back to ALL
-        active validators from the registry. This caused OFFLINE validators to receive
-        rewards because they were still registered even though they weren't online.
-        
-        FIX: Only validators with PROVEN LIVENESS receive rewards:
-        1. Recent block proposers (proposed a block in last N blocks)
-        2. Epoch attestations (submitted attestation in current/previous epoch)
-        
-        If a validator has not proposed a block AND has not submitted an attestation,
-        they are considered OFFLINE and receive ZERO rewards.
-        
-        ACCEPTANCE CRITERIA:
-        - If 3 validators exist but only 1 is active → that validator gets 100%
-        - validators_rewarded == active_validators for every block
-        
         Args:
             current_height: Current blockchain height
             
         Returns:
             Sorted list of online validator addresses (deterministic order)
-            Only includes validators with proven liveness (proposers OR attestations)
+            Only includes validators that are ELIGIBLE (REGISTERED + STAKED + ONLINE)
         """
-        online_validators = set()
-        
-        # Count active validators for dynamic window calculation and logging
-        active_validator_count = 0
-        all_registered_validators = []
-        for addr, data in self.validator_registry.items():
-            if addr == "genesis":
-                continue
-            if isinstance(data, dict) and data.get('status') in ('active', 'genesis'):
-                active_validator_count += 1
-                all_registered_validators.append(addr)
-        
-        # SOURCE 1: Recent block proposers (highest confidence of liveness)
-        # Lookback scales with validator count to ensure all validators get fair chance
-        # DETERMINISTIC: All nodes see the same blocks in their chain
-        proposer_lookback = max(30, active_validator_count * 2)
-        recent_proposers = self._get_recently_active_validators(current_height, lookback_blocks=proposer_lookback)
-        online_validators.update(recent_proposers)
-        
-        # SOURCE 2: Attestation holders (epoch-based liveness proof)
-        # Validators must submit attestations each epoch to prove they're online and synced
-        # DETERMINISTIC: Attestations are recorded on-chain, all nodes see the same data
-        # NOTE: This now returns empty set if no attestations (no fallback to all validators)
-        validators_with_attestations = self.get_validators_with_recent_attestations(lookback_blocks=100)
-        online_validators.update(validators_with_attestations)
-        
-        # CONSENSUS-CRITICAL: NO FALLBACK TO ALL VALIDATORS
-        # If a validator has not proposed a block AND has not submitted an attestation,
-        # they are considered OFFLINE and receive ZERO rewards.
-        # This fixes the bug where offline validators were receiving rewards.
-        
-        # Filter to only registered, active validators that pass economics
-        result = []
-        for addr in online_validators:
-            if addr not in self.validator_registry:
-                continue
-            data = self.validator_registry[addr]
-            if isinstance(data, dict):
-                if data.get('status') not in ('active', 'genesis'):
-                    continue
-            if not self.validator_economics.is_validator_active(addr, current_height):
-                continue
-            
-            result.append(addr)
-        
-        # Log reward distribution for verification
-        # This helps verify that offline validators are NOT receiving rewards
-        excluded_count = active_validator_count - len(result)
-        if excluded_count > 0:
-            print(f"💰 REWARD DISTRIBUTION: {len(result)}/{active_validator_count} validators receiving rewards at height {current_height}")
-            print(f"   {excluded_count} validator(s) EXCLUDED (no proven liveness - no recent blocks or attestations)")
-        elif len(result) > 0:
-            print(f"💰 REWARD DISTRIBUTION: {len(result)}/{active_validator_count} validators receiving rewards at height {current_height}")
+        # TIMPAL_INVARIANTS.md Section 3: ELIGIBLE_SET(h) is the single source of truth
+        # Delegate to the authoritative eligibility function
+        eligible = self.get_eligible_validators(current_height)
         
         # CRITICAL: Sorted for deterministic ordering across all nodes
-        return sorted(result)
+        return sorted(list(eligible))
     
     def get_validators_at_height(self, block_height: int) -> set:
         """
@@ -2586,16 +2425,10 @@ class Ledger:
         
         epoch_seed = self.vrf_manager.generate_epoch_seed(current_epoch, seed_block.block_hash)
         
-        # Get liveness-filtered validators based on current height
-        liveness_filtered_validators = self._get_liveness_filtered_validators(current_height)
-        
-        if liveness_filtered_validators:
-            validators_for_selection = liveness_filtered_validators
-        else:
-            validators_for_selection = set(
-                v for v, val in self.validator_registry.items()
-                if isinstance(val, dict) and val.get('status') in ('active', 'genesis')
-            )
+        # TIMPAL_INVARIANTS.md Section 3: Use authoritative eligibility computation
+        # CRITICAL: Do NOT use status == 'active' as eligibility criterion
+        # Use get_eligible_validators() which checks REGISTERED + STAKED + ONLINE
+        validators_for_selection = self.get_eligible_validators(current_height)
         
         if not validators_for_selection:
             return []
