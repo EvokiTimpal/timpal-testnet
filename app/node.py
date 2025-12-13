@@ -1883,6 +1883,13 @@ class Node:
             
             # CONSENSUS GATE: Only ACTIVE nodes can propose blocks
             consensus_ready = (self.sync_phase == "ACTIVE")
+            can_produce = self._can_accept_production_block()
+            
+            # DIAGNOSTIC LOG: Track write gate and phase state
+            if next_height % 10 == 0:
+                print(f"[MINE_STATE] height={next_height} phase={self.sync_phase} "
+                      f"in_recovery={self._in_recovery_mode} can_produce={can_produce} "
+                      f"consensus_ready={consensus_ready} local={local_height} peer={max_peer_height}")
             
             if not consensus_ready:
                 if next_height % 10 == 0:  # Log every 10 blocks to track progress
@@ -2163,10 +2170,19 @@ class Node:
                 
                 if my_rank is None:
                     # DEBUG: Print proposers to diagnose why nodes aren't being selected
-                    print(f"🔍 DEBUG: Height {next_height}, Proposers: {[p[:20]+'...' for p in ranked_proposers]}, Me: {self.reward_address[:20]}...")
+                    if next_height % 10 == 0:
+                        print(f"[PROPOSER_DEBUG] height={next_height} slot={current_slot} "
+                              f"my_addr={self.reward_address[:16]}... NOT_IN_RANKED "
+                              f"ranked={[p[:16]+'...' for p in ranked_proposers]}")
                     # Not my turn to propose - wait for next slot
                     await asyncio.sleep(0.1)
                     continue
+                
+                # DIAGNOSTIC LOG: I'm in the ranked proposers list
+                if next_height % 10 == 0:
+                    print(f"[PROPOSER_DEBUG] height={next_height} slot={current_slot} "
+                          f"my_addr={self.reward_address[:16]}... my_rank={my_rank} "
+                          f"ranked={[p[:16]+'...' for p in ranked_proposers]}")
                 
                 # I'm a ranked proposer! Check if it's currently my window
                 # BOOTSTRAP: Use lenient timing for first 10 blocks to handle stale genesis timestamp
