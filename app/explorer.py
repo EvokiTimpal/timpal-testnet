@@ -1639,7 +1639,6 @@ async def get_validators(request: Request):
     validators = []
     
     current_height = ledger.get_block_count() - 1
-    LIVENESS_WINDOW = 30  # ~90 seconds at 3s/block - proof of activity window
     
     cached_validator_stats = get_cached_validator_stats(ledger)
     
@@ -1658,11 +1657,20 @@ async def get_validators(request: Request):
             block_count = stats['blocks_proposed']
             last_block_height = stats['last_block_height']
             
+            # LIVENESS FIX: Use offline_since_height as the primary ONLINE/OFFLINE signal
+            # This is cleared by add_block() when a validator proposes a block, ensuring
+            # that a validator who can propose blocks is NEVER shown as OFFLINE.
+            # The invariant: "If a validator has proposed a block, it MUST be considered ONLINE."
+            offline_since = validator_data.get('offline_since_height') if isinstance(validator_data, dict) else None
+            
             if current_height < 10:
+                # Bootstrap period - all registered validators shown as active
                 display_status = "active"
-            elif last_block_height >= 0 and (current_height - last_block_height) <= LIVENESS_WINDOW:
+            elif offline_since is None:
+                # No offline mark - validator is ONLINE
                 display_status = "active"
             else:
+                # Validator has been marked offline and hasn't proposed since
                 display_status = "offline"
             
             validators.append({
@@ -1864,7 +1872,6 @@ async def validators_dashboard(request: Request):
     validators = []
     
     current_height = ledger.get_block_count() - 1
-    LIVENESS_WINDOW = 30  # ~90 seconds at 3s/block - proof of activity window
     
     cached_validator_stats = get_cached_validator_stats(ledger)
     
@@ -1884,11 +1891,20 @@ async def validators_dashboard(request: Request):
             total_rewards = stats['total_rewards']
             last_block_height = stats['last_block_height']
             
+            # LIVENESS FIX: Use offline_since_height as the primary ONLINE/OFFLINE signal
+            # This is cleared by add_block() when a validator proposes a block, ensuring
+            # that a validator who can propose blocks is NEVER shown as OFFLINE.
+            # The invariant: "If a validator has proposed a block, it MUST be considered ONLINE."
+            offline_since = validator_data.get('offline_since_height') if isinstance(validator_data, dict) else None
+            
             if current_height < 10:
+                # Bootstrap period - all registered validators shown as active
                 display_status = "active"
-            elif last_block_height >= 0 and (current_height - last_block_height) <= LIVENESS_WINDOW:
+            elif offline_since is None:
+                # No offline mark - validator is ONLINE
                 display_status = "active"
             else:
+                # Validator has been marked offline and hasn't proposed since
                 display_status = "offline"
             
             validators.append({
@@ -2355,32 +2371,29 @@ async def network_visualization(request: Request):
     validators = []
     edges = []
     
-    # Get current height for liveness detection (same logic as leaderboard)
+    # Get current height for liveness detection
     current_height = ledger.get_block_count() - 1
-    LIVENESS_WINDOW = 30  # ~90 seconds at 3s/block - proof of activity window
     
     for idx, (address, validator_data) in enumerate(ledger.validator_registry.items()):
         info = ledger.get_validator_info(address)
         if info:
             block_count = sum(1 for block in ledger.blocks if block.proposer == address)
             
-            # LIVENESS DETECTION: Check if validator proposed a block recently
-            # Find the most recent block proposed by this validator
-            last_block_height = -1
-            for block in reversed(ledger.blocks):
-                if block.proposer == address:
-                    last_block_height = block.height
-                    break
+            # LIVENESS FIX: Use offline_since_height as the primary ONLINE/OFFLINE signal
+            # This is cleared by add_block() when a validator proposes a block, ensuring
+            # that a validator who can propose blocks is NEVER shown as OFFLINE.
+            # The invariant: "If a validator has proposed a block, it MUST be considered ONLINE."
+            offline_since = validator_data.get('offline_since_height') if isinstance(validator_data, dict) else None
             
-            # Determine real-time online/offline status (same as leaderboard)
+            # Determine real-time online/offline status
             if current_height < 10:
                 # Bootstrap period - all registered validators shown as active
                 display_status = "active"
-            elif last_block_height >= 0 and (current_height - last_block_height) <= LIVENESS_WINDOW:
-                # Proposed a block recently - ONLINE
+            elif offline_since is None:
+                # No offline mark - validator is ONLINE
                 display_status = "active"
             else:
-                # No recent blocks - OFFLINE
+                # Validator has been marked offline and hasn't proposed since
                 display_status = "offline"
             
             # FILTER: Only show ACTIVE validators in network graph
