@@ -1187,6 +1187,45 @@ class Node:
                             print(f"❌ REJECT Block {block.height} (slot {block_slot}): Invalid proposer {proposer_address[:20]}...")
                             print(f"   Expected one of: {expected_list}")
                             return
+                        
+                        # TIME-SLICED WINDOW VALIDATION (P2P blocks)
+                        # CRITICAL FIX: Enforce rank+window validation for P2P blocks to prevent
+                        # race conditions where both validators produce blocks for the same slot.
+                        # Without this, both blocks are accepted and fork resolution picks the
+                        # "longer chain" which always favors the faster/better-connected node.
+                        #
+                        # This validation is DETERMINISTIC - it only uses on-chain data:
+                        # - genesis_timestamp (from genesis block)
+                        # - block.timestamp (from the block being validated)
+                        # - block.slot, block.rank (from the block being validated)
+                        # - expected_proposers (computed from parent's historical state)
+                        #
+                        # BOOTSTRAP EXCEPTION: Skip for first 10 blocks to handle delayed genesis startup
+                        BOOTSTRAP_HEIGHT = 10
+                        if hasattr(block, 'slot') and hasattr(block, 'rank') and block.slot is not None and block.rank is not None:
+                            if block.height > BOOTSTRAP_HEIGHT:
+                                # Verify proposer's rank matches their position in VRF queue
+                                try:
+                                    expected_rank = expected_proposers.index(proposer_address)
+                                except ValueError:
+                                    # Already handled by membership check above
+                                    print(f"❌ REJECT Block {block.height}: Proposer not in expected queue")
+                                    return
+                                
+                                if block.rank != expected_rank:
+                                    print(f"❌ REJECT Block {block.height}: Wrong rank for proposer {proposer_address[:20]}...")
+                                    print(f"   Expected rank: {expected_rank}, Got: {block.rank}")
+                                    return
+                                
+                                # Validate timestamp falls within assigned time window
+                                from time_slots import validate_block_window
+                                genesis_block = self.ledger.get_block_by_height(0)
+                                if genesis_block:
+                                    genesis_timestamp = genesis_block.timestamp
+                                    if not validate_block_window(block.timestamp, genesis_timestamp, block.slot, block.rank):
+                                        print(f"❌ REJECT Block {block.height}: Timestamp outside assigned window")
+                                        print(f"   Slot: {block.slot}, Rank: {block.rank}, Timestamp: {block.timestamp}")
+                                        return
                     else:
                         # No parent historical state - must sync via HTTP first
                         # P2P path requires historical state for deterministic VRF validation
