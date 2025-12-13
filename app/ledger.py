@@ -885,6 +885,14 @@ class Ledger:
         # This enables chain reorganization with proper proposer validation
         self._record_historical_state(block)
         
+        # LIVENESS FIX: Block proposal MUST clear offline_since_height
+        # This ensures a validator that can propose blocks is never shown as OFFLINE.
+        # The invariant: "If a validator has proposed a block, it MUST be considered ONLINE."
+        # This is deterministic (all nodes process the same blocks) and does NOT affect
+        # consensus-critical reward calculation (which uses on-chain data only).
+        if block.proposer and block.proposer in self.validator_registry:
+            self.mark_validator_online(block.proposer)
+        
         self.save_state()
         return True
     
