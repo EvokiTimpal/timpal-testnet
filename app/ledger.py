@@ -2586,6 +2586,25 @@ class Ledger:
         
         epoch_seed = self.vrf_manager.generate_epoch_seed(current_epoch, seed_block.block_hash)
         
+        # ============================================================
+        # VRF ELIGIBILITY TRACE: Build complete picture of validator state
+        # This helps diagnose "silent exclusion" bugs where ACTIVE validators
+        # never appear in the VRF queue
+        # ============================================================
+        
+        # STAGE 0: Get ALL validators from registry with their full state
+        all_registry_validators = {}
+        for addr, data in sorted(self.validator_registry.items()):
+            if addr == "genesis":
+                continue
+            if isinstance(data, dict):
+                all_registry_validators[addr] = {
+                    'status': data.get('status'),
+                    'activation_height': data.get('activation_height', 0),
+                    'offline_since_height': data.get('offline_since_height'),
+                    'public_key': data.get('public_key') is not None
+                }
+        
         # Get liveness-filtered validators based on current height
         liveness_filtered_validators = self._get_liveness_filtered_validators(current_height)
         
@@ -2606,18 +2625,6 @@ class Ledger:
         if not committee:
             return []
         
-        # TEMPORARY DEBUG LOG - REMOVE AFTER INVESTIGATION
-        # Log every 10 slots to reduce noise but still provide visibility
-        if slot % 10 == 0:
-            print(f"[PROPOSER_DEBUG] slot={slot} height={current_height} "
-                  f"validators_for_selection={[v[:16]+'...' for v in sorted(validators_for_selection)]}")
-            print(f"[PROPOSER_DEBUG] slot={slot} height={current_height} "
-                  f"committee={[v[:16]+'...' for v in sorted(committee)]}")
-        print(f"[PROPOSER_SELECTION] slot={slot}, height={current_height}, epoch={current_epoch}, "
-              f"epoch_seed={epoch_seed[:16]}..., "
-              f"validators_for_selection={len(validators_for_selection)}, "
-              f"committee={len(committee)}")
-        
         # Get ordered proposer queue using VRF (deterministic permutation)
         proposer_queue = self.vrf_manager.get_ordered_proposer_queue(
             block_height=slot,  # Pass SLOT, not height
@@ -2627,7 +2634,95 @@ class Ledger:
             get_public_key_func=self.get_validator_public_key
         )
         
-        # TEMPORARY DEBUG LOG - REMOVE AFTER INVESTIGATION
+        # ============================================================
+        # VRF ELIGIBILITY TRACE: Log per-validator eligibility breakdown
+        # Shows exactly at which stage each validator gets included/excluded
+        # ============================================================
+        if slot % 10 == 0:  # Log every 10 slots to reduce noise
+            print(f"\n[VRF_TRACE] ========== SLOT {slot} (height={current_height}, epoch={current_epoch}) ==========")
+            print(f"[VRF_TRACE] epoch_seed={epoch_seed[:16]}...")
+            
+            for addr, state in all_registry_validators.items():
+                in_registry = state['status'] in ('active', 'genesis')
+                in_liveness = addr in (liveness_filtered_validators or set())
+                in_selection = addr in validators_for_selection
+                in_committee = addr in committee
+                in_queue = addr in proposer_queue if proposer_queue else False
+                queue_rank = proposer_queue.index(addr) if (proposer_queue and addr in proposer_queue) else -1
+                
+                # Determine exclusion reason
+                exclusion_reason = "INCLUDED"
+                if not in_registry:
+                    exclusion_reason = "NOT_ACTIVE_STATUS"
+                elif not in_liveness:
+                    exclusion_reason = "LIVENESS_FILTERED"
+                elif not in_selection:
+                    exclusion_reason = "NOT_IN_SELECTION"
+                elif not in_committee:
+                    exclusion_reason = "NOT_IN_COMMITTEE"
+                elif not in_queue:
+                    exclusion_reason = "VRF_EXCLUDED"
+                
+                print(f"[VRF_ELIG] addr={addr[:16]}... "
+                      f"status={state['status']} "
+                      f"activation={state['activation_height']} "
+                      f"offline_since={state['offline_since_height']} "
+                      f"has_pubkey={state['public_key']} | "
+                      f"in_registry={in_registry} "
+                      f"in_liveness={in_liveness} "
+                      f"in_selection={in_selection} "
+                      f"in_committee={in_committee} "
+                      f"in_queue={in_queue} "
+                      f"rank={queue_rank} | "
+                      f"{exclusion_reason}")
+            
+            print(f"[VRF_TRACE] Final queue: {[p[:12]+'...' for p in proposer_queue] if proposer_queue else []}")
+            print(f"[VRF_TRACE] ==========================================================\n")
+        
+        # ============================================================
+        # INVARIANT CHECK: Every ACTIVE validator must appear in VRF queue
+        # within N slots. If not, log why it was excluded.
+        # ============================================================
+        if not hasattr(self, '_vrf_last_seen_slot'):
+            self._vrf_last_seen_slot = {}
+        
+        # Update last seen slot for validators in queue
+        if proposer_queue:
+            for addr in proposer_queue:
+                self._vrf_last_seen_slot[addr] = slot
+        
+        # Check invariant: ACTIVE validators should appear within 2×active_count slots
+        active_count = len([v for v in all_registry_validators.values() if v['status'] in ('active', 'genesis')])
+        max_slots_without_queue = max(20, 2 * active_count)  # At least 20 slots
+        
+        for addr, state in all_registry_validators.items():
+            if state['status'] not in ('active', 'genesis'):
+                continue
+            
+            last_seen = self._vrf_last_seen_slot.get(addr, 0)
+            slots_since_seen = slot - last_seen
+            
+            if slots_since_seen > max_slots_without_queue:
+                in_liveness = addr in (liveness_filtered_validators or set())
+                in_selection = addr in validators_for_selection
+                in_committee = addr in committee
+                in_queue = addr in proposer_queue if proposer_queue else False
+                
+                print(f"[VRF_INVARIANT_VIOLATION] addr={addr[:16]}... "
+                      f"has NOT appeared in VRF queue for {slots_since_seen} slots! "
+                      f"(threshold={max_slots_without_queue}) | "
+                      f"status={state['status']} "
+                      f"in_liveness={in_liveness} "
+                      f"in_selection={in_selection} "
+                      f"in_committee={in_committee} "
+                      f"in_queue={in_queue}")
+        
+        # Legacy debug logs (kept for backward compatibility)
+        print(f"[PROPOSER_SELECTION] slot={slot}, height={current_height}, epoch={current_epoch}, "
+              f"epoch_seed={epoch_seed[:16]}..., "
+              f"validators_for_selection={len(validators_for_selection)}, "
+              f"committee={len(committee)}")
+        
         if proposer_queue:
             print(f"[VRF_QUEUE] slot={slot}, queue={[p[:12]+'...' for p in proposer_queue]}")
         
