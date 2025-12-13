@@ -1774,9 +1774,9 @@ class Ledger:
         if active_validator_count <= MIN_VALIDATORS_FOR_FULL_SET:
             # Small validator set: bypass liveness filtering entirely
             # All active validators are always eligible to propose
-            if len(self.blocks) > 10:  # Only log after bootstrap
-                print(f"   SMALL VALIDATOR SET ({active_validator_count} validators): Using ALL active validators for proposer eligibility")
-                print(f"   Registered validators: {active_validator_count}, Eligible: {active_validator_count} (full set)")
+            if len(self.blocks) > 10 and current_height % 10 == 0:  # Only log after bootstrap, every 10 blocks
+                print(f"[LIVENESS_DEBUG] height={current_height} active_count={active_validator_count} "
+                      f"all_active={[v[:16]+'...' for v in sorted(all_active_validators)]}")
             return all_active_validators
         
         # ============================================================
@@ -2607,6 +2607,12 @@ class Ledger:
             return []
         
         # TEMPORARY DEBUG LOG - REMOVE AFTER INVESTIGATION
+        # Log every 10 slots to reduce noise but still provide visibility
+        if slot % 10 == 0:
+            print(f"[PROPOSER_DEBUG] slot={slot} height={current_height} "
+                  f"validators_for_selection={[v[:16]+'...' for v in sorted(validators_for_selection)]}")
+            print(f"[PROPOSER_DEBUG] slot={slot} height={current_height} "
+                  f"committee={[v[:16]+'...' for v in sorted(committee)]}")
         print(f"[PROPOSER_SELECTION] slot={slot}, height={current_height}, epoch={current_epoch}, "
               f"epoch_seed={epoch_seed[:16]}..., "
               f"validators_for_selection={len(validators_for_selection)}, "
