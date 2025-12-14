@@ -336,44 +336,14 @@ class Ledger:
                 if time_diff > 60:  # More than 1 minute in future
                     print(f"⚠️  CLOCK DRIFT: Block {block.height} timestamp is {time_diff:.0f}s ahead of local time - syncing anyway")
             
-            # TIME-SLICED SLOTS VALIDATION: Ensure block timestamp is within assigned window
-            # This prevents race conditions when offline validators come back online
-            # Only the correct (slot, rank) can propose in their assigned time window
-            # BOOTSTRAP EXCEPTION: Skip for first 10 blocks to handle delayed genesis startup
-            #
-            # REORG EXCEPTION: Skip slot/rank check when use_historical_validators=True
-            # During chain reorganization, get_ranked_proposers_for_slot() uses current chain
-            # state (len(self.blocks) - 1) which is WRONG for validating historical blocks.
-            # The historical VRF validation at the end of this function handles reorg correctly.
-            BOOTSTRAP_HEIGHT = 10
-            if not skip_proposer_check and not use_historical_validators and hasattr(block, 'slot') and hasattr(block, 'rank'):
-                from time_slots import validate_block_window
-                
-                # Get genesis timestamp
-                genesis_block = self.get_block_by_height(0)
-                if not genesis_block:
-                    print(f"REJECT: Cannot validate window - no genesis block found")
-                    return False
-                
-                genesis_timestamp = genesis_block.timestamp
-                
-                # BOOTSTRAP: Skip strict window validation for first N blocks
-                # This allows the network to bootstrap even if genesis timestamp is stale
-                if block.height <= BOOTSTRAP_HEIGHT:
-                    print(f"🔧 BOOTSTRAP: Skipping window validation for block {block.height} (grace period)")
-                elif not validate_block_window(block.timestamp, genesis_timestamp, block.slot, block.rank):
-                    print(f"REJECT: Block timestamp {block.timestamp} outside assigned window")
-                    print(f"  Slot: {block.slot}, Rank: {block.rank}")
-                    return False
-                
-                # Verify proposer matches expected rank in VRF queue
-                ranked_proposers = self.get_ranked_proposers_for_slot(block.slot, num_ranks=3)
-                if block.rank < len(ranked_proposers):
-                    expected_proposer = ranked_proposers[block.rank]
-                    if block.proposer != expected_proposer:
-                        print(f"REJECT: Wrong proposer for rank {block.rank}")
-                        print(f"  Expected: {expected_proposer}, Got: {block.proposer}")
-                        return False
+            # ============================================================
+            # VRF-ONLY VALIDATION (TIMPAL_INVARIANTS.md)
+            # ============================================================
+            # REMOVED: Time-sliced window validation and rank-based proposer checks
+            # VRF is the ONLY authority for block production.
+            # The VRF proposer validation at the end of this function handles all cases.
+            # There is NO rank-based proposing, NO fallback proposer, NO "my window".
+            # ============================================================
         
         # TIMEOUT CERTIFICATE VALIDATION (MUST HAPPEN BEFORE PROPOSER CHECK)
         # Extract and validate timeout certificate if present, then increment round

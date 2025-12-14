@@ -2134,128 +2134,58 @@ class Node:
                     await asyncio.sleep(config.BLOCK_TIME)
                     continue
             
-            # TIME-SLICED SLOTS CONSENSUS: Deterministic fallback without race conditions
-            # Each 3-second slot is divided into 3×1-second windows:
-            # Window 0 (0-1s): Primary proposer only
-            # Window 1 (1-2s): Fallback #1 only  
-            # Window 2 (2-3s): Fallback #2 only
+            # ============================================================
+            # VRF-ONLY BLOCK PRODUCTION (TIMPAL_INVARIANTS.md)
+            # ============================================================
+            # VRF is the ONLY authority for block production.
+            # There is NO rank-based proposing, NO fallback proposer, NO "my window".
             # 
-            # KEY: Blocks are ONLY valid if timestamp falls in correct window for their rank
-            # This prevents race conditions when offline validators come back online
-            from time_slots import (
-                get_realtime_slot, am_i_proposer_now, time_until_my_window
-            )
+            # For any (epoch, slot):
+            #   vrf_winner = VRF(epoch_seed, slot, eligible_validators)
+            #   IF local_validator != vrf_winner: DO NOT build a block
+            #   ELSE: build exactly one block with block.proposer = vrf_winner
+            # ============================================================
             
-            # Get genesis timestamp for window calculations
+            # Get genesis timestamp for slot calculation
             genesis_block = self.ledger.get_block_by_height(0)
             if not genesis_block:
-                print(f"❌ No genesis block found, cannot determine time windows")
+                print(f"[VRF] No genesis block found, cannot compute slot")
                 continue
             
             genesis_timestamp = genesis_block.timestamp
             
-            # SLOT IS WALL-CLOCK BASED: Calculate real-time slot independent of chain height
-            # This allows the network to "catch up" to current time after bootstrap period
-            realtime_slot = get_realtime_slot(genesis_timestamp)
-            
-            # MULTI-VALIDATOR FIX: Use current slot, let window logic handle timing
-            # Previous bug: Skipping to next slot when active_rank != 0 caused all validators
-            # to collectively skip slots, resulting in 6s, 9s, 12s gaps instead of 3s blocks.
-            # 
-            # The correct approach: Use the current wall-clock slot and let each validator
-            # check if their window is open. Window validation in ledger.add_block ensures
-            # only the correct rank can produce a valid block at any given time.
-            from time_slots import current_slot_and_rank, WINDOW_SECONDS
+            # Calculate current slot from wall-clock time
             current_time = time.time()
-            current_slot_check, active_rank = current_slot_and_rank(genesis_timestamp, current_time)
-            
-            # Use current slot - don't skip ahead based on active_rank
-            # Each validator will check if their window is open in the am_i_proposer_now call
-            current_slot = current_slot_check
+            current_slot = int((current_time - genesis_timestamp) / config.BLOCK_TIME)
             
             # Log slot info for debugging (only when slots are skipped due to real-time catch-up)
             if latest_block.slot and current_slot > latest_block.slot + 1:
                 skipped_slots = current_slot - latest_block.slot - 1
-                print(f"⏩ SLOT SKIP: Jumped from slot {latest_block.slot} to {current_slot}")
-                print(f"   Skipped {skipped_slots} empty slot(s) - network catching up to real-time")
-                print(f"   Height remains sequential: {latest_block.height} → {next_height}")
+                print(f"[VRF] Slot skip: {latest_block.slot} -> {current_slot} ({skipped_slots} empty slots)")
             
-            # Get ranked proposers for this slot (primary, fallback1, fallback2)
-            ranked_proposers = self.ledger.get_ranked_proposers_for_slot(current_slot, num_ranks=3)
+            # Get VRF winner for this slot (rank 0 ONLY - no fallbacks)
+            vrf_winner = self.ledger.select_proposer_for_slot(current_slot)
             
-            if not ranked_proposers:
+            if not vrf_winner:
                 # No validators available - wait for network to stabilize
                 if next_height % 10 == 0:
-                    print(f"⚠️  No active validators at height {next_height}, waiting...")
+                    print(f"[VRF] No eligible validators at height {next_height}, waiting...")
                 continue
             
-            # SINGLE-VALIDATOR FAST PATH: Skip time-sliced window logic when alone
-            # When there's only one validator, there's no need to coordinate windows
-            # This prevents unnecessary slot skipping and timing delays
-            is_single_validator = (len(ranked_proposers) == 1 and ranked_proposers[0] == self.reward_address)
-            
-            if is_single_validator:
-                # Single validator mode: always my turn, no window coordination needed
-                my_rank = 0
-                is_my_turn = True
-            else:
-                # Multi-validator mode: use full time-sliced window logic
-                # Check if I'm one of the ranked proposers for this slot
-                my_rank = None
-                for i, addr in enumerate(ranked_proposers):
-                    if addr == self.reward_address:
-                        my_rank = i
-                        break
-                
-                if my_rank is None:
-                    # DEBUG: Print proposers to diagnose why nodes aren't being selected
-                    if next_height % 10 == 0:
-                        print(f"[PROPOSER_DEBUG] height={next_height} slot={current_slot} "
-                              f"my_addr={self.reward_address[:16]}... NOT_IN_RANKED "
-                              f"ranked={[p[:16]+'...' for p in ranked_proposers]}")
-                    # Not my turn to propose - wait for next slot
-                    await asyncio.sleep(0.1)
-                    continue
-                
-                # DIAGNOSTIC LOG: I'm in the ranked proposers list
+            # ============================================================
+            # CRITICAL VRF GATE: Only VRF winner can build a block
+            # ============================================================
+            if self.reward_address != vrf_winner:
+                # NOT the VRF winner - DO NOT build a block
                 if next_height % 10 == 0:
-                    print(f"[PROPOSER_DEBUG] height={next_height} slot={current_slot} "
-                          f"my_addr={self.reward_address[:16]}... my_rank={my_rank} "
-                          f"ranked={[p[:16]+'...' for p in ranked_proposers]}")
-                
-                # I'm a ranked proposer! Check if it's currently my window
-                # BOOTSTRAP: Use lenient timing for first 10 blocks to handle stale genesis timestamp
-                # After block 10, strict Time-Sliced Windows enforcement (preserves safety invariant)
-                lenient_bootstrap = next_height <= 10
-                
-                is_my_turn, _ = am_i_proposer_now(self.reward_address, ranked_proposers, 
-                                                   genesis_timestamp, current_slot, 
-                                                   lenient_bootstrap=lenient_bootstrap)
-                
-                if not is_my_turn:
-                    # Not my window yet - check when my window opens
-                    wait_time = time_until_my_window(my_rank, genesis_timestamp, current_slot)
-                    
-                    if wait_time > 0 and wait_time < 1.5:
-                        # My window is upcoming - wait for it to open
-                        # TIMING OPTIMIZATION: Reduced buffer from 0.1s to 0.05s and cap from 0.5s to 0.4s
-                        # This shaves ~50-100ms per block without risking out-of-window rejections
-                        print(f"⏰ Rank {my_rank} proposer waiting {wait_time:.2f}s for window")
-                        await asyncio.sleep(min(wait_time + 0.05, 0.4))  # Wait with small buffer
-                        continue
-                    else:
-                        # My window already passed or too far in future - check if block received
-                        current_height = self.ledger.get_block_count() - 1
-                        if current_height >= next_height:
-                            # Block received from another proposer
-                            continue
-                        
-                        # Window passed but no block - move to next cycle
-                        await asyncio.sleep(0.1)
-                        continue
+                    print(f"[VRF] slot={current_slot} height={next_height} "
+                          f"vrf_winner={vrf_winner[:16]}... "
+                          f"my_addr={self.reward_address[:16]}... NOT_MY_TURN")
+                await asyncio.sleep(0.1)
+                continue
             
-            # IT'S MY WINDOW! Proceed to create and propose block
-            print(f"✅ Rank {my_rank} proposer - it's my window, creating block...")
+            # I AM the VRF winner - proceed to build block
+            print(f"[VRF] I am the VRF winner for slot {current_slot}, building block...")
             
             pending_txs = self.mempool.get_pending_transactions(3000)
             
@@ -2319,63 +2249,31 @@ class Node:
             per_validator = total_reward_pals // len(active_validators) if active_validators else 0
             print(f"💰 Block reward: {total_reward_pals / 100_000_000:.8f} TMPL ({per_validator / 100_000_000:.8f} each)")
             
-            # CRITICAL FIX (ChatGPT): Clamp timestamp into slot/rank window
-            # Previous bug: used min(scheduled_time, time.time()) which created timestamps in the PAST
-            # relative to the slot/rank window, causing ledger to reject blocks (stuck at height 1)
-            # 
-            # Fix: Calculate the exact time-sliced window for (slot, rank) and clamp timestamp into it
-            # This ensures the block timestamp is valid for its assigned window and passes ledger validation
+            # VRF-ONLY TIMESTAMP: Simple slot-based timestamp calculation
+            # No window-based logic - VRF winner produces at slot start
+            now = time.time()
+            slot_start = genesis_timestamp + current_slot * config.BLOCK_TIME
+            
             if scheduled_time is None:
                 # Genesis block case - no scheduled time yet
-                block_timestamp = time.time()
+                block_timestamp = now
             else:
-                # Calculate the time-sliced window bounds for this (slot, rank)
-                slot_start = genesis_timestamp + current_slot * config.BLOCK_TIME
-                window_start = slot_start + my_rank * WINDOW_SECONDS
-                window_end = window_start + WINDOW_SECONDS
-                
-                # Small epsilon to avoid boundary precision issues (ChatGPT Fix F: increased to 50ms)
-                EPS = 0.050
-                
-                # Pick a timestamp that:
-                # (a) is not before scheduled_time (monotonic chain requirement)
-                # (b) lies inside [window_start, window_end) (time-sliced window requirement)
-                # (c) never goes into the future (clock skew safety)
-                now = time.time()
-                
-                # BOOTSTRAP EXCEPTION: First 10 blocks use current time (window validation relaxed)
-                BOOTSTRAP_HEIGHT = 10
-                if next_height <= BOOTSTRAP_HEIGHT:
-                    block_timestamp = now
-                    print(f"🔧 BOOTSTRAP: Using current time for block {next_height} (grace period)")
-                else:
-                    # Start with max(scheduled_time, window_start + epsilon) to ensure we're in the window
-                    candidate = max(scheduled_time, window_start + EPS)
-                    # Cap at window_end and current time
-                    candidate = min(candidate, window_end - EPS, now)
-                    
-                    # Safety check: if window already passed (rare race condition), skip this round
-                    if candidate < window_start or candidate >= window_end:
-                        print(f"⚠️  Window already passed for slot {current_slot} rank {my_rank}, skipping")
-                        await asyncio.sleep(0.05)
-                        continue
-                    
-                    block_timestamp = candidate
-                
-                # Timing diagnostic to track skew reduction after fix
-                scheduled_vs_now = now - scheduled_time
-                print(f"⏰ Timing: scheduled={scheduled_time:.2f}, now={now:.2f}, skew={scheduled_vs_now:.2f}s")
+                # Use max of scheduled_time and slot_start, capped at current time
+                block_timestamp = max(scheduled_time, slot_start)
+                block_timestamp = min(block_timestamp, now)
             
+            # Create block with VRF winner as proposer (MUST match VRF selection)
+            # rank=0 always since VRF-only has no fallback ranks
             new_block = Block(
                 height=next_height,
                 timestamp=block_timestamp,
                 transactions=valid_txs,
                 previous_hash=latest_block.block_hash,
-                proposer=self.reward_address,
+                proposer=vrf_winner,  # CRITICAL: Must be VRF winner, not self.reward_address
                 reward=block_reward_pals,  # Only newly minted coins, NOT fees
                 reward_allocations=rewards,
                 slot=current_slot,
-                rank=my_rank
+                rank=0  # VRF-only: always rank 0 (no fallback ranks)
             )
             
             if self.private_key:
