@@ -109,5 +109,44 @@ Explorer is read-only and must never affect consensus.
 
 ---
 
+## 10. Attestation-Based Finality
+
+### 10.1 Definitions
+
+- CONFIRMED: Transaction included in a block at height H (1-block confirmation).
+- FINAL: Block at height H has >= QUORUM attestations from eligible validators AND is at least FINALITY_DEPTH blocks behind head.
+- finalized_height: The highest block height that is FINAL. Monotonically increasing.
+
+### 10.2 Finality Parameters (Immutable)
+
+- FINALITY_QUORUM = max(2, floor(eligible_validators / 3))
+- FINALITY_DEPTH = 1 (finalize block H when head >= H+1)
+- Attestation message: hash("TIMPAL_ATTEST_V1" || chain_id || height || block_hash)
+
+### 10.3 Hard Invariants
+
+**F1: NO REORG at heights <= finalized_height**
+- This is UNCONDITIONAL - no network recovery exceptions allowed.
+- Blocks at or below finalized_height are IMMUTABLE.
+- Any competing chain that conflicts at height <= finalized_height MUST be rejected.
+
+**F2: finalized_height is monotonic**
+- finalized_height can only increase, never decrease.
+- Once a block is FINAL, it remains FINAL forever.
+
+**F3: FINAL requires quorum attestations**
+- A block becomes FINAL only when it has >= FINALITY_QUORUM attestations from eligible validators.
+- Attestations are counted once per validator (no duplicates).
+- Only eligible validators' attestations are counted.
+
+### 10.4 Attestation Rules
+
+- Validators sign attestations for blocks they observe as canonical.
+- Attestations propagate via P2P message type "finality_attestation".
+- Invalid signatures are rejected.
+- Attestations from non-eligible validators are ignored.
+
+---
+
 Final Law:
 A validator that peers would reject must reject itself first.

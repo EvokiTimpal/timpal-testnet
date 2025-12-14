@@ -12,6 +12,12 @@ from app.consensus import Consensus
 from app.rewards import RewardCalculator
 from app.p2p import P2PNetwork
 from app.device_fingerprint import enforce_single_node
+from app.finality import (
+    FinalityAttestation, 
+    create_attestation_signature, 
+    verify_attestation_signature,
+    canonical_validator_id as finality_canonical_id
+)
 import config
 
 
@@ -212,6 +218,7 @@ class Node:
         self.p2p.register_handler("new_transaction", self.handle_new_transaction)
         self.p2p.register_handler("new_block", self.handle_new_block)
         self.p2p.register_handler("announce_node", self.handle_node_announcement)
+        self.p2p.register_handler("finality_attestation", self.handle_finality_attestation)
         self.p2p.register_sync_handler(self.handle_sync_request)
         self.p2p.register_on_peer_connected(self.handle_peer_connected)
         
@@ -578,14 +585,23 @@ class Node:
     
     def _get_finalized_height(self) -> int:
         """
-        HARD INVARIANT F1: Finality wall
+        HARD INVARIANT F1: Finality wall (attestation-based)
         
         Returns the height below which blocks are considered FINAL.
         Blocks at or below this height can NEVER trigger a reorg.
         
+        Uses attestation-based finality from FinalityManager.
+        Falls back to depth-based finality if attestation system not ready.
+        
         Returns:
-            Finalized height (current_height - FINALITY_DEPTH, minimum 0)
+            Finalized height from attestation system, or depth-based fallback
         """
+        # Primary: Use attestation-based finalized height
+        attestation_finalized = self.ledger.get_finalized_height()
+        if attestation_finalized >= 0:
+            return attestation_finalized
+        
+        # Fallback: Use depth-based finality during bootstrap
         current_height = len(self.ledger.blocks) - 1
         return max(0, current_height - self.FINALITY_DEPTH)
     
@@ -1320,6 +1336,12 @@ class Node:
                 
                 # F2: Update block index for duplicate detection
                 self._update_block_index(block.height, block.block_hash)
+                
+                # FINALITY ATTESTATION: Create and broadcast attestation for canonical head
+                # This is called when node accepts a block as canonical head
+                asyncio.create_task(self.create_and_broadcast_finality_attestation(
+                    block.height, block.block_hash
+                ))
                 
                 # ISOLATION DETECTION: Track external blocks received from other validators
                 # This is CRITICAL for detecting network isolation - if we're not receiving
@@ -2328,6 +2350,12 @@ class Node:
             await self.p2p.broadcast("new_block", broadcast_data)
             
             print(f"📡 Block {new_block.height} broadcasted to network")
+            
+            # FINALITY ATTESTATION: Create and broadcast attestation for our own block
+            # This is called when we successfully create and add a block
+            await self.create_and_broadcast_finality_attestation(
+                new_block.height, new_block.block_hash
+            )
     
     async def announce_presence(self):
         """
@@ -2370,6 +2398,140 @@ class Node:
         """
         # DISABLED: Do not send attestation transactions to mempool
         return
+    
+    # ============================================================
+    # FINALITY ATTESTATIONS: Block-level finality for cryptographic guarantees
+    # ============================================================
+    
+    async def create_and_broadcast_finality_attestation(self, height: int, block_hash: str):
+        """
+        Create and broadcast a finality attestation for a block.
+        
+        Called when node accepts a block as canonical head.
+        Validators sign attestations for blocks they observe as canonical.
+        
+        Args:
+            height: Block height to attest
+            block_hash: Block hash to attest
+        """
+        # Only validators can create attestations
+        if not self.private_key:
+            return
+        
+        # Check if we're an eligible validator
+        eligible_validators = self.ledger.get_eligible_validators(height)
+        eligible_ids = [finality_canonical_id(v.address) for v in eligible_validators]
+        
+        if self.validator_id not in eligible_ids:
+            return
+        
+        try:
+            # Create attestation signature
+            signature = create_attestation_signature(height, block_hash, self.private_key)
+            
+            # Create attestation object
+            attestation = FinalityAttestation(
+                height=height,
+                block_hash=block_hash,
+                validator_id=self.validator_id,
+                signature=signature,
+                seen_ts=int(time.time())
+            )
+            
+            # Record locally
+            self.ledger.finality_manager.record_attestation(attestation)
+            
+            # Try to advance finality
+            current_head_height = len(self.ledger.blocks) - 1
+            self.ledger.finality_manager.check_and_advance_finality(
+                height, block_hash, eligible_validators, current_head_height
+            )
+            
+            # Broadcast to peers
+            await self.p2p.broadcast("finality_attestation", {
+                "height": height,
+                "block_hash": block_hash,
+                "validator_id": self.validator_id,
+                "signature": signature,
+                "seen_ts": attestation.seen_ts
+            })
+            
+            print(f"[ATTEST] Created and broadcast attestation for height={height}")
+            
+        except Exception as e:
+            print(f"[ATTEST ERROR] Failed to create attestation: {e}")
+    
+    async def handle_finality_attestation(self, data: dict, peer_id: str):
+        """
+        Handle incoming finality attestation from peer.
+        
+        Verifies signature, checks validator eligibility, records attestation,
+        and advances finality if quorum reached.
+        
+        Args:
+            data: Attestation data dict
+            peer_id: ID of peer that sent the attestation
+        """
+        try:
+            height = data.get("height")
+            block_hash = data.get("block_hash")
+            validator_id = data.get("validator_id")
+            signature = data.get("signature")
+            seen_ts = data.get("seen_ts", int(time.time()))
+            
+            if height is None or not block_hash or not validator_id or not signature:
+                print(f"[ATTEST] Invalid attestation data from peer {peer_id[:8]}...")
+                return
+            
+            # Canonicalize validator ID
+            validator_id = finality_canonical_id(validator_id)
+            
+            # Check if validator is eligible for this height
+            eligible_validators = self.ledger.get_eligible_validators(height)
+            eligible_ids = [finality_canonical_id(v.address) for v in eligible_validators]
+            
+            if validator_id not in eligible_ids:
+                print(f"[ATTEST] Validator {validator_id[:16]}... not eligible for height {height}")
+                return
+            
+            # Get validator's public key for signature verification
+            validator_pubkey = self.ledger.get_validator_public_key(validator_id)
+            if not validator_pubkey:
+                print(f"[ATTEST] No public key found for validator {validator_id[:16]}...")
+                return
+            
+            # Verify signature
+            try:
+                if not verify_attestation_signature(height, block_hash, validator_pubkey, signature):
+                    print(f"[ATTEST] Invalid signature from validator {validator_id[:16]}...")
+                    return
+            except Exception as e:
+                print(f"[ATTEST] Signature verification failed: {e}")
+                return
+            
+            # Create attestation object and record
+            attestation = FinalityAttestation(
+                height=height,
+                block_hash=block_hash,
+                validator_id=validator_id,
+                signature=signature,
+                seen_ts=seen_ts
+            )
+            
+            self.ledger.finality_manager.record_attestation(attestation)
+            
+            # Try to advance finality
+            current_head_height = len(self.ledger.blocks) - 1
+            finalized = self.ledger.finality_manager.check_and_advance_finality(
+                height, block_hash, eligible_validators, current_head_height
+            )
+            
+            if finalized:
+                finalized_height = self.ledger.get_finalized_height()
+                print(f"[FINALIZED] height={finalized_height} after attestation from {validator_id[:16]}...")
+            
+        except Exception as e:
+            print(f"[ATTEST ERROR] Failed to handle attestation: {e}")
     
     async def http_batch_sync(self, peer_urls: list):
         """

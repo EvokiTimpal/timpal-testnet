@@ -17,6 +17,7 @@ from app.historical_state import (
     HistoricalStateRecord
 )
 from app.sqlite_historical_storage import SQLiteHistoricalStorage
+from app.finality import FinalityManager, FinalityAttestation, canonical_validator_id as finality_canonical_id
 import config
 
 
@@ -110,6 +111,14 @@ class Ledger:
         self.historical_state_log = SQLiteHistoricalStorage(
             db_path=os.path.join(data_dir, "history", "historical_state.db"),
             auto_migrate=True
+        )
+        
+        # FINALITY MANAGER: Attestation-based finality for cryptographic guarantees
+        # HARD INVARIANT: NO REORG at heights <= finalized_height
+        # Validators sign attestations for blocks they observe as canonical
+        # Block becomes FINAL when quorum attestations gathered
+        self.finality_manager = FinalityManager(
+            db_path=os.path.join(data_dir, "finality", "finality.db")
         )
         
         # Track the previous frame for delta computation
@@ -2923,6 +2932,9 @@ class Ledger:
         
         This is used during chain reorganization to undo blocks.
         
+        HARD INVARIANT: NO ROLLBACK below finalized_height.
+        This is enforced unconditionally - no exceptions allowed.
+        
         CRITICAL FOR VRF SECURITY:
         - Restores historical validator state for deterministic proposer validation
         - Restores attestation manager state for correct liveness filtering
@@ -2934,6 +2946,18 @@ class Ledger:
         Returns:
             True if successful, False otherwise
         """
+        # ============================================================
+        # HARD INVARIANT: NO ROLLBACK below finalized_height
+        # This is UNCONDITIONAL - no exceptions allowed
+        # ============================================================
+        finalized_height = self.get_finalized_height()
+        if finalized_height >= 0 and target_height < finalized_height:
+            print(f"[FINALITY VIOLATION] Cannot rollback to height {target_height}")
+            print(f"   finalized_height={finalized_height}")
+            print(f"   HARD INVARIANT: NO ROLLBACK below finalized_height")
+            print(f"   ABORTING ROLLBACK to prevent finality violation")
+            return False
+        
         if target_height >= len(self.blocks):
             print(f"Cannot rollback to height {target_height} - current height is {len(self.blocks) - 1}")
             return False
@@ -3267,8 +3291,43 @@ class Ledger:
         self.fork_choice.add_finality_checkpoint(height, block_hash)
     
     def is_block_finalized(self, height: int) -> bool:
-        """Check if a block at given height is finalized (cannot be reorganized)."""
-        return self.fork_choice.is_finalized(height)
+        """
+        Check if a block at given height is finalized (cannot be reorganized).
+        
+        Uses attestation-based finality from FinalityManager.
+        HARD INVARIANT: NO REORG at heights <= finalized_height.
+        """
+        return self.finality_manager.is_height_finalized(height)
+    
+    def get_finalized_height(self) -> int:
+        """
+        Get the current finalized height.
+        
+        Returns:
+            Finalized height (-1 if nothing finalized yet)
+        """
+        return self.finality_manager.get_finalized_height()
+    
+    def get_finality_info(self, height: int) -> dict:
+        """
+        Get finality information for a block.
+        
+        Args:
+            height: Block height
+            
+        Returns:
+            Dict with finality status and attestation info
+        """
+        block = self.get_block_by_height(height)
+        if not block:
+            return {"error": "Block not found"}
+        
+        eligible_validators = self.get_eligible_validators(height)
+        return self.finality_manager.get_finality_info(
+            height, 
+            block.block_hash, 
+            len(eligible_validators)
+        )
     
     def _validate_timeout_certificate(self, cert_tx: Transaction, block_height: int) -> bool:
         """
@@ -3517,6 +3576,10 @@ class Ledger:
         
         if self.use_production_storage and self.production_storage:
             self.production_storage.close()
+        
+        # Close finality manager database connection
+        if hasattr(self, 'finality_manager') and self.finality_manager:
+            self.finality_manager.close()
         
         self._closed = True
     

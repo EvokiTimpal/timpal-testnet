@@ -269,13 +269,18 @@ class ForkChoice:
         return (has_enough, total_tmpl)
     
     def can_reorganize_to_chain(self, current_chain: List[Block], 
-                                new_chain: List[Block]) -> Tuple[bool, str]:
+                                new_chain: List[Block],
+                                finalized_height: int = -1) -> Tuple[bool, str]:
         """
         Check if reorganization to new chain is allowed.
+        
+        HARD INVARIANT: NO REORG at heights <= finalized_height.
+        This is enforced unconditionally - no network recovery exceptions.
         
         Args:
             current_chain: Current canonical chain
             new_chain: Proposed new chain
+            finalized_height: Attestation-based finalized height (-1 if not provided)
         
         Returns:
             (allowed, reason) tuple
@@ -290,50 +295,46 @@ class ForkChoice:
         if fork_height == -1:
             return (False, "Chains are identical - no reorg needed")
         
-        # Check if fork is past most recent finality checkpoint
+        # ============================================================
+        # HARD INVARIANT: NO REORG at heights <= finalized_height
+        # This is UNCONDITIONAL - no network recovery exceptions allowed
+        # ============================================================
+        if finalized_height >= 0 and fork_height <= finalized_height:
+            print(f"[FINALITY VIOLATION] Rejecting reorg at height {fork_height}")
+            print(f"   finalized_height={finalized_height}")
+            print(f"   HARD INVARIANT: NO REORG at heights <= finalized_height")
+            return (False, 
+                   f"FINALITY VIOLATION: Fork at height {fork_height} is at or below "
+                   f"finalized_height {finalized_height}. Reorganization FORBIDDEN. "
+                   f"Blocks at or below finalized_height are IMMUTABLE.")
+        
+        # Check if fork is past most recent finality checkpoint (legacy check)
+        # NOTE: This is now secondary to attestation-based finality
         latest_checkpoint_height = self._get_latest_checkpoint_height()
         
         if fork_height <= latest_checkpoint_height:
-            # NETWORK RECOVERY: Allow reorg past checkpoint if new chain is significantly longer
-            # This handles network splits where majority moved to different chain
-            new_chain_length = len(new_chain)
-            current_chain_length = len(current_chain)
-            chain_length_advantage = new_chain_length - current_chain_length
-            
-            if chain_length_advantage >= self.NETWORK_RECOVERY_THRESHOLD:
-                print(f"🔄 NETWORK RECOVERY: Allowing reorg past checkpoint {latest_checkpoint_height}")
-                print(f"   Fork height: {fork_height}")
-                print(f"   Competing chain is {chain_length_advantage} blocks longer")
-                print(f"   This indicates network consensus has moved to longer chain")
-                # Continue with other checks (don't return here)
-            else:
-                return (False, 
-                       f"Fork at height {fork_height} is past finality checkpoint "
-                       f"at height {latest_checkpoint_height}. Reorganization rejected "
-                       f"to prevent long-range attacks. "
-                       f"(Competing chain only {chain_length_advantage} blocks longer, "
-                       f"need {self.NETWORK_RECOVERY_THRESHOLD}+ for network recovery)")
+            # With attestation-based finality, we no longer allow network recovery
+            # past checkpoints. The finalized_height check above is the primary barrier.
+            return (False, 
+                   f"Fork at height {fork_height} is past finality checkpoint "
+                   f"at height {latest_checkpoint_height}. Reorganization rejected "
+                   f"to prevent long-range attacks.")
         
         # Check if reorganization depth exceeds maximum
         current_height = len(current_chain) - 1
         reorg_depth = current_height - fork_height
         
-        # Calculate chain length advantage for network recovery check
+        # Calculate chain length advantage
         new_chain_length = len(new_chain)
         current_chain_length = len(current_chain)
         chain_length_advantage = new_chain_length - current_chain_length
         
+        # With attestation-based finality, we no longer allow network recovery
+        # for deep reorgs. The finalized_height check above is the primary barrier.
         if reorg_depth > self.MAX_REORG_DEPTH:
-            # Allow deep reorgs during network recovery (when chain is significantly longer)
-            if chain_length_advantage >= self.NETWORK_RECOVERY_THRESHOLD:
-                print(f"🔄 NETWORK RECOVERY: Allowing deep reorg of {reorg_depth} blocks")
-                print(f"   Competing chain advantage: {chain_length_advantage} blocks")
-                # Continue with other checks
-            else:
-                return (False,
-                       f"Reorganization depth {reorg_depth} exceeds maximum "
-                       f"{self.MAX_REORG_DEPTH}. Deep reorgs prevented for security. "
-                       f"(Need {self.NETWORK_RECOVERY_THRESHOLD}+ block advantage for network recovery)")
+            return (False,
+                   f"Reorganization depth {reorg_depth} exceeds maximum "
+                   f"{self.MAX_REORG_DEPTH}. Deep reorgs prevented for security.")
         
         # NEW: 51% Attack Detection - Check for suspicious deep reorgs
         # GRACE PERIOD EXEMPTION: Skip attack detection during bootstrap (first 5M blocks)
@@ -446,13 +447,17 @@ class ForkChoice:
         return (True, "Chain continuity validated")
     
     def get_reorganization_plan(self, current_chain: List[Block], 
-                                 new_chain: List[Block]) -> Optional[dict]:
+                                 new_chain: List[Block],
+                                 finalized_height: int = -1) -> Optional[dict]:
         """
         Create a plan for reorganizing from current chain to new chain.
+        
+        HARD INVARIANT: NO REORG at heights <= finalized_height.
         
         Args:
             current_chain: Current blockchain
             new_chain: Target blockchain
+            finalized_height: Attestation-based finalized height (-1 if not provided)
         
         Returns:
             Reorganization plan dict with:
@@ -463,8 +468,8 @@ class ForkChoice:
             
             Returns None if reorganization not possible.
         """
-        # Check if reorg is allowed
-        allowed, reason = self.can_reorganize_to_chain(current_chain, new_chain)
+        # Check if reorg is allowed (passes finalized_height for hard invariant check)
+        allowed, reason = self.can_reorganize_to_chain(current_chain, new_chain, finalized_height)
         
         if not allowed:
             print(f"Reorganization not allowed: {reason}")
