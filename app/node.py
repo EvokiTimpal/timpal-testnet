@@ -6,7 +6,7 @@ import aiohttp
 from typing import Optional, Dict, Any
 from app.block import Block
 from app.transaction import Transaction
-from app.ledger import Ledger
+from app.ledger import Ledger, canonical_validator_id
 from app.mempool import Mempool
 from app.consensus import Consensus
 from app.rewards import RewardCalculator
@@ -25,6 +25,9 @@ class Node:
             self.device_id = device_id or str(uuid.uuid4())
         
         self.reward_address = reward_address or f"tmpl{hashlib.sha256(self.device_id.encode()).hexdigest()[:44]}"
+        # CRITICAL: Canonicalize local validator identity ONCE at startup
+        # VRF input, VRF winner, and local node identity MUST use the SAME canonical string
+        self.validator_id = canonical_validator_id(self.reward_address)
         self.private_key = private_key
         self.public_key = public_key
         self.data_dir = data_dir
@@ -2174,13 +2177,17 @@ class Node:
             
             # ============================================================
             # CRITICAL VRF GATE: Only VRF winner can build a block
+            # Uses canonical validator identity for consistent comparison
             # ============================================================
-            if self.reward_address != vrf_winner:
+            # TEMP LOG (remove after verification): VRF identity check
+            print(f"[VRF CHECK] local={self.validator_id} winner={vrf_winner}")
+            
+            if self.validator_id != vrf_winner:
                 # NOT the VRF winner - DO NOT build a block
                 if next_height % 10 == 0:
                     print(f"[VRF] slot={current_slot} height={next_height} "
                           f"vrf_winner={vrf_winner[:16]}... "
-                          f"my_addr={self.reward_address[:16]}... NOT_MY_TURN")
+                          f"my_id={self.validator_id[:16]}... NOT_MY_TURN")
                 await asyncio.sleep(0.1)
                 continue
             

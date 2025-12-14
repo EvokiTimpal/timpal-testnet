@@ -20,6 +20,22 @@ from app.sqlite_historical_storage import SQLiteHistoricalStorage
 import config
 
 
+def canonical_validator_id(addr: str) -> str:
+    """
+    Canonical validator identity for VRF comparison.
+    
+    CRITICAL: VRF input, VRF winner, and local node identity MUST use the SAME
+    canonical string. This function ensures consistent identity comparison.
+    
+    Args:
+        addr: Validator address (may have mixed case, whitespace, etc.)
+        
+    Returns:
+        Canonical lowercase, stripped address string
+    """
+    return (addr or "").strip().lower()
+
+
 class Ledger:
     def __init__(self, data_dir: str = "blockchain_data", use_production_storage: bool = False, read_only: bool = False):
         self._closed = False
@@ -2355,13 +2371,15 @@ class Ledger:
             slot: Slot number (time-based, monotonically increasing)
             
         Returns:
-            Address of rank-0 proposer for this slot, or None if no validators available
+            Canonical address of rank-0 proposer for this slot, or None if no validators available
         """
         ranked = self.get_ranked_proposers_for_slot(slot, num_ranks=1)
         if not ranked:
             return None
         
         selected = ranked[0]
+        # CRITICAL: Canonicalize VRF winner output for consistent identity comparison
+        selected = canonical_validator_id(selected)
         print(f"🎲 VRF proposer [slot {slot}]: {selected[:20]}...")
         return selected
     
@@ -2402,6 +2420,10 @@ class Ledger:
         
         if not validators_for_selection:
             return []
+        
+        # CRITICAL: Canonicalize VRF input list for consistent identity comparison
+        # VRF input, VRF winner, and local node identity MUST use the SAME canonical string
+        validators_for_selection = [canonical_validator_id(v) for v in validators_for_selection]
         
         # Select committee for current epoch (based on height, not slot)
         committee = self.attestation_manager.select_committee(current_epoch, validators_for_selection)
