@@ -17,7 +17,7 @@ from app.historical_state import (
     HistoricalStateRecord
 )
 from app.sqlite_historical_storage import SQLiteHistoricalStorage
-from app.finality import FinalityManager, FinalityAttestation, canonical_validator_id as finality_canonical_id
+from app.finality import compute_finalized_height, is_height_finalized, get_finality_info as finality_get_info, FINALITY_DEPTH, canonical_validator_id as finality_canonical_id
 import config
 
 
@@ -113,13 +113,10 @@ class Ledger:
             auto_migrate=True
         )
         
-        # FINALITY MANAGER: Attestation-based finality for cryptographic guarantees
+        # HEIGHT-BASED FINALITY: Deterministic finality based on block depth
         # HARD INVARIANT: NO REORG at heights <= finalized_height
-        # Validators sign attestations for blocks they observe as canonical
-        # Block becomes FINAL when quorum attestations gathered
-        self.finality_manager = FinalityManager(
-            db_path=os.path.join(data_dir, "finality", "finality.db")
-        )
+        # Block at height H is FINAL when chain height >= H + FINALITY_DEPTH
+        # No voting, no quorum, no attestations - purely height-based
         
         # Track the previous frame for delta computation
         self._previous_validator_frame: Optional[ValidatorStateFrame] = None
@@ -3294,19 +3291,25 @@ class Ledger:
         """
         Check if a block at given height is finalized (cannot be reorganized).
         
-        Uses attestation-based finality from FinalityManager.
+        Uses height-based finality: block at height H is FINAL when 
+        chain height >= H + FINALITY_DEPTH.
+        
         HARD INVARIANT: NO REORG at heights <= finalized_height.
         """
-        return self.finality_manager.is_height_finalized(height)
+        chain_height = len(self.blocks) - 1
+        return is_height_finalized(height, chain_height)
     
     def get_finalized_height(self) -> int:
         """
         Get the current finalized height.
         
+        Uses height-based finality: finalized_height = chain_height - FINALITY_DEPTH
+        
         Returns:
             Finalized height (-1 if nothing finalized yet)
         """
-        return self.finality_manager.get_finalized_height()
+        chain_height = len(self.blocks) - 1
+        return compute_finalized_height(chain_height)
     
     def get_finality_info(self, height: int) -> dict:
         """
@@ -3316,18 +3319,14 @@ class Ledger:
             height: Block height
             
         Returns:
-            Dict with finality status and attestation info
+            Dict with finality status
         """
         block = self.get_block_by_height(height)
         if not block:
             return {"error": "Block not found"}
         
-        eligible_validators = self.get_eligible_validators(height)
-        return self.finality_manager.get_finality_info(
-            height, 
-            block.block_hash, 
-            len(eligible_validators)
-        )
+        chain_height = len(self.blocks) - 1
+        return finality_get_info(height, chain_height)
     
     def _validate_timeout_certificate(self, cert_tx: Transaction, block_height: int) -> bool:
         """
@@ -3576,10 +3575,6 @@ class Ledger:
         
         if self.use_production_storage and self.production_storage:
             self.production_storage.close()
-        
-        # Close finality manager database connection
-        if hasattr(self, 'finality_manager') and self.finality_manager:
-            self.finality_manager.close()
         
         self._closed = True
     

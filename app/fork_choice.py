@@ -280,7 +280,7 @@ class ForkChoice:
         Args:
             current_chain: Current canonical chain
             new_chain: Proposed new chain
-            finalized_height: Attestation-based finalized height (-1 if not provided)
+            finalized_height: Height-based finalized height (-1 if not provided)
         
         Returns:
             (allowed, reason) tuple
@@ -309,11 +309,11 @@ class ForkChoice:
                    f"Blocks at or below finalized_height are IMMUTABLE.")
         
         # Check if fork is past most recent finality checkpoint (legacy check)
-        # NOTE: This is now secondary to attestation-based finality
+        # NOTE: This is now secondary to height-based finality
         latest_checkpoint_height = self._get_latest_checkpoint_height()
         
         if fork_height <= latest_checkpoint_height:
-            # With attestation-based finality, we no longer allow network recovery
+            # With height-based finality, we no longer allow network recovery
             # past checkpoints. The finalized_height check above is the primary barrier.
             return (False, 
                    f"Fork at height {fork_height} is past finality checkpoint "
@@ -329,7 +329,7 @@ class ForkChoice:
         current_chain_length = len(current_chain)
         chain_length_advantage = new_chain_length - current_chain_length
         
-        # With attestation-based finality, we no longer allow network recovery
+        # With height-based finality, we no longer allow network recovery
         # for deep reorgs. The finalized_height check above is the primary barrier.
         if reorg_depth > self.MAX_REORG_DEPTH:
             return (False,
@@ -457,7 +457,7 @@ class ForkChoice:
         Args:
             current_chain: Current blockchain
             new_chain: Target blockchain
-            finalized_height: Attestation-based finalized height (-1 if not provided)
+            finalized_height: Height-based finalized height (-1 if not provided)
         
         Returns:
             Reorganization plan dict with:

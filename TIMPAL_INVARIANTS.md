@@ -109,19 +109,18 @@ Explorer is read-only and must never affect consensus.
 
 ---
 
-## 10. Attestation-Based Finality
+## 10. Height-Based Finality
 
 ### 10.1 Definitions
 
-- CONFIRMED: Transaction included in a block at height H (1-block confirmation).
-- FINAL: Block at height H has >= QUORUM attestations from eligible validators AND is at least FINALITY_DEPTH blocks behind head.
-- finalized_height: The highest block height that is FINAL. Monotonically increasing.
+- CONFIRMED: Transaction included in a block at height H (1-block confirmation, ~3s).
+- FINAL: Block at height H when chain height >= H + FINALITY_DEPTH.
+- finalized_height: chain_height - FINALITY_DEPTH. Monotonically increasing.
 
 ### 10.2 Finality Parameters (Immutable)
 
-- FINALITY_QUORUM = max(2, floor(eligible_validators / 3))
-- FINALITY_DEPTH = 1 (finalize block H when head >= H+1)
-- Attestation message: hash("TIMPAL_ATTEST_V1" || chain_id || height || block_hash)
+- FINALITY_DEPTH = 2 (block at height H is FINAL when chain height >= H+2)
+- No voting, no quorum, no attestations - purely height-based.
 
 ### 10.3 Hard Invariants
 
@@ -134,17 +133,16 @@ Explorer is read-only and must never affect consensus.
 - finalized_height can only increase, never decrease.
 - Once a block is FINAL, it remains FINAL forever.
 
-**F3: FINAL requires quorum attestations**
-- A block becomes FINAL only when it has >= FINALITY_QUORUM attestations from eligible validators.
-- Attestations are counted once per validator (no duplicates).
-- Only eligible validators' attestations are counted.
+**F3: FINAL is deterministic**
+- A block becomes FINAL automatically when FINALITY_DEPTH blocks are built on top of it.
+- No voting or attestation required.
+- All nodes compute the same finalized_height from chain height.
 
-### 10.4 Attestation Rules
+### 10.4 Finality Calculation
 
-- Validators sign attestations for blocks they observe as canonical.
-- Attestations propagate via P2P message type "finality_attestation".
-- Invalid signatures are rejected.
-- Attestations from non-eligible validators are ignored.
+- finalized_height = chain_height - FINALITY_DEPTH
+- If chain_height < FINALITY_DEPTH, finalized_height = -1 (nothing finalized yet)
+- Block at height H is finalized when: chain_height >= H + FINALITY_DEPTH
 
 ---
 

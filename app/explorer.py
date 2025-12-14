@@ -1741,7 +1741,8 @@ async def api_get_finality(request: Request):
     """
     API endpoint: Get finality status (JSON)
     
-    Returns finalized_height, quorum info, and recent attestation counts.
+    Returns finalized_height and recent blocks with finality status.
+    Uses HEIGHT-BASED FINALITY: block at height H is FINAL when chain height >= H + FINALITY_DEPTH.
     
     HARD INVARIANT: NO REORG at heights <= finalized_height.
     Blocks at or below finalized_height are IMMUTABLE.
@@ -1750,18 +1751,15 @@ async def api_get_finality(request: Request):
         JSON with:
         - finalized_height: Height of last finalized block (-1 if none)
         - current_height: Current chain height
-        - quorum: Required attestations for finality
+        - finality_depth: Number of blocks required for finality
         - recent_blocks: List of recent blocks with finality status
     """
+    from app.finality import FINALITY_DEPTH
+    
     ledger = get_ledger()
     
     finalized_height = ledger.get_finalized_height()
     current_height = ledger.get_block_count() - 1
-    
-    # Get eligible validators count for quorum calculation
-    eligible_validators = ledger.get_eligible_validators(current_height)
-    eligible_count = len(eligible_validators)
-    quorum = max(2, eligible_count // 3)
     
     # Get recent blocks with finality status
     recent_blocks = []
@@ -1769,22 +1767,19 @@ async def api_get_finality(request: Request):
     for height in range(start_height, current_height + 1):
         block = ledger.get_block_by_height(height)
         if block:
-            is_finalized = height <= finalized_height
             finality_info = ledger.get_finality_info(height)
             recent_blocks.append({
                 "height": height,
                 "block_hash": block.block_hash[:16] + "...",
                 "proposer": block.proposer[:20] + "..." if block.proposer else "N/A",
-                "status": "FINAL" if is_finalized else "CONFIRMED",
-                "attestation_count": finality_info.get("attestation_count", 0),
-                "quorum": finality_info.get("quorum", quorum)
+                "status": "FINAL" if finality_info.get("is_finalized", False) else "CONFIRMED",
+                "blocks_until_final": finality_info.get("blocks_until_final", 0)
             })
     
     return {
         "finalized_height": finalized_height,
         "current_height": current_height,
-        "quorum": quorum,
-        "eligible_validators": eligible_count,
+        "finality_depth": FINALITY_DEPTH,
         "recent_blocks": recent_blocks
     }
 
