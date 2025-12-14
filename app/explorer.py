@@ -1735,6 +1735,60 @@ async def api_get_blockchain_info(request: Request):
     }
 
 
+@app.get("/api/finality")
+@limiter.limit("100/minute")
+async def api_get_finality(request: Request):
+    """
+    API endpoint: Get finality status (JSON)
+    
+    Returns finalized_height, quorum info, and recent attestation counts.
+    
+    HARD INVARIANT: NO REORG at heights <= finalized_height.
+    Blocks at or below finalized_height are IMMUTABLE.
+    
+    Returns:
+        JSON with:
+        - finalized_height: Height of last finalized block (-1 if none)
+        - current_height: Current chain height
+        - quorum: Required attestations for finality
+        - recent_blocks: List of recent blocks with finality status
+    """
+    ledger = get_ledger()
+    
+    finalized_height = ledger.get_finalized_height()
+    current_height = ledger.get_block_count() - 1
+    
+    # Get eligible validators count for quorum calculation
+    eligible_validators = ledger.get_eligible_validators(current_height)
+    eligible_count = len(eligible_validators)
+    quorum = max(2, eligible_count // 3)
+    
+    # Get recent blocks with finality status
+    recent_blocks = []
+    start_height = max(0, current_height - 10)
+    for height in range(start_height, current_height + 1):
+        block = ledger.get_block_by_height(height)
+        if block:
+            is_finalized = height <= finalized_height
+            finality_info = ledger.get_finality_info(height)
+            recent_blocks.append({
+                "height": height,
+                "block_hash": block.block_hash[:16] + "...",
+                "proposer": block.proposer[:20] + "..." if block.proposer else "N/A",
+                "status": "FINAL" if is_finalized else "CONFIRMED",
+                "attestation_count": finality_info.get("attestation_count", 0),
+                "quorum": finality_info.get("quorum", quorum)
+            })
+    
+    return {
+        "finalized_height": finalized_height,
+        "current_height": current_height,
+        "quorum": quorum,
+        "eligible_validators": eligible_count,
+        "recent_blocks": recent_blocks
+    }
+
+
 @app.get("/api/blocks/range")
 @limiter.limit("100/minute")
 async def api_get_blocks_range(request: Request, start: int, end: int):
