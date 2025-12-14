@@ -32,6 +32,27 @@ import config
 
 
 # ============================================================
+# CANONICAL VALIDATOR ID (SINGLE SOURCE OF TRUTH)
+# ============================================================
+
+def canonical_validator_id(addr: str) -> str:
+    """
+    Canonical validator identity for finality attestations.
+    
+    CRITICAL: VRF input, VRF winner, attestation validator_id, and local node
+    identity MUST use the SAME canonical string. This function ensures
+    consistent identity comparison across the finality system.
+    
+    Args:
+        addr: Validator address (may have mixed case, whitespace, etc.)
+        
+    Returns:
+        Canonical lowercase, stripped address string
+    """
+    return (addr or "").strip().lower()
+
+
+# ============================================================
 # CONSTANTS (MAINNET-SAFE, IMMUTABLE)
 # ============================================================
 
