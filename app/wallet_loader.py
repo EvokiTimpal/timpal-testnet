@@ -6,6 +6,7 @@ import os
 from typing import Optional, Tuple
 from app.wallet import Wallet
 from app.seed_wallet import SeedWallet
+from app.metawallet import MultiWallet
 
 
 def load_wallet_unified(wallet_path: str, password: str, passphrase: str = "") -> Tuple[str, str, str]:
@@ -35,6 +36,20 @@ def load_wallet_unified(wallet_path: str, password: str, passphrase: str = "") -
         
         version = wallet_data.get("version", 1)
         
+        if version == 3:
+            # Load v3 multi-vault wallet (MetaMask-like)
+            mw = MultiWallet(wallet_path)
+            mw.load(password, passphrase=passphrase)
+
+            # Optional selection via env vars
+            vault_id = os.getenv("TIMPAL_WALLET_ID") or mw.default_vault_id
+            acct_index = int(os.getenv("TIMPAL_WALLET_ACCOUNT", "0"))
+
+            vault = mw.get_vault(vault_id)
+            acct = vault.get_account(acct_index)
+            addr, pub, priv = mw.export_account_private_key(password, vault_id=vault.vault_id, index=acct.index, passphrase=passphrase)
+            return addr, pub, priv
+
         if version == 2:
             # Load v2 wallet (BIP-39)
             wallet = SeedWallet(wallet_path)
@@ -89,6 +104,11 @@ def get_wallet_info(wallet_path: str) -> dict:
     if info["exists"]:
         version = detect_wallet_version(wallet_path)
         info["version"] = version
-        info["type"] = "BIP-39 (v2)" if version == 2 else "Legacy (v1)"
+        if version == 3:
+            info["type"] = "Multi-vault HD (v3)"
+        elif version == 2:
+            info["type"] = "BIP-39 (v2)"
+        else:
+            info["type"] = "Legacy (v1)"
     
     return info

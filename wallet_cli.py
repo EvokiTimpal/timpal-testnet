@@ -92,11 +92,23 @@ def create_new_wallet():
             print("❌ Passphrases don't match. Aborting.")
             return False
     
-    # Create wallet
-    wallet = SeedWallet("wallet_v2.json")
+    # Create wallet (v3 multi-vault) WITHOUT overwriting existing wallets
+    wallet = MultiWallet("wallets.json")
     try:
-        mnemonic = wallet.create_new_wallet(password=password, pin=pin, words=words, passphrase=passphrase)
-        account = wallet.get_account(0)
+        # If an existing wallets.json exists, we need to load it first so we append a new vault
+        if os.path.exists("wallets.json"):
+            wallet.load(password, passphrase=passphrase)
+        mnemonic = wallet.create_vault(
+            name=f"Wallet {len(wallet.vaults) + 1}",
+            password=password,
+            pin=pin,
+            words=words,
+            passphrase=passphrase,
+            make_default=True,
+        )
+
+        vault = wallet.get_vault(wallet.default_vault_id)
+        account = vault.get_account(0)
         
         print("\n" + "="*70)
         print("✅ WALLET CREATED SUCCESSFULLY!")
@@ -118,13 +130,14 @@ def create_new_wallet():
             print("   7. 🔐 You ALSO need your passphrase to restore!")
         
         print("\n📍 Your TIMPAL Address:")
-        print(f"   {account['address']}")
+        print(f"   {account.address}")
         
         print("\n🔑 Public Key:")
-        print(f"   {account['public_key'][:32]}...{account['public_key'][-32:]}")
+        print(f"   {account.public_key[:32]}...{account.public_key[-32:]}")
         
-        print("\n💾 Wallet saved to: wallet_v2.json")
-        print(f"📂 Derivation path: {account['path']}")
+        print("\n💾 Wallet saved to: wallets.json (multi-vault)")
+        print(f"🧩 Vault ID (keep this): {vault.vault_id}")
+        print(f"📂 Derivation path: {account.path}")
         print("\n" + "="*70)
         
         # Verification step
@@ -204,24 +217,35 @@ def restore_wallet():
     if use_passphrase == "yes":
         passphrase = getpass("   Enter passphrase: ")
     
-    # Restore wallet
-    wallet = SeedWallet("wallet_v2.json")
+    # Restore wallet into v3 multi-vault file (does not overwrite existing vaults)
+    wallet = MultiWallet("wallets.json")
     try:
-        wallet.restore_wallet(mnemonic=mnemonic, password=password, pin=pin, passphrase=passphrase)
-        account = wallet.get_account(0)
+        if os.path.exists("wallets.json"):
+            wallet.load(password, passphrase=passphrase)
+        wallet.restore_vault(
+            name=f"Wallet {len(wallet.vaults) + 1}",
+            mnemonic=mnemonic,
+            password=password,
+            pin=pin,
+            passphrase=passphrase,
+            make_default=True,
+        )
+        vault = wallet.get_vault(wallet.default_vault_id)
+        account = vault.get_account(0)
         
         print("\n" + "="*70)
         print("✅ WALLET RESTORED SUCCESSFULLY!")
         print("="*70)
         
         print(f"\n📍 Your TIMPAL Address:")
-        print(f"   {account['address']}")
+        print(f"   {account.address}")
         
         print(f"\n🔑 Public Key:")
-        print(f"   {account['public_key'][:32]}...{account['public_key'][-32:]}")
+        print(f"   {account.public_key[:32]}...{account.public_key[-32:]}")
         
-        print(f"\n💾 Wallet saved to: wallet_v2.json")
-        print(f"📂 Derivation path: {account['path']}")
+        print(f"\n💾 Wallet saved to: wallets.json (multi-vault)")
+        print(f"🧩 Vault ID (keep this): {vault.vault_id}")
+        print(f"📂 Derivation path: {account.path}")
         print("\n" + "="*70 + "\n")
         
         return True
@@ -242,7 +266,8 @@ def restore_wallet():
 
 def view_wallet_info():
     """View existing wallet information"""
-    wallet_file = "wallet_v2.json"
+    # Prefer v3 multi-vault file
+    wallet_file = "wallets.json" if os.path.exists("wallets.json") else "wallet_v2.json"
     
     if not os.path.exists(wallet_file):
         print(f"\n❌ No wallet found at {wallet_file}")
@@ -257,21 +282,37 @@ def view_wallet_info():
     if use_passphrase == "yes":
         passphrase = getpass("Enter passphrase: ")
     
-    wallet = SeedWallet(wallet_file)
     try:
-        wallet.load_wallet(password, passphrase=passphrase)
-        account = wallet.get_account(0)
+        if wallet_file == "wallets.json":
+            mw = MultiWallet(wallet_file)
+            mw.load(password, passphrase=passphrase)
+            vault_id = os.getenv("TIMPAL_WALLET_ID") or mw.default_vault_id
+            acct_index = int(os.getenv("TIMPAL_WALLET_ACCOUNT", "0"))
+            vault = mw.get_vault(vault_id)
+            account = vault.get_account(acct_index)
+            version_label = "3 (Multi-vault HD)"
+        else:
+            wallet = SeedWallet(wallet_file)
+            wallet.load_wallet(password, passphrase=passphrase)
+            account = wallet.get_account(0)
+            version_label = "2 (BIP-39 Compatible)"
         
         print("\n" + "="*70)
         print("💼 WALLET INFORMATION")
         print("="*70)
-        print(f"\n📍 Address: {account['address']}")
-        print(f"🔑 Public Key: {account['public_key'][:32]}...{account['public_key'][-32:]}")
-        print(f"📂 Derivation Path: {account['path']}")
+        if wallet_file == "wallets.json":
+            print(f"\n📍 Address: {account.address}")
+            print(f"🔑 Public Key: {account.public_key[:32]}...{account.public_key[-32:]}")
+            print(f"📂 Derivation Path: {account.path}")
+            print(f"🧩 Vault ID: {vault_id}")
+        else:
+            print(f"\n📍 Address: {account['address']}")
+            print(f"🔑 Public Key: {account['public_key'][:32]}...{account['public_key'][-32:]}")
+            print(f"📂 Derivation Path: {account['path']}")
         print(f"📁 Wallet File: {wallet_file}")
-        print(f"🔢 Wallet Version: 2 (BIP-39 Compatible)")
+        print(f"🔢 Wallet Version: {version_label}")
         print("\n" + "="*70 + "\n")
-        
+
     except ValueError as e:
         print(f"\n❌ Error: {e}")
     except Exception as e:
@@ -280,7 +321,7 @@ def view_wallet_info():
 
 def check_balance(address: str = None, node_api: str = DEFAULT_NODE_API):
     """Check wallet balance from the network"""
-    wallet_file = "wallet_v2.json"
+    wallet_file = "wallets.json" if os.path.exists("wallets.json") else "wallet_v2.json"
     
     # If no address provided, load from wallet
     if address is None:
@@ -295,11 +336,18 @@ def check_balance(address: str = None, node_api: str = DEFAULT_NODE_API):
         if use_passphrase == "yes":
             passphrase = getpass("Enter passphrase: ")
         
-        wallet = SeedWallet(wallet_file)
         try:
-            wallet.load_wallet(password, passphrase=passphrase)
-            account = wallet.get_account(0)
-            address = account['address']
+            if wallet_file == "wallets.json":
+                mw = MultiWallet(wallet_file)
+                mw.load(password, passphrase=passphrase)
+                vault_id = os.getenv("TIMPAL_WALLET_ID") or mw.default_vault_id
+                acct_index = int(os.getenv("TIMPAL_WALLET_ACCOUNT", "0"))
+                vault = mw.get_vault(vault_id)
+                address = vault.get_account(acct_index).address
+            else:
+                wallet = SeedWallet(wallet_file)
+                wallet.load_wallet(password, passphrase=passphrase)
+                address = wallet.get_account(0)["address"]
         except Exception as e:
             print(f"\n❌ Error loading wallet: {e}")
             return
@@ -342,7 +390,7 @@ def check_balance(address: str = None, node_api: str = DEFAULT_NODE_API):
 
 def send_tmpl(node_api: str = DEFAULT_NODE_API):
     """Send TMPL to another address"""
-    wallet_file = "wallet_v2.json"
+    wallet_file = "wallets.json" if os.path.exists("wallets.json") else "wallet_v2.json"
     
     if not os.path.exists(wallet_file):
         print(f"\n❌ No wallet found. Create or restore a wallet first.\n")
@@ -356,13 +404,26 @@ def send_tmpl(node_api: str = DEFAULT_NODE_API):
     if use_passphrase == "yes":
         passphrase = getpass("Enter passphrase: ")
     
-    wallet = SeedWallet(wallet_file)
     try:
-        wallet.load_wallet(password, passphrase=passphrase)
-        account = wallet.get_account(0)
-        sender_address = account['address']
-        private_key = account['private_key']
-        public_key = account['public_key']
+        if wallet_file == "wallets.json":
+            mw = MultiWallet(wallet_file)
+            mw.load(password, passphrase=passphrase)
+            vault_id = os.getenv("TIMPAL_WALLET_ID") or mw.default_vault_id
+            acct_index = int(os.getenv("TIMPAL_WALLET_ACCOUNT", "0"))
+            vault = mw.get_vault(vault_id)
+            account = vault.get_account(acct_index)
+            sender_address, public_key, private_key = mw.export_account_private_key(
+                password, vault_id=vault_id, index=account.index, passphrase=passphrase
+            )
+            pin_validator = vault.validate_pin
+        else:
+            wallet = SeedWallet(wallet_file)
+            wallet.load_wallet(password, passphrase=passphrase)
+            acc = wallet.get_account(0)
+            sender_address = acc['address']
+            private_key = acc['private_key']
+            public_key = acc['public_key']
+            pin_validator = wallet.validate_pin
     except Exception as e:
         print(f"\n❌ Error loading wallet: {e}")
         return
@@ -448,7 +509,7 @@ def send_tmpl(node_api: str = DEFAULT_NODE_API):
     pin = input("Enter your 6-digit PIN to authorize: ").strip()
     
     # Verify PIN
-    if not wallet.validate_pin(pin):
+    if not pin_validator(pin):
         print("\n❌ Invalid PIN. Transaction cancelled.")
         return
     

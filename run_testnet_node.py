@@ -138,6 +138,7 @@ class TestnetNode:
         print(f"Working directory: {os.getcwd()}")
         print(f"Data directory: {self.data_dir}")
         print(f"Files in current dir: {os.listdir('.')[:20]}...")  # First 20 files
+        print(f"wallets.json exists: {os.path.exists('wallets.json')}")
         print(f"wallet_v2.json exists: {os.path.exists('wallet_v2.json')}")
         print(f"wallet.json exists: {os.path.exists('wallet.json')}")
         print(f"TIMPAL_WALLET_PASSWORD set: {'Yes' if os.environ.get('TIMPAL_WALLET_PASSWORD') else 'NO!'}")
@@ -153,8 +154,12 @@ class TestnetNode:
         # TESTNET: Load wallet (v2 or v1) and set genesis validator
         # -----------------------------------------------
         
-        # Check for v2 wallet first, then v1
-        if os.path.exists("wallet_v2.json"):
+        # Check for v3 multi-vault wallet first, then v2, then v1
+        if os.path.exists("wallets.json"):
+            wallet_path = "wallets.json"
+            wallet_version = 3
+            print(f"[TESTNET] Loading v3 wallet (multi-vault HD)")
+        elif os.path.exists("wallet_v2.json"):
             wallet_path = "wallet_v2.json"
             wallet_version = 2
             print(f"[TESTNET] Loading v2 wallet (BIP-39)")
@@ -164,24 +169,33 @@ class TestnetNode:
             print(f"[TESTNET] Loading v1 wallet (legacy)")
         else:
             print("❌ FATAL: No wallet file found!")
-            print(f"   Looked for: wallet_v2.json, wallet.json")
+            print(f"   Looked for: wallets.json, wallet_v2.json, wallet.json")
             print(f"   Current directory: {os.getcwd()}")
             print(f"   Directory contents: {os.listdir('.')}")
             raise ValueError("No wallet found (wallet_v2.json or wallet.json) — cannot start testnet node")
         
         # Load wallet based on version
-        if wallet_version == 2:
+        if wallet_version in (2, 3):
             # v2 wallet: Use TIMPAL_WALLET_PASSWORD for decryption
             wallet_password = os.environ.get("TIMPAL_WALLET_PASSWORD")
             if not wallet_password:
-                raise ValueError("TIMPAL_WALLET_PASSWORD environment variable not set — cannot decrypt v2 wallet")
-            
-            temp_wallet = SeedWallet(wallet_path)
-            temp_wallet.load_wallet(password=wallet_password)
-            account = temp_wallet.get_account(0)
-            private_key = account["private_key"]
-            public_key = account["public_key"]
-            reward_address = account["address"]
+                raise ValueError("TIMPAL_WALLET_PASSWORD environment variable not set — cannot decrypt wallet")
+
+            if wallet_version == 3:
+                from app.metawallet import MultiWallet
+                mw = MultiWallet(wallet_path)
+                mw.load(wallet_password)
+                vault_id = os.getenv("TIMPAL_WALLET_ID") or mw.default_vault_id
+                acct_index = int(os.getenv("TIMPAL_WALLET_ACCOUNT", "0"))
+                addr, public_key, private_key = mw.export_account_private_key(wallet_password, vault_id=vault_id, index=acct_index)
+                reward_address = addr
+            else:
+                temp_wallet = SeedWallet(wallet_path)
+                temp_wallet.load_wallet(password=wallet_password)
+                account = temp_wallet.get_account(0)
+                private_key = account["private_key"]
+                public_key = account["public_key"]
+                reward_address = account["address"]
         else:
             # v1 wallet: Use TIMPAL_WALLET_PIN for decryption (legacy behavior)
             wallet_pin = os.environ.get("TIMPAL_WALLET_PIN")

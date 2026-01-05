@@ -27,29 +27,24 @@ def print_header(title):
 
 def load_wallet():
     """Load wallet and return address"""
-    # Check for v2 wallet first, then v1
+    # Check for v3 multi-vault wallet first, then v2, then v1
     wallet_file = None
-    if os.path.exists("wallet_v2.json"):
+    if os.path.exists("wallets.json"):
+        wallet_file = "wallets.json"
+    elif os.path.exists("wallet_v2.json"):
         wallet_file = "wallet_v2.json"
-        wallet_version = 2
     elif os.path.exists("wallet.json"):
         wallet_file = "wallet.json"
-        wallet_version = 1
     else:
         print(f"❌ Wallet not found. Please create a wallet first.")
         print(f"   Run: python3 wallet_cli_v2.py")
         return None
-    
+
     pin = input(f"Enter your wallet PIN/password: ")
     try:
-        if wallet_version == 2:
-            wallet = SeedWallet(wallet_file)
-            wallet.load_wallet(password=pin)
-            return wallet.get_account(0)["address"]
-        else:
-            wallet = Wallet(wallet_file)
-            wallet.load_wallet(pin)
-            return wallet.address
+        # Unified loader handles v1/v2/v3; for address we don't need private key output.
+        address, _pub, _priv = load_wallet_unified(wallet_file, password=pin)
+        return address
     except Exception as e:
         print(f"❌ Failed to load wallet: {e}")
         return None

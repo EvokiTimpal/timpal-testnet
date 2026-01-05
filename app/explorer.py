@@ -1378,49 +1378,60 @@ async def submit_transfer(request: Request, sender_address: str = Form(...), pas
         except ValueError:
             return JSONResponse({"error": "Invalid amount format"}, status_code=400)
         
-        # Auto-discover wallet_v2.json file
+        # Auto-discover wallet files (v3 wallets.json, v2 wallet_v2.json, legacy wallet.json)
         import glob
+        import json
         from app.seed_wallet import SeedWallet
-        
-        wallet_files = glob.glob("wallet*.json") + glob.glob("**/wallet*.json", recursive=True)
-        seed_wallet = None
-        wallet_address = None
-        
+        from app.metawallet import MultiWallet
+
+        wallet_files = (
+            glob.glob("wallets.json")
+            + glob.glob("wallet*.json")
+            + glob.glob("**/wallets.json", recursive=True)
+            + glob.glob("**/wallet*.json", recursive=True)
+        )
+
+        wallet_private_key = None
+        wallet_public_key = None
+
         for wf in wallet_files:
             try:
-                # Try to load as SeedWallet (v2)
-                temp_wallet = SeedWallet(wf)
-                # CRITICAL: load_wallet() doesn't return bool - it raises ValueError on failure
-                temp_wallet.load_wallet(password)  # Raises ValueError if password wrong
-                
-                # Check if this wallet has an account matching sender_address
-                # CRITICAL: accounts dict uses INTEGER keys (0, 1, 2...), not strings!
-                account = temp_wallet.accounts.get(0)  # Get first account (integer 0)
-                if account and account['address'] == sender_address:
-                    seed_wallet = temp_wallet
-                    wallet_address = account['address']
+                with open(wf, "r") as f:
+                    meta = json.load(f)
+                version = meta.get("version", 1)
+
+                if version == 3:
+                    mw = MultiWallet(wf)
+                    mw.load(password)
+                    found = mw.find_account(sender_address)
+                    if not found:
+                        continue
+                    vault_id, acct = found
+                    vault = mw.get_vault(vault_id)
+                    if not vault.validate_pin(pin):
+                        return JSONResponse({"error": "Incorrect PIN"}, status_code=400)
+                    _addr, wallet_public_key, wallet_private_key = mw.export_account_private_key(
+                        password, vault_id=vault_id, index=acct.index
+                    )
                     break
-            except ValueError as e:
-                # Bad password - try next wallet file
+
+                if version == 2:
+                    temp_wallet = SeedWallet(wf)
+                    temp_wallet.load_wallet(password)
+                    # v2 only stores one derived account (0) in practice
+                    account = temp_wallet.accounts.get(0)
+                    if account and account["address"] == sender_address:
+                        if not temp_wallet.validate_pin(pin):
+                            return JSONResponse({"error": "Incorrect PIN"}, status_code=400)
+                        wallet_private_key = account["private_key"]
+                        wallet_public_key = account["public_key"]
+                        break
+
+            except Exception:
                 continue
-            except Exception as e:
-                # Other errors (file format, etc.)
-                continue
-        
-        if not seed_wallet:
-            return JSONResponse({"error": "Wallet not found for this address, or incorrect password"}, status_code=400)
-        
-        # Get account keys (use integer 0, not string "0")
-        account = seed_wallet.accounts.get(0)
-        if not account:
-            return JSONResponse({"error": "No account found in wallet"}, status_code=500)
-        
-        # Verify PIN before using keys
-        if not seed_wallet.validate_pin(pin):
-            return JSONResponse({"error": "Incorrect PIN"}, status_code=400)
-        
-        wallet_private_key = account['private_key']
-        wallet_public_key = account['public_key']
+
+        if not wallet_private_key or not wallet_public_key:
+            return JSONResponse({"error": "Wallet not found for this address, incorrect password, or unsupported wallet"}, status_code=400)
         
         # Get current nonce from node
         import os
