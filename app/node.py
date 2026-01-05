@@ -1194,52 +1194,17 @@ class Node:
                     await asyncio.sleep(config.BLOCK_TIME)
                     continue
             
-            # TIME-SLICED SLOTS CONSENSUS: Deterministic fallback without race conditions
-            # Each 3-second slot is divided into 3×1-second windows:
-            # Window 0 (0-1s): Primary proposer only
-            # Window 1 (1-2s): Fallback #1 only  
-            # Window 2 (2-3s): Fallback #2 only
-            # 
-            # KEY: Blocks are ONLY valid if timestamp falls in correct window for their rank
-            # This prevents race conditions when offline validators come back online
-            from time_slots import (
-                get_realtime_slot, am_i_proposer_now, time_until_my_window
-            )
-            
-            # Get genesis timestamp for window calculations
-            genesis_block = self.ledger.get_block_by_height(0)
-            if not genesis_block:
-                print(f"❌ No genesis block found, cannot determine time windows")
-                continue
-            
-            genesis_timestamp = genesis_block.timestamp
-            
-            # SLOT IS WALL-CLOCK BASED: Calculate real-time slot independent of chain height
-            # This allows the network to "catch up" to current time after bootstrap period
-            realtime_slot = get_realtime_slot(genesis_timestamp)
-            
-            # MULTI-VALIDATOR FIX: Use current slot, let window logic handle timing
-            # Previous bug: Skipping to next slot when active_rank != 0 caused all validators
-            # to collectively skip slots, resulting in 6s, 9s, 12s gaps instead of 3s blocks.
-            # 
-            # The correct approach: Use the current wall-clock slot and let each validator
-            # check if their window is open. Window validation in ledger.add_block ensures
-            # only the correct rank can produce a valid block at any given time.
-            from time_slots import current_slot_and_rank, WINDOW_SECONDS
-            current_time = time.time()
-            current_slot_check, active_rank = current_slot_and_rank(genesis_timestamp, current_time)
-            
-            # Use current slot - don't skip ahead based on active_rank
-            # Each validator will check if their window is open in the am_i_proposer_now call
-            current_slot = current_slot_check
-            
-            # Log slot info for debugging (only when slots are skipped due to real-time catch-up)
-            if latest_block.slot and current_slot > latest_block.slot + 1:
-                skipped_slots = current_slot - latest_block.slot - 1
-                print(f"⏩ SLOT SKIP: Jumped from slot {latest_block.slot} to {current_slot}")
-                print(f"   Skipped {skipped_slots} empty slot(s) - network catching up to real-time")
-                print(f"   Height remains sequential: {latest_block.height} → {next_height}")
-            
+            # TIME-SLICED WINDOWS (TSW): Deterministic proposer fallback without forks.
+            #
+            # CRITICAL FIX: Anchor windows to the *parent block timestamp*, not wall-clock
+            # time derived from genesis. This keeps all nodes aligned even if blocks are
+            # occasionally delayed by network jitter.
+            from time_slots import am_i_proposer_now_relative, time_until_my_window_relative
+
+            # Slot should be deterministic and derived from chain progression.
+            # Use one slot per height (slot == height) to avoid clock-skew forks.
+            current_slot = next_height
+
             # Get ranked proposers for this slot (primary, fallback1, fallback2)
             ranked_proposers = self.ledger.get_ranked_proposers_for_slot(current_slot, num_ranks=3)
             
@@ -1249,7 +1214,7 @@ class Node:
                     print(f"⚠️  No active validators at height {next_height}, waiting...")
                 continue
             
-            # SINGLE-VALIDATOR FAST PATH: Skip time-sliced window logic when alone
+            # SINGLE-VALIDATOR FAST PATH: Skip window logic when alone
             # When there's only one validator, there's no need to coordinate windows
             # This prevents unnecessary slot skipping and timing delays
             is_single_validator = (len(ranked_proposers) == 1 and ranked_proposers[0] == self.reward_address)
@@ -1259,33 +1224,21 @@ class Node:
                 my_rank = 0
                 is_my_turn = True
             else:
-                # Multi-validator mode: use full time-sliced window logic
-                # Check if I'm one of the ranked proposers for this slot
-                my_rank = None
-                for i, addr in enumerate(ranked_proposers):
-                    if addr == self.reward_address:
-                        my_rank = i
-                        break
-                
-                if my_rank is None:
-                    # DEBUG: Print proposers to diagnose why nodes aren't being selected
-                    print(f"🔍 DEBUG: Height {next_height}, Proposers: {[p[:20]+'...' for p in ranked_proposers]}, Me: {self.reward_address[:20]}...")
-                    # Not my turn to propose - wait for next slot
+                # Multi-validator mode: use chain-anchored time-sliced windows.
+                is_my_turn, my_rank = am_i_proposer_now_relative(
+                    self.reward_address,
+                    ranked_proposers,
+                    parent_timestamp=latest_block.timestamp,
+                )
+
+                if my_rank < 0:
+                    # Not a proposer for this slot.
                     await asyncio.sleep(0.1)
                     continue
                 
-                # I'm a ranked proposer! Check if it's currently my window
-                # BOOTSTRAP: Use lenient timing for first 10 blocks to handle stale genesis timestamp
-                # After block 10, strict Time-Sliced Windows enforcement (preserves safety invariant)
-                lenient_bootstrap = next_height <= 10
-                
-                is_my_turn, _ = am_i_proposer_now(self.reward_address, ranked_proposers, 
-                                                   genesis_timestamp, current_slot, 
-                                                   lenient_bootstrap=lenient_bootstrap)
-                
                 if not is_my_turn:
                     # Not my window yet - check when my window opens
-                    wait_time = time_until_my_window(my_rank, genesis_timestamp, current_slot)
+                    wait_time = time_until_my_window_relative(my_rank, latest_block.timestamp)
                     
                     if wait_time > 0 and wait_time < 1.5:
                         # My window is upcoming - wait for it to open
@@ -1381,9 +1334,9 @@ class Node:
                 block_timestamp = time.time()
             else:
                 # Calculate the time-sliced window bounds for this (slot, rank)
-                slot_start = genesis_timestamp + current_slot * config.BLOCK_TIME
-                window_start = slot_start + my_rank * WINDOW_SECONDS
-                window_end = window_start + WINDOW_SECONDS
+                # using CHAIN-ANCHORED windows relative to the parent block.
+                from time_slots import relative_window_bounds
+                window_start, window_end = relative_window_bounds(latest_block.timestamp, my_rank)
                 
                 # Small epsilon to avoid boundary precision issues (ChatGPT Fix F: increased to 50ms)
                 EPS = 0.050

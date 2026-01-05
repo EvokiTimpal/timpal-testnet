@@ -317,30 +317,29 @@ class Ledger:
                 if time_diff > 60:  # More than 1 minute in future
                     print(f"⚠️  CLOCK DRIFT: Block {block.height} timestamp is {time_diff:.0f}s ahead of local time - syncing anyway")
             
-            # TIME-SLICED SLOTS VALIDATION: Ensure block timestamp is within assigned window
-            # This prevents race conditions when offline validators come back online
-            # Only the correct (slot, rank) can propose in their assigned time window
-            # BOOTSTRAP EXCEPTION: Skip for first 10 blocks to handle delayed genesis startup
+            # TIME-SLICED SLOTS VALIDATION: Ensure block timestamp is within assigned window.
+            #
+            # IMPORTANT FIX: Validate windows relative to the parent block timestamp, not
+            # genesis wall-clock time. This prevents harmless network delays from pushing
+            # blocks outside absolute genesis-derived windows (which would stall the chain).
+            #
+            # BOOTSTRAP EXCEPTION: Skip for first 10 blocks.
             BOOTSTRAP_HEIGHT = 10
             if not skip_proposer_check and hasattr(block, 'slot') and hasattr(block, 'rank'):
-                from time_slots import validate_block_window
-                
-                # Get genesis timestamp
-                genesis_block = self.get_block_by_height(0)
-                if not genesis_block:
-                    print(f"REJECT: Cannot validate window - no genesis block found")
-                    return False
-                
-                genesis_timestamp = genesis_block.timestamp
-                
-                # BOOTSTRAP: Skip strict window validation for first N blocks
-                # This allows the network to bootstrap even if genesis timestamp is stale
+                from time_slots import validate_block_window_relative
+
                 if block.height <= BOOTSTRAP_HEIGHT:
                     print(f"🔧 BOOTSTRAP: Skipping window validation for block {block.height} (grace period)")
-                elif not validate_block_window(block.timestamp, genesis_timestamp, block.slot, block.rank):
-                    print(f"REJECT: Block timestamp {block.timestamp} outside assigned window")
-                    print(f"  Slot: {block.slot}, Rank: {block.rank}")
-                    return False
+                else:
+                    parent = self.get_block_by_height(block.height - 1)
+                    if not parent:
+                        print(f"REJECT: Cannot validate window - missing parent block for height {block.height}")
+                        return False
+
+                    if not validate_block_window_relative(block.timestamp, parent.timestamp, block.rank):
+                        print(f"REJECT: Block timestamp {block.timestamp} outside assigned relative window")
+                        print(f"  Rank: {block.rank}")
+                        return False
                 
                 # Verify proposer matches expected rank in VRF queue
                 ranked_proposers = self.get_ranked_proposers_for_slot(block.slot, num_ranks=3)
@@ -2376,17 +2375,19 @@ class Ledger:
             self.proposer_queues = {}
         self.proposer_queues[current_height] = proposer_queue
         
-        # ROUND-BASED PROPOSER SELECTION: Use current round to select from VRF queue
-        # Round 0 = primary proposer (first in queue)
-        # Round 1+ = fallback proposers (rotate through queue deterministically)
-        current_round = self.get_current_round(current_height)
-        proposer_index = current_round % len(proposer_queue)
-        selected = proposer_queue[proposer_index]
-        
-        if current_round > 0:
-            print(f"🎲 VRF proposer [height {current_height}, round {current_round}]: {selected[:20]}... (fallback #{current_round}, committee: {len(committee)})")
-        else:
-            print(f"🎲 VRF proposer [height {current_height}]: {selected[:20]}... (primary, committee: {len(committee)})")
+        # IMPORTANT CONSENSUS SAFETY:
+        # Proposer selection MUST be identical on every node given the same chain.
+        # Any dependency on *local* round counters (timeouts, wall-clock, etc.) will
+        # cause different nodes to pick different proposers for the same height/slot,
+        # producing persistent forks.
+        #
+        # This function therefore returns ONLY the primary (rank-0) proposer.
+        # Fallback proposer selection is handled by the Time-Sliced Windows (TSW)
+        # mechanism via get_ranked_proposers_for_slot(), which is validated using
+        # chain-derived timing (see time_slots.validate_block_window_relative).
+        selected = proposer_queue[0]
+
+        print(f"🎲 VRF proposer [height {current_height}]: {selected[:20]}... (primary, committee: {len(committee)})")
         
         return selected
     

@@ -118,6 +118,78 @@ def validate_block_window(block_timestamp: float, genesis_timestamp: float,
     return is_valid
 
 
+def validate_block_window_relative(block_timestamp: float, parent_timestamp: float, rank: int) -> bool:
+    """Validate a block timestamp using *chain-anchored* windows.
+
+    The original TSW implementation anchored windows to the genesis timestamp.
+    In real networks, small delays accumulate (network jitter, GC pauses, etc.),
+    which can push blocks outside their absolute genesis-derived windows even
+    when the network is healthy.
+
+    This relative validator anchors the next slot to the *parent block timestamp*:
+      expected_slot_start = parent_timestamp + SLOT_SECONDS
+
+    All nodes see the same parent timestamp, so the window bounds are
+    deterministic and drift with the chain rather than wall-clock time.
+
+    Safety properties are preserved:
+    - No overlap between adjacent ranks (no early tolerance)
+    - Small late tolerance on window end for clock drift
+    """
+    expected_slot_start = parent_timestamp + SLOT_SECONDS
+    window_start = expected_slot_start + (rank * WINDOW_SECONDS)
+    window_end = window_start + WINDOW_SECONDS
+
+    window_start_with_drift = window_start
+    window_end_with_drift = window_end + CLOCK_DRIFT_TOLERANCE
+
+    is_valid = window_start_with_drift <= block_timestamp < window_end_with_drift
+
+    if not is_valid:
+        print(f"❌ Relative window validation failed:")
+        print(f"   Block timestamp:  {block_timestamp}")
+        print(f"   Parent timestamp: {parent_timestamp}")
+        print(f"   Expected slot start: {expected_slot_start}")
+        print(f"   Window: [{window_start}, {window_end})")
+        print(f"   With drift: [{window_start_with_drift}, {window_end_with_drift})")
+        print(f"   Rank: {rank}")
+
+    return is_valid
+
+
+def relative_window_bounds(parent_timestamp: float, rank: int) -> tuple:
+    """Window bounds for the *next* slot relative to parent timestamp."""
+    expected_slot_start = parent_timestamp + SLOT_SECONDS
+    window_start = expected_slot_start + (rank * WINDOW_SECONDS)
+    window_end = window_start + WINDOW_SECONDS
+    return (window_start, window_end)
+
+
+def am_i_proposer_now_relative(my_address: str, ranked_proposers: list, parent_timestamp: float, current_time: float = None) -> tuple:
+    """Return (is_my_turn, my_rank) using chain-anchored windows."""
+    if current_time is None:
+        current_time = time.time()
+
+    try:
+        my_rank = ranked_proposers.index(my_address)
+    except ValueError:
+        return (False, -1)
+
+    window_start, window_end = relative_window_bounds(parent_timestamp, my_rank)
+
+    # No early tolerance to avoid overlaps; allow small late tolerance.
+    is_my_turn = (window_start <= current_time < (window_end + CLOCK_DRIFT_TOLERANCE))
+    return (is_my_turn, my_rank)
+
+
+def time_until_my_window_relative(my_rank: int, parent_timestamp: float, current_time: float = None) -> float:
+    """Seconds until my window opens (relative windows)."""
+    if current_time is None:
+        current_time = time.time()
+    window_start, _ = relative_window_bounds(parent_timestamp, my_rank)
+    return window_start - current_time
+
+
 def current_slot_and_rank(genesis_timestamp: float, current_time: float = None) -> tuple:
     """
     Calculate current slot and which rank's window is active right now.

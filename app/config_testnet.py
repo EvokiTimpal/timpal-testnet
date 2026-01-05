@@ -17,7 +17,11 @@ PALS_PER_TMPL = 100_000_000
 MAX_SUPPLY_TMPL = 250_000_000
 MAX_SUPPLY_PALS = 250_000_000 * (10 ** 8)
 
-# Block time
+# Block time (seconds)
+#
+# 3s blocks are fine, but ONLY if genesis + proposer selection are deterministic
+# across nodes. This testnet config therefore uses a FIXED genesis timestamp and
+# a CANONICAL genesis hash so all nodes share one network history.
 BLOCK_TIME = 3
 
 # Emission schedule (same as mainnet for realistic testing)
@@ -28,11 +32,13 @@ PHASE1_BLOCKS = 394_200_000
 # Fixed fee
 FEE = 50_000  # 0.0005 TMPL (50,000 pals = 0.0005 × 100,000,000)
 
-# Genesis timestamp (DYNAMIC for fresh testnet)
-# For fresh testnet: use current time when genesis node starts
-# This allows the testnet to start immediately without timing skew issues
-import time as _time
-GENESIS_TIMESTAMP = int(_time.time())  # Dynamic: use current time for fresh testnet
+# Genesis timestamp (FIXED for deterministic multi-node testnet)
+#
+# IMPORTANT: This must be identical on every node. A dynamic timestamp causes
+# each node to create a different genesis block hash → permanent forks.
+#
+# 2026-01-04 00:00:00 UTC
+GENESIS_TIMESTAMP = 1767484800
 
 # Canonical genesis block hash (SECURITY: prevents eclipse attacks)
 # Set to None for fresh testnet - the first genesis block will be accepted
@@ -40,7 +46,15 @@ GENESIS_TIMESTAMP = int(_time.time())  # Dynamic: use current time for fresh tes
 # Generated with v2 wallet (BIP-39) - FIXED ADDRESS FORMAT (44 hex chars)
 # Seed phrase: "occur twice shock opinion detail round ridge tape modify stay bargain suffer"
 # Address: tmpl7a255cb7912eed25bac00c5a2e6b5604518d2b0b2c8e
-CANONICAL_GENESIS_HASH = None  # Fresh testnet mode - accept any genesis
+# Canonical genesis block hash (SECURITY + network coherence)
+#
+# Locking this prevents nodes from silently booting a different genesis and
+# forking into a separate network.
+#
+# This hash is deterministically derived from:
+# - GENESIS_TIMESTAMP (above)
+# - GENESIS_VALIDATORS (below)
+CANONICAL_GENESIS_HASH = "107d8bd3a5cc233a68550f89a2936223482825588a467d69147fc47a8885cab0"
 
 # EPOCH-BASED CONSENSUS (for 100,000+ validator scalability)
 # TESTNET ADJUSTMENT: Shorter epochs (10 blocks = 30s) for faster testing
