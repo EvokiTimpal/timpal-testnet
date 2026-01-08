@@ -211,6 +211,20 @@ class TestnetNode:
         
         print(f"[TESTNET] Loaded validator key from {wallet_path}")
         print(f"[TESTNET] Address: {reward_address}")
+        # CRITICAL SAFETY: bootstrap wallet MUST match config.GENESIS_VALIDATORS
+        if not seed_nodes:
+            configured = list(config.GENESIS_VALIDATORS.keys())
+            if not configured:
+                raise ValueError("[FATAL] GENESIS_VALIDATORS is empty in bootstrap mode")
+
+            if reward_address != configured[0]:
+                raise ValueError(
+                    "[FATAL] Bootstrap wallet mismatch\n"
+                    f"Wallet address: {reward_address}\n"
+                    f"Config genesis: {configured[0]}\n"
+                    "Fix GENESIS_VALIDATORS or use the correct wallet."
+                )
+
         
         # SECURITY: DO NOT overwrite config.GENESIS_VALIDATORS
         # All nodes MUST use the same static GENESIS_VALIDATORS from config

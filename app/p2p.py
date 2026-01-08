@@ -656,15 +656,24 @@ class P2PNetwork:
         print(f"🌐 P2P: Starting WebSocket server on 0.0.0.0:{self.port}...")
         # CRITICAL FIX: Match client ping settings to prevent spurious disconnects
         # Both client and server must use the same ping/pong settings
-        async with websockets.serve(
-            self.handle_client, 
-            "0.0.0.0", 
-            self.port,
-            ping_interval=30,  # Send ping every 30 seconds
-            ping_timeout=60,   # Wait 60 seconds for pong before closing
-        ):
-            print(f"✅ P2P: WebSocket server listening on port {self.port}")
-            await asyncio.Future()
+        
+        try:
+            async with websockets.serve(
+                self.handle_client,
+                "0.0.0.0",
+                self.port,
+                ping_interval=30,
+                ping_timeout=60,
+            ):
+                print(f"✅ P2P: WebSocket server listening on port {self.port}")
+                await asyncio.Future()
+        except OSError as e:
+            if getattr(e, "errno", None) in (48, 98):
+                print(f"⚠️  P2P: Port {self.port} already in use. Server not started.")
+                self.is_running = False
+                return
+            raise
+
     
     def get_peer_count(self) -> int:
         return len(self.peers) + len(self.outbound_peers)
