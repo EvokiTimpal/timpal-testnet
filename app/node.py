@@ -48,7 +48,13 @@ class Node:
         self.p2p.reward_address = self.reward_address
         
         self.is_running = False
-        self.genesis_address = genesis_address or f"tmpl{'0' * 44}"
+        # CRITICAL: Never allow a zero-address fallback (phantom genesis validator)
+        if genesis_address:
+            self.genesis_address = genesis_address
+        elif is_genesis_node:
+            self.genesis_address = self.reward_address
+        else:
+            self.genesis_address = None
         self.p2p_port = p2p_port
         
         # STAGE 3: Sync gating - prevent proposing until fully synced
