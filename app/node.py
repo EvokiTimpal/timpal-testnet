@@ -24,7 +24,9 @@ class Node:
             self.device_fingerprint = None
             self.device_id = device_id or str(uuid.uuid4())
         
-        self.reward_address = reward_address or f"tmpl{hashlib.sha256(self.device_id.encode()).hexdigest()[:44]}"
+        if not reward_address:
+            raise ValueError("[FATAL] reward_address is required (must come from wallet).")
+        self.reward_address = reward_address
         self.private_key = private_key
         self.public_key = public_key
         self.data_dir = data_dir
